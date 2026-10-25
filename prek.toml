@@ -92,7 +92,7 @@ id = "changelog-lint"
 name = "CHANGELOG records user-facing changes"
 language = "system"
 entry = "uv run --frozen python tools/changelog_check.py lint"
-files = '^(CHANGELOG\.md|tools/(changelog_check|conventional)\.py)$'
+files = '^(CHANGELOG\.md|pyproject\.toml|tools/(changelog_check|conventional)\.py)$'
 pass_filenames = false
 
 [[repos.hooks]]

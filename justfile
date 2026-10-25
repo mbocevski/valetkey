@@ -20,6 +20,10 @@ check:
 test *args:
     uv run pytest {{ args }}
 
+# Cut a release from the changelog: version, commit and signed tag. Does not push.
+release version:
+    uv run python tools/release.py {{ version }}
+
 # Build the sdist and wheel.
 build:
     uv build

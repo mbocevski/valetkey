@@ -6,7 +6,8 @@
     python tools/changelog_check.py range BASE HEAD [--skip]
 
 ``lint`` checks the file: the Keep a Changelog layout, entries written as short
-sentences, and no internal or vague wording.
+sentences, no internal or vague wording, and that the newest released version is the
+version in pyproject.toml.
 
 ``commit-msg`` checks one commit while it is being made, ``range`` checks every commit
 in ``BASE..HEAD`` (a pull request). Both apply the same rules:
@@ -20,6 +21,7 @@ in ``BASE..HEAD`` (a pull request). Both apply the same rules:
 
 import re
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,6 +63,7 @@ class Linter:
         """Start before the first line."""
         self.problems: list[Problem] = []
         self.versions: list[tuple[int, int, int]] = []
+        self.newest_line = 0
         self.seen_unreleased = False
         self.section: str | None = None
         self.sections_here: list[str] = []
@@ -108,6 +111,8 @@ class Linter:
         if date is None or not DATE.match(date):
             self.fail(number, f"'{name}' needs a date: '## [{name}] - YYYY-MM-DD'")
         key = (int(semver[1]), int(semver[2]), int(semver[3]))
+        if not self.versions:
+            self.newest_line = number
         if self.versions and key >= self.versions[-1]:
             self.fail(number, "versions must go from newest to oldest")
         self.versions.append(key)
@@ -153,8 +158,12 @@ class Linter:
             self.fail(number, "only versions, sections and '- ' entries belong here")
 
 
-def lint(text: str) -> list[Problem]:
-    """Return everything in ``text`` that breaks the changelog's layout or wording rules."""
+def lint(text: str, version: str | None = None) -> list[Problem]:
+    """Return everything in ``text`` that breaks the changelog's layout or wording rules.
+
+    When ``version`` (the package version) is given and a version is released, the newest
+    release must be that version.
+    """
     lines = text.splitlines()
     linter = Linter()
     if not lines or lines[0] != "# Changelog":
@@ -164,7 +173,20 @@ def lint(text: str) -> list[Problem]:
     linter.end_section(len(lines) + 1)
     if not linter.seen_unreleased:
         linter.fail(len(lines) + 1, "there must be an '## [Unreleased]' section")
+    if version is not None and linter.versions:
+        newest = ".".join(map(str, linter.versions[0]))
+        if newest != version:
+            linter.fail(
+                linter.newest_line,
+                f"the newest release is {newest} but pyproject.toml has version {version}",
+            )
     return linter.problems
+
+
+def project_version() -> str:
+    """Return ``project.version`` from pyproject.toml."""
+    with (conventional.ROOT / "pyproject.toml").open("rb") as file:
+        return str(tomllib.load(file)["project"]["version"])
 
 
 def entry_problems(entry: str) -> list[str]:
@@ -222,7 +244,7 @@ def main(argv: list[str]) -> int:
     match argv:
         case ["lint"]:
             text = CHANGELOG.read_text()
-            return report(lint(text), f"{NAME}: ")
+            return report(lint(text, project_version()), f"{NAME}: ")
         case ["commit-msg", path]:
             commit = conventional.parse(Path(path).read_text())
             staged = conventional.staged_files()

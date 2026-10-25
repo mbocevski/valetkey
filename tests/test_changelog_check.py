@@ -183,3 +183,22 @@ def test_commit_msg(
 def test_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
     assert changelog_check.main(["range", "a", "b", "--bogus"]) == 2
     assert "changelog_check.py lint" in capsys.readouterr().err
+
+
+def test_newest_release_must_match_the_package_version() -> None:
+    body = (
+        "## [Unreleased]\n\n## [0.2.0] - 2026-11-02\n\n### Added\n\n- A thing.\n\n"
+        "## [0.1.0] - 2026-10-26\n\n### Added\n\n- Another.\n"
+    )
+    assert changelog_check.lint(INTRO + body, "0.2.0") == []
+    problems = [p.message for p in changelog_check.lint(INTRO + body, "0.1.0")]
+    assert problems == ["line 7: the newest release is 0.2.0 but pyproject.toml has version 0.1.0"]
+
+
+def test_unreleased_only_changelog_matches_any_version() -> None:
+    body = "## [Unreleased]\n\n### Added\n\n- A thing.\n"
+    assert changelog_check.lint(INTRO + body, "0.1.0") == []
+
+
+def test_project_version_is_read_from_pyproject() -> None:
+    assert changelog_check.SEMVER.match(changelog_check.project_version())

@@ -89,6 +89,12 @@ The commit type decides whether the changelog must change:
 A hook checks each commit, and CI checks every commit in a pull request. A pull request labeled
 `skip-changelog` passes without new entries.
 
+To release, run `just release X.Y.Z` on a clean worktree. It turns `## [Unreleased]` into the new
+version with today's date, sets the package version with `uv version`, commits the changelog,
+`pyproject.toml` and `uv.lock` as `chore(release): X.Y.Z`, and creates a signed tag `vX.Y.Z` that
+carries the release notes. It never pushes: it prints the push command for you to run. The lint
+fails when the newest release in the changelog differs from the version in `pyproject.toml`.
+
 ## Commits
 
 - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `ci:`, `chore:` and so on). A
