@@ -19,7 +19,9 @@ classifiers = [
     "Topic :: Security",
     "Typing :: Typed",
 ]
-dependencies = []
+dependencies = [
+    "cyclopts>=5.3.0",
+]
 
 [project.scripts]
 valetkey = "valetkey.cli:main"
@@ -71,6 +73,7 @@ error-on-warning = true
 testpaths = ["tests"]
 addopts = ["--strict-markers", "--strict-config", "-ra", "--cov", "--cov-report=term-missing"]
 xfail_strict = true
+filterwarnings = ["error"]
 markers = ["integration: needs bwrap, Chromium and agent-browser; skipped when any is missing"]
 
 [tool.coverage.run]

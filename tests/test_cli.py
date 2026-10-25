@@ -12,13 +12,18 @@ from valetkey.cli import main
 
 def test_without_arguments_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == 0
-    assert "usage: valetkey" in capsys.readouterr().out
+    assert "Usage: valetkey" in capsys.readouterr().out
+
+
+def test_help(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["--help"]) == 0
+    out = capsys.readouterr().out
+    assert "Usage: valetkey" in out
+    assert "--version" in out
 
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as exit_info:
-        main(["--version"])
-    assert exit_info.value.code == 0
+    assert main(["--version"]) == 0
     assert capsys.readouterr().out.strip() == f"valetkey {__version__}"
 
 
@@ -26,7 +31,8 @@ def test_unknown_option_is_a_usage_error(capsys: pytest.CaptureFixture[str]) -> 
     with pytest.raises(SystemExit) as exit_info:
         main(["--no-such-option"])
     assert exit_info.value.code == 2
-    assert "unrecognized arguments" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "--no-such-option" in captured.out + captured.err
 
 
 def test_module_entry_point(
@@ -36,7 +42,7 @@ def test_module_entry_point(
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_module("valetkey", run_name="__main__")
     assert exit_info.value.code == 0
-    assert "usage: valetkey" in capsys.readouterr().out
+    assert "Usage: valetkey" in capsys.readouterr().out
 
 
 def test_runs_as_a_module_in_a_subprocess() -> None:
