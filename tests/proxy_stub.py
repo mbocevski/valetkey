@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from valetkey.proxy import Proxy
+
 
 def host_of_request(head: str) -> str:
     """The host a proxy request asks for: ``CONNECT host:443`` or ``GET http://host/path``."""
@@ -92,13 +94,24 @@ class ProxyStub:
 
 
 class PageServer:
-    """A local web server for a fixed set of pages, on a free loopback port."""
+    """A local web server for fixed pages and redirects, on a free loopback port."""
 
-    def __init__(self, pages: dict[str, str]) -> None:
+    def __init__(self, pages: dict[str, str], redirects: dict[str, str] | None = None) -> None:
         encoded = {path: html.encode() for path, html in pages.items()}
+        moved = redirects or {}
+        self.hits: list[str] = []
+        """The path of every request the server received."""
+        hits = self.hits
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
+                hits.append(self.path)
+                if self.path in moved:
+                    self.send_response(302)
+                    self.send_header("Location", moved[self.path])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 body = encoded.get(self.path)
                 self.send_response(200 if body is not None else 404)
                 self.send_header("Content-Type", "text/html")
@@ -125,3 +138,41 @@ class PageServer:
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(10)
+
+
+class RunningProxy:
+    """The real allowlisting proxy, running on its own event loop in a thread."""
+
+    def __init__(self, proxy: Proxy, socket_path: Path) -> None:
+        self.proxy = proxy
+        self.socket_path = socket_path
+        self._loop = asyncio.new_event_loop()
+        self._ready = threading.Event()
+        self._stop: asyncio.Event | None = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._serve())
+
+    async def _serve(self) -> None:
+        self._stop = asyncio.Event()
+        async with self.proxy.serving(self.socket_path):
+            self._ready.set()
+            await self._stop.wait()
+
+    def refused(self) -> set[tuple[str, int]]:
+        """Every ``(host, port)`` the proxy has refused and reported so far."""
+        return {(r.host, r.port) for r in self.proxy.refused_since(0)[0]}
+
+    def __enter__(self) -> Self:
+        self._thread.start()
+        assert self._ready.wait(10)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        stop = self._stop
+        assert stop is not None
+        self._loop.call_soon_threadsafe(stop.set)
+        self._thread.join(10)
+        self._loop.close()
