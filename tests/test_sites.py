@@ -1,0 +1,589 @@
+# SPDX-License-Identifier: Apache-2.0
+import json
+import os
+import stat
+from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from valetkey import sites
+from valetkey.sites import (
+    Policy,
+    PolicyError,
+    Roots,
+    RuntimeDirUnavailableError,
+    allows,
+    choose_site_name,
+    downloads_path,
+    ensure_downloads,
+    ensure_profile,
+    ensure_runtime,
+    host_matches,
+    host_of,
+    is_plausible_host,
+    load_policy,
+    normalize_host,
+    policy_json,
+    policy_path,
+    profile_path,
+    registrable_domain,
+    roots_from_env,
+    runtime_path,
+    save_policy,
+    site_name_for,
+    validate_site_name,
+)
+
+DISK_FULL = "disk full"
+HAND_WRITTEN = """{
+  "site": "sitex",
+  "start": "https://sitex.com/",
+  "allow": [
+    "sitex.com",
+    "login.okta.com"
+  ],
+  "excluded": [
+    "o123.ingest.sentry.io"
+  ],
+  "learned": "2026-10-25T21:40:00Z"
+}
+"""
+
+
+@pytest.fixture
+def roots(tmp_path: Path) -> Roots:
+    return Roots(config=tmp_path / "config", state=tmp_path / "state", runtime=tmp_path / "run")
+
+
+def mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def policy(site: str = "sitex", **changes: Any) -> Policy:  # noqa: ANN401 - fields vary per test
+    fields: dict[str, Any] = {
+        "site": site,
+        "start": f"https://{site}.com/",
+        "allow": (f"{site}.com",),
+    }
+    fields.update(changes)
+    return Policy(**fields)
+
+
+def write_policy_file(roots: Roots, site: str, text: str) -> Path:
+    path = policy_path(roots, site)
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+# -- environment and paths -----------------------------------------------------------------
+
+
+def test_roots_from_env_uses_the_xdg_variables(tmp_path: Path) -> None:
+    env = {
+        "HOME": "/home/x",
+        "XDG_CONFIG_HOME": str(tmp_path / "c"),
+        "XDG_STATE_HOME": str(tmp_path / "s"),
+        "XDG_RUNTIME_DIR": str(tmp_path / "r"),
+    }
+    assert roots_from_env(env) == Roots(tmp_path / "c", tmp_path / "s", tmp_path / "r")
+
+
+def test_roots_from_env_defaults_under_home_and_has_no_runtime_default() -> None:
+    found = roots_from_env({"HOME": "/home/x"})
+    assert found == Roots(Path("/home/x/.config"), Path("/home/x/.local/state"), None)
+
+
+def test_roots_from_env_ignores_empty_and_relative_values() -> None:
+    env = {"HOME": "/h", "XDG_CONFIG_HOME": "", "XDG_STATE_HOME": "rel", "XDG_RUNTIME_DIR": "r"}
+    assert roots_from_env(env) == Roots(Path("/h/.config"), Path("/h/.local/state"), None)
+
+
+def test_roots_from_env_reads_the_process_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
+    found = roots_from_env()
+    assert found.config == tmp_path / ".config"
+    assert found.runtime == tmp_path / "run"
+
+
+def test_roots_from_env_falls_back_to_the_user_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert roots_from_env({}).config == tmp_path / ".config"
+
+
+def test_paths_follow_the_documented_layout(roots: Roots) -> None:
+    assert policy_path(roots, "sitex") == roots.config / "valetkey/sites/sitex.json"
+    assert profile_path(roots, "sitex") == roots.state / "valetkey/profiles/sitex"
+    assert downloads_path(roots, "sitex") == roots.state / "valetkey/downloads/sitex"
+    assert runtime_path(roots) == Path(f"{roots.runtime}/valetkey")
+
+
+def test_runtime_path_fails_without_a_runtime_dir() -> None:
+    with pytest.raises(RuntimeDirUnavailableError, match="XDG_RUNTIME_DIR"):
+        runtime_path(Roots(Path("/c"), Path("/s"), None))
+    with pytest.raises(RuntimeDirUnavailableError):
+        ensure_runtime(Roots(Path("/c"), Path("/s"), None))
+
+
+def test_path_functions_reject_bad_names(roots: Roots) -> None:
+    for function in (policy_path, profile_path, downloads_path):
+        with pytest.raises(ValueError, match="invalid site name"):
+            function(roots, "../evil")
+
+
+def test_ensure_creates_private_directories(roots: Roots) -> None:
+    for path in (
+        ensure_profile(roots, "sitex"),
+        ensure_downloads(roots, "sitex"),
+        ensure_runtime(roots),
+    ):
+        assert path.is_dir()
+        assert mode(path) == 0o700
+    assert mode(roots.state / "valetkey" / "profiles") == 0o700
+    assert mode(roots.state / "valetkey") == 0o700
+
+
+def test_ensure_tightens_an_open_directory(roots: Roots) -> None:
+    path = profile_path(roots, "sitex")
+    path.mkdir(parents=True)
+    path.chmod(0o755)
+    path.parent.chmod(0o750)
+    assert ensure_profile(roots, "sitex") == path
+    assert mode(path) == 0o700
+    assert mode(path.parent) == 0o700
+
+
+def test_ensure_is_idempotent_and_keeps_contents(roots: Roots) -> None:
+    path = ensure_profile(roots, "sitex")
+    (path / "cookie").write_text("x", encoding="utf-8")
+    ensure_profile(roots, "sitex")
+    assert (path / "cookie").read_text(encoding="utf-8") == "x"
+
+
+def test_ensure_rejects_a_symlink_and_a_file(roots: Roots, tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    link = profile_path(roots, "linked")
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+    with pytest.raises(NotADirectoryError):
+        ensure_profile(roots, "linked")
+    plain = profile_path(roots, "plain")
+    plain.write_text("", encoding="utf-8")
+    with pytest.raises(NotADirectoryError):
+        ensure_profile(roots, "plain")
+
+
+def test_ensure_rejects_a_directory_of_another_user(
+    roots: Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ensure_profile(roots, "sitex")
+    monkeypatch.setattr(os, "getuid", lambda: roots.state.stat().st_uid + 1)
+    with pytest.raises(PermissionError, match="another user"):
+        ensure_profile(roots, "sitex")
+
+
+# -- names ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "name"),
+    [
+        ("sitex.com", "sitex"),
+        ("SiteX.COM.", "sitex"),
+        ("https://sitex.com/login", "sitex"),
+        ("https://user@app.sitex.com:8443/a?b#c", "sitex"),
+        ("app.sitex.co.uk", "sitex"),
+        ("http://www.sitex.com.au/x", "sitex"),
+        ("localhost", "localhost"),
+        ("a.b.c.d.example.org", "example"),
+        ("xn--bcher-kva.example", "xn--bcher-kva"),
+        ("sitex.com:8080/path", "sitex"),
+        ("[::1]", None),
+        ("1.2.3.4", None),
+    ],
+)
+def test_site_name_for(value: str, name: str | None) -> None:
+    if name is None:
+        with pytest.raises(ValueError, match="IP address"):
+            site_name_for(value)
+    else:
+        assert site_name_for(value) == name
+
+
+def test_site_name_for_cuts_a_long_label() -> None:
+    name = site_name_for(f"{'a' * 39}-{'b' * 20}.com")
+    assert name == "a" * 39
+    assert validate_site_name(name) == name
+
+
+def test_site_name_for_takes_custom_suffixes() -> None:
+    assert site_name_for("app.sitex.example.com") == "example"
+    assert site_name_for("app.sitex.example.com", frozenset({"example.com"})) == "sitex"
+
+
+@pytest.mark.parametrize("value", ["", "   ", "http://", "https:///path", "http://[::1", "a b.com"])
+def test_site_name_for_rejects_values_without_a_host(value: str) -> None:
+    with pytest.raises(ValueError, match="cannot read a host"):
+        site_name_for(value)
+
+
+def test_host_of_reads_hosts_and_urls() -> None:
+    assert host_of(" HTTPS://App.SiteX.com:443/x ") == "app.sitex.com"
+    assert host_of("http://[::1]:8080/") == "::1"
+    assert host_of("sitex.com/login") == "sitex.com"
+
+
+def test_registrable_domain() -> None:
+    assert registrable_domain("app.sitex.co.uk") == "sitex.co.uk"
+    assert registrable_domain("a.b.sitex.com.") == "sitex.com"
+    assert registrable_domain("sitex.com") == "sitex.com"
+    assert registrable_domain("localhost") == "localhost"
+    assert registrable_domain("10.0.0.1") == "10.0.0.1"
+
+
+@pytest.mark.parametrize("name", ["a", "sitex", "site-x", "a-", "0", "9lives", "a" * 48])
+def test_valid_site_names(name: str) -> None:
+    assert validate_site_name(name) == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        ".",
+        "..",
+        "../x",
+        "x/..",
+        "a/b",
+        "/etc",
+        "a\\b",
+        "\\",
+        "-x",
+        "-",
+        "Sitex",
+        "site x",
+        "site_x",
+        "site.x",
+        "x\n",
+        "x\0",
+        "a" * 49,
+        "sité",
+        "\uff53itex",
+        "sitex\u202e",
+        "\u212a",
+        "\u2179",
+        "\u0663",
+    ],
+)
+def test_invalid_site_names_are_rejected(name: str) -> None:
+    with pytest.raises(ValueError, match="invalid site name"):
+        validate_site_name(name)
+
+
+def test_validate_site_name_rejects_non_strings() -> None:
+    with pytest.raises(ValueError, match="invalid site name"):
+        validate_site_name(None)  # ty: ignore[invalid-argument-type]
+
+
+def test_choose_site_name_uses_a_free_name(roots: Roots) -> None:
+    assert choose_site_name(roots, "https://sitex.com/") == "sitex"
+
+
+def test_choose_site_name_reuses_a_site_for_the_same_domain(roots: Roots) -> None:
+    save_policy(roots, policy("sitex"))
+    assert choose_site_name(roots, "app.sitex.com") == "sitex"
+
+
+def test_choose_site_name_numbers_a_different_domain(roots: Roots) -> None:
+    save_policy(roots, policy("sitex"))
+    assert choose_site_name(roots, "sitex.org") == "sitex-2"
+    save_policy(roots, policy("sitex-2", start="https://sitex.org/", allow=("sitex.org",)))
+    assert choose_site_name(roots, "sitex.net") == "sitex-3"
+    assert choose_site_name(roots, "sitex.org") == "sitex-2"
+
+
+def test_choose_site_name_treats_a_profile_without_policy_as_taken(roots: Roots) -> None:
+    ensure_profile(roots, "sitex")
+    assert choose_site_name(roots, "sitex.com") == "sitex-2"
+
+
+def test_choose_site_name_treats_a_broken_policy_as_another_domain(roots: Roots) -> None:
+    write_policy_file(roots, "sitex", "not json")
+    assert choose_site_name(roots, "sitex.com") == "sitex-2"
+
+
+# -- host matching -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("sitex.com", True),
+        ("SITEX.COM", True),
+        ("sitex.com.", True),
+        ("login.sitex.com", True),
+        ("a.b.c.sitex.com", True),
+        ("notsitex.com", False),
+        ("sitex.com.evil.org", False),
+        ("sitex.co", False),
+        ("com", False),
+        ("evil-sitex.com", False),
+        (".sitex.com", False),
+        ("a..sitex.com", False),
+        ("", False),
+        (".", False),
+        ("sitex.com:443", False),
+        ("sitex.com/", False),
+        ("sitex.com\u212a", False),
+    ],
+)
+def test_host_matching_on_a_dot_boundary(host: str, expected: bool) -> None:  # noqa: FBT001
+    assert host_matches(host, ["sitex.com"]) is expected
+
+
+def test_ip_literals_match_only_exactly() -> None:
+    entries = ["10.0.0.1", "0.1", "sitex.com"]
+    assert host_matches("10.0.0.1", entries)
+    assert not host_matches("10.0.0.1", ["0.0.1", "1"])
+    assert not host_matches("10.0.0.2", entries)
+    assert not host_matches("[::1]", entries)
+    assert not host_matches("::1", ["1"])
+
+
+def test_ip_entries_are_not_suffixes_of_domains() -> None:
+    assert not host_matches("x.10.0.0.1", ["10.0.0.1"])
+    assert host_matches("10.0.0.1", ["10.0.0.1"])
+
+
+def test_ipv6_brackets_are_stripped() -> None:
+    assert normalize_host("[::1]") == "::1"
+    assert normalize_host("[2001:DB8::1]") == "2001:db8::1"
+
+
+def test_normalize_host() -> None:
+    assert normalize_host("SiteX.COM.") == "sitex.com"
+    assert normalize_host("") == ""
+    assert normalize_host("\u212a") == "\u212a"
+
+
+def test_plausible_hosts() -> None:
+    for good in ("sitex.com", "a-b.c1.io", "localhost", "10.0.0.1", "2001:db8::1", "::1"):
+        assert is_plausible_host(good), good
+    for bad in (
+        "",
+        "Sitex.com",
+        "https://sitex.com",
+        "sitex.com/x",
+        "sitex.com:80",
+        "-a.com",
+        "a-.com",
+        "a..com",
+        ".a.com",
+        "a.com.",
+        "*.a.com",
+        "a_b.com",
+        "a b",
+        "é.com",
+        "a" * 64 + ".com",
+        ("a" * 60 + ".") * 5 + "com",
+        "[::1]",
+        "::G",
+    ):
+        assert not is_plausible_host(bad), bad
+
+
+def test_allows_checks_allow_and_excluded() -> None:
+    pol = policy(
+        allow=("sitex.com", "login.okta.com"),
+        excluded=("track.sitex.com", "o1.ingest.sentry.io"),
+    )
+    assert allows(pol, "sitex.com")
+    assert allows(pol, "cdn.sitex.com")
+    assert allows(pol, "LOGIN.okta.com.")
+    assert not allows(pol, "okta.com")
+    assert not allows(pol, "track.sitex.com")
+    assert not allows(pol, "x.track.sitex.com")
+    assert not allows(pol, "o1.ingest.sentry.io")
+    assert not allows(pol, "notsitex.com")
+    assert not allows(pol, "")
+
+
+def test_allows_nothing_with_an_empty_policy() -> None:
+    assert not allows(policy(allow=()), "sitex.com")
+
+
+# -- policy model --------------------------------------------------------------------------
+
+
+def test_policy_is_immutable() -> None:
+    pol = policy()
+    with pytest.raises(AttributeError):
+        pol.site = "other"  # ty: ignore[invalid-assignment]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"site": "../x"},
+        {"start": "ftp://sitex.com/"},
+        {"start": "sitex.com"},
+        {"start": "https:///x"},
+        {"start": "https://u:p@sitex.com/"},
+        {"start": "https://sitex.com:bad/"},
+        {"start": "https://[::1/"},
+        {"start": "https://a b.com/"},
+        {"allow": ("Sitex.com",)},
+        {"allow": ("https://sitex.com",)},
+        {"allow": ("sitex.com/x",)},
+        {"allow": ("sitex.com:443",)},
+        {"allow": ("",)},
+        {"allow": (5,)},
+        {"excluded": ("*.x.com",)},
+        {"learned": datetime(2026, 1, 1, tzinfo=timezone(timedelta(hours=2)))},
+        {"learned": datetime(2026, 1, 1)},  # noqa: DTZ001
+        {"learned": datetime(2026, 1, 1, 0, 0, 0, 5, tzinfo=UTC)},
+    ],
+)
+def test_policy_rejects_bad_fields(changes: dict[str, Any]) -> None:
+    with pytest.raises((ValueError, AttributeError)):
+        policy(**changes)
+
+
+def test_policy_accepts_http_ports_and_ip_starts() -> None:
+    assert policy(start="http://127.0.0.1:8080/app").start == "http://127.0.0.1:8080/app"
+    assert policy(start="https://[::1]:8443/").start == "https://[::1]:8443/"
+
+
+# -- load and save -------------------------------------------------------------------------
+
+
+def test_hand_written_file_loads(roots: Roots) -> None:
+    write_policy_file(roots, "sitex", HAND_WRITTEN)
+    loaded = load_policy(roots, "sitex")
+    assert loaded == Policy(
+        site="sitex",
+        start="https://sitex.com/",
+        allow=("sitex.com", "login.okta.com"),
+        excluded=("o123.ingest.sentry.io",),
+        learned=datetime(2026, 10, 25, 21, 40, tzinfo=UTC),
+    )
+
+
+def test_round_trip_is_stable(roots: Roots) -> None:
+    path = write_policy_file(roots, "sitex", HAND_WRITTEN)
+    loaded = load_policy(roots, "sitex")
+    assert policy_json(loaded) == HAND_WRITTEN
+    path.unlink()
+    assert save_policy(roots, loaded) == path
+    assert path.read_text(encoding="utf-8") == HAND_WRITTEN
+    assert load_policy(roots, "sitex") == loaded
+
+
+def test_null_learned_and_empty_lists_round_trip(roots: Roots) -> None:
+    original = policy(allow=(), excluded=(), learned=None)
+    save_policy(roots, original)
+    assert load_policy(roots, "sitex") == original
+    assert '"learned": null' in policy_json(original)
+
+
+def test_save_sets_modes(roots: Roots) -> None:
+    path = save_policy(roots, policy())
+    assert mode(path) == 0o600
+    assert mode(path.parent) == 0o700
+    assert mode(path.parent.parent) == 0o700
+    assert [p.name for p in path.parent.iterdir()] == ["sitex.json"]
+
+
+def test_save_replaces_the_old_file(roots: Roots) -> None:
+    save_policy(roots, policy())
+    save_policy(roots, policy(allow=("sitex.com", "cdn.example.net")))
+    assert load_policy(roots, "sitex").allow == ("sitex.com", "cdn.example.net")
+
+
+def test_failed_write_leaves_the_old_file_intact(
+    roots: Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = save_policy(roots, policy())
+    before = path.read_bytes()
+
+    def fail(_descriptor: int) -> None:
+        raise OSError(DISK_FULL)
+
+    monkeypatch.setattr(os, "fsync", fail)
+    with pytest.raises(OSError, match="disk full"):
+        save_policy(roots, policy(allow=("other.example",)))
+    monkeypatch.undo()
+    assert path.read_bytes() == before
+    assert [p.name for p in path.parent.iterdir()] == ["sitex.json"]
+
+
+def test_failed_first_write_leaves_no_file(roots: Roots, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(_source: object, _target: object) -> None:
+        raise OSError(DISK_FULL)
+
+    monkeypatch.setattr(Path, "replace", fail)
+    with pytest.raises(OSError, match="disk full"):
+        save_policy(roots, policy())
+    monkeypatch.undo()
+    assert list(policy_path(roots, "sitex").parent.iterdir()) == []
+
+
+def test_missing_file_raises_file_not_found(roots: Roots) -> None:
+    with pytest.raises(FileNotFoundError):
+        load_policy(roots, "sitex")
+
+
+def good(**changes: object) -> str:
+    data: dict[str, object] = json.loads(HAND_WRITTEN)
+    data.update(changes)
+    return json.dumps(data)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("", "Expecting value"),
+        ("{", "Expecting"),
+        ("[]", "exactly the keys"),
+        ("null", "exactly the keys"),
+        ('{"site": "sitex"}', "exactly the keys"),
+        (good(extra=1), "exactly the keys"),
+        (good(site="other"), "named for"),
+        (good(site=5), "named for"),
+        (good(start=5), "start must be a string"),
+        (good(start="ftp://sitex.com"), "http or https"),
+        (good(allow="sitex.com"), "allow must be a list"),
+        (good(allow=["sitex.com", 5]), "allow must be a list"),
+        (good(allow=["Sitex.com"]), "plausible host"),
+        (good(excluded=None), "excluded must be a list"),
+        (good(learned="yesterday"), "learned must be"),
+        (good(learned=5), "learned must be"),
+        (good(learned="2026-10-25T21:40:00+00:00"), "learned must be"),
+        (good(learned="2026-13-25T21:40:00Z"), "month"),
+    ],
+)
+def test_invalid_policy_files_are_rejected(roots: Roots, text: str, message: str) -> None:
+    write_policy_file(roots, "sitex", text)
+    with pytest.raises(PolicyError, match=message) as info:
+        load_policy(roots, "sitex")
+    assert "sitex.json" in str(info.value)
+
+
+def test_invalid_utf8_is_a_policy_error(roots: Roots) -> None:
+    path = write_policy_file(roots, "sitex", "")
+    path.write_bytes(b"\xff\xfe")
+    with pytest.raises(ValueError, match="codec"):
+        load_policy(roots, "sitex")
+
+
+def test_module_exports_are_importable() -> None:
+    assert {"co.uk", "com.au"} <= sites.TWO_LEVEL_SUFFIXES
