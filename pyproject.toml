@@ -65,12 +65,20 @@ notice-rgx = "SPDX-License-Identifier: Apache-2.0"
     "PLR2004", # literal values are the point of a test
     "S101",    # pytest asserts
 ]
+"tools/**" = [
+    "INP001", # standalone scripts, not a package
+    "T201",   # command-line tools report on stderr with print
+]
+
+[tool.ty.environment]
+extra-paths = ["tools"]
 
 [tool.ty.terminal]
 error-on-warning = true
 
 [tool.pytest]
 testpaths = ["tests"]
+pythonpath = ["tools"]
 addopts = ["--strict-markers", "--strict-config", "-ra", "--cov", "--cov-report=term-missing"]
 xfail_strict = true
 filterwarnings = ["error"]
@@ -78,9 +86,10 @@ markers = ["integration: needs bwrap, Chromium and agent-browser; skipped when a
 
 [tool.coverage.run]
 branch = true
-source = ["valetkey"]
+source = ["valetkey", "tools"]
 
 [tool.coverage.report]
 fail_under = 90
 show_missing = true
 skip_covered = true
+exclude_also = ["if __name__ == .__main__.:"]

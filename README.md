@@ -11,6 +11,20 @@ anywhere else.
 
 Early development. Nothing here is usable yet: the `valetkey` command only prints its version.
 
+## Usage
+
+<!-- begin: valetkey --help -->
+```text
+Usage: valetkey
+
+A logged-in browser for MCP clients, contained to the sites it may reach.
+
+Commands:
+  --help, -h: Display this message and exit.
+  --version: Display application version.
+```
+<!-- end: valetkey --help -->
+
 ## How it will work
 
 - **You log in, once.** valetkey opens an ordinary browser window on your desktop. You sign in,

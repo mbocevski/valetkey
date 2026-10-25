@@ -46,6 +46,17 @@ Vale checks Markdown files and Python comments. Write plain, specific prose: say
 does and why. No filler words, emoji, references to planning tools or issue numbers, or mentions
 of the tools used to write the code.
 
+## README
+
+`README.md` is for users. Two hooks keep it current:
+
+- Blocks between `<!-- begin: valetkey ARGS -->` and `<!-- end: valetkey ARGS -->` hold the
+  output of `valetkey ARGS`, and the stated Python version must match `requires-python`. When a
+  block is stale the commit fails; run `uv run python tools/readme_check.py facts --fix` and
+  review the result. To document a new command's help, add a pair of markers for it.
+- A `feat` commit or a breaking change (`!`, `BREAKING CHANGE:`) must stage `README.md`. If the
+  README is still accurate, add a `Docs: none` trailer to the commit message instead.
+
 ## Commits
 
 - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `ci:`, `chore:` and so on). A

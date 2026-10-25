@@ -65,6 +65,21 @@ entry = "uv run --frozen zizmor --offline"
 files = '^\.github/'
 
 [[repos.hooks]]
+id = "readme-facts"
+name = "README matches the code"
+language = "system"
+entry = "uv run --frozen python tools/readme_check.py facts"
+files = '^(README\.md|pyproject\.toml|src/.*|tools/readme_check\.py)$'
+pass_filenames = false
+
+[[repos.hooks]]
+id = "readme-impact"
+name = "README updated for user-visible changes"
+language = "system"
+entry = "uv run --frozen python tools/readme_check.py commit-msg"
+stages = ["commit-msg"]
+
+[[repos.hooks]]
 id = "conventional-commit"
 name = "conventional commit message"
 language = "pygrep"
