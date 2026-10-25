@@ -1,0 +1,73 @@
+default_install_hook_types = ["pre-commit", "commit-msg"]
+
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "mixed-line-ending", args = ["--fix=lf"] },
+  { id = "check-yaml" },
+  { id = "check-toml" },
+  { id = "check-json" },
+  { id = "check-merge-conflict" },
+  { id = "check-case-conflict" },
+  { id = "check-added-large-files" },
+  { id = "check-executables-have-shebangs" },
+  { id = "check-shebang-scripts-are-executable" },
+  { id = "detect-private-key" },
+]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "uv-lock"
+name = "uv lock is current"
+language = "system"
+entry = "uv lock --check"
+files = '^(pyproject\.toml|uv\.lock)$'
+pass_filenames = false
+
+[[repos.hooks]]
+id = "ruff-format"
+name = "ruff format"
+language = "system"
+entry = "uv run --frozen ruff format"
+types_or = ["python", "pyi"]
+
+[[repos.hooks]]
+id = "ruff-check"
+name = "ruff check"
+language = "system"
+entry = "uv run --frozen ruff check --fix --exit-non-zero-on-fix"
+types_or = ["python", "pyi"]
+
+[[repos.hooks]]
+id = "ty"
+name = "ty check"
+language = "system"
+entry = "uv run --frozen ty check"
+types_or = ["python", "pyi"]
+pass_filenames = false
+
+[[repos.hooks]]
+id = "vale"
+name = "vale"
+language = "system"
+entry = "uv run --frozen vale"
+files = '\.(md|py)$'
+
+[[repos.hooks]]
+id = "zizmor"
+name = "zizmor"
+language = "system"
+entry = "uv run --frozen zizmor --offline"
+files = '^\.github/'
+
+[[repos.hooks]]
+id = "conventional-commit"
+name = "conventional commit message"
+language = "pygrep"
+entry = '\A(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9-]+\))?!?: \S'
+args = ["--negate"]
+stages = ["commit-msg"]

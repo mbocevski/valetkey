@@ -1,0 +1,15 @@
+# Planning happens outside the repository. Code and docs say what is true now,
+# not which item of a plan they belong to.
+extends: existence
+message: "Remove '%s': keep planning references out of code and docs."
+level: error
+ignorecase: false
+nonword: true
+tokens:
+  - '\b(?:TODO|FIXME|XXX|HACK)\b'
+  - '\b[A-Z][A-Z0-9]{1,9}-\d+\b'
+  - '(?i)\b(?:backlog|ticket|sprint|story points?)\b'
+  - '(?i)\b(?:task|step|phase|milestone)\s+#?\d+\b'
+# Standard identifiers that look like tracker keys.
+exceptions:
+  - '(?:UTF|SHA|ISO|CVE|RFC|PEP|AES|RSA|TLS|HTTP|X)-\d+'

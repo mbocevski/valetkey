@@ -1,0 +1,43 @@
+# Words that make prose longer without making it say more.
+extends: existence
+message: "'%s' is filler: say the specific thing instead."
+level: error
+ignorecase: true
+tokens:
+  - delve
+  - delves
+  - delving
+  - seamless
+  - seamlessly
+  - effortless
+  - effortlessly
+  - leverage
+  - leverages
+  - leveraging
+  - robust
+  - comprehensive
+  - cutting-edge
+  - state-of-the-art
+  - game-changer
+  - game-changing
+  - supercharge
+  - unlock the power
+  - harness the power
+  - empower
+  - empowers
+  - elevate
+  - elevates
+  - tapestry
+  - realm
+  - embark
+  - in today's
+  - it's worth noting
+  - it is worth noting
+  - it's important to note
+  - it is important to note
+  - furthermore
+  - moreover
+  - blazing fast
+  - blazingly fast
+  - next-level
+  - world-class

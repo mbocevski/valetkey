@@ -1,0 +1,15 @@
+valetkey
+[Aa]llowlist(s|ed|ing)?
+argv
+[Bb]ubblewrap
+bwrap
+[Cc]hromium
+CLI
+MCP
+namespaces?
+prek
+pytest
+stdio
+ty
+uv
+Wayland
