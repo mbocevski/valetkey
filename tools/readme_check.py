@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import conventional
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -42,11 +44,6 @@ BLOCK = re.compile(
     r"(?P<end><!-- end: valetkey(?P=args) -->)",
     re.DOTALL,
 )
-HEADER = re.compile(
-    r"\A(?P<type>[a-z]+)(?:\([a-z0-9-]+\))?(?P<bang>!)?: ",
-)
-BREAKING_FOOTER = re.compile(r"^BREAKING[ -]CHANGE: ", re.MULTILINE)
-NO_DOCS_TRAILER = re.compile(r"^Docs: none$", re.MULTILINE | re.IGNORECASE)
 HELP_WIDTH = "80"
 
 MAX_WORDS = 700
@@ -198,15 +195,14 @@ def style() -> int:
 
 def needs_readme(message: str) -> bool:
     """Return whether a commit with ``message`` changes what users can do."""
-    header = HEADER.match(message)
-    if header is None:
-        return False
-    return header["type"] == "feat" or bool(header["bang"]) or bool(BREAKING_FOOTER.search(message))
+    commit = conventional.parse(message)
+    return commit.type == "feat" or commit.breaking
 
 
 def commit_msg(message: str, staged: list[str]) -> int:
     """Fail a user-visible commit that leaves the README untouched without saying so."""
-    if not needs_readme(message) or "README.md" in staged or NO_DOCS_TRAILER.search(message):
+    no_docs = conventional.parse(message).has_trailer("Docs", "none")
+    if not needs_readme(message) or "README.md" in staged or no_docs:
         return 0
     print(
         "This commit changes what users can do, but README.md is not staged.\n"
