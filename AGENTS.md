@@ -43,12 +43,18 @@ To run the CI workflow locally, use `just ci`. It needs Docker and
 ## Writing
 
 Vale checks Markdown files and Python comments. Write plain, specific prose: say what the code
-does and why. No filler words, emoji, references to planning tools or issue numbers, or mentions
-of the tools used to write the code.
+does and why. No filler words, stock phrases, praise words, emoji, references to planning tools or
+issue numbers, or mentions of the tools used to write the code. Keep sentences under 35 words, use
+at most one em dash per paragraph, and write headings in sentence case.
 
 ## README
 
-`README.md` is for users. Two hooks keep it current:
+`README.md` is for users, and it stays short. A hook caps it at 700 words of prose and 8 sections.
+It also rejects boilerplate sections ("Features", "Overview", "Why valetkey"), list items that
+open with a bold label, lists nested more than one level, horizontal rules and more than 3 badges.
+When something needs more room than that, it belongs in its own page, not the README.
+
+Two more hooks keep it current:
 
 - Blocks between `<!-- begin: valetkey ARGS -->` and `<!-- end: valetkey ARGS -->` hold the
   output of `valetkey ARGS`, and the stated Python version must match `requires-python`. When a

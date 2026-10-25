@@ -2,12 +2,18 @@
 """Keep README.md in step with the code.
 
     python tools/readme_check.py facts [--fix]
+    python tools/readme_check.py style
     python tools/readme_check.py commit-msg MESSAGE_FILE
 
 ``facts`` checks what the README states about the code. A block between
 ``<!-- begin: valetkey ARGS -->`` and ``<!-- end: valetkey ARGS -->`` must hold the
 output of ``valetkey ARGS`` in a ``text`` code fence; ``--fix`` rewrites stale blocks.
 The README must also state the Python version that ``requires-python`` sets.
+
+``style`` keeps the README short and plain. It caps the prose at a word budget and
+the number of sections, and rejects the habits that pad a README: boilerplate
+sections, list items that open with a bold label, deeply nested lists, horizontal
+rules and walls of badges. Vale checks the wording; this checks the shape.
 
 ``commit-msg`` checks whether a commit should have changed the README. A ``feat``
 commit or a breaking change alters what users can do, so it must stage README.md,
@@ -43,10 +49,29 @@ BREAKING_FOOTER = re.compile(r"^BREAKING[ -]CHANGE: ", re.MULTILINE)
 NO_DOCS_TRAILER = re.compile(r"^Docs: none$", re.MULTILINE | re.IGNORECASE)
 HELP_WIDTH = "80"
 
+MAX_WORDS = 700
+MAX_SECTIONS = 8
+MAX_BADGES = 3
+FENCE = re.compile(r"^```.*?^```[^\n]*$", re.MULTILINE | re.DOTALL)
+COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9'\u2019-]*")
+SECTION = re.compile(r"^## ", re.MULTILINE)
+BOILERPLATE = re.compile(
+    r"^#{1,6}\s+(?:(?:key\s+)?features|overview|introduction|why\s+valetkey\b.*|conclusion"
+    r"|summary|table\s+of\s+contents)\s*\??$",
+    re.MULTILINE | re.IGNORECASE,
+)
+BOLD_LABEL_ITEM = re.compile(
+    r"^[ \t]*(?:[-*+]|\d+[.)])\s+(?:\*\*|__)[^*_\n]+(?:\*\*|__)", re.MULTILINE
+)
+DEEP_ITEM = re.compile(r"^(?: {4,}|\t+)(?:[-*+]|\d+[.)])\s", re.MULTILINE)
+RULE = re.compile(r"^ {0,3}(?:-{3,}|\*{3,}|_{3,})\s*$", re.MULTILINE)
+BADGE = re.compile(r"!\[[^\]]*\]\(https?://[^)]*(?:shields\.io|badge)[^)]*\)")
+
 
 @dataclass(frozen=True)
 class Problem:
-    """Something in the README that no longer matches the code."""
+    """Something in the README that needs fixing."""
 
     message: str
 
@@ -122,6 +147,55 @@ def facts(*, fix: bool) -> int:
     return 1 if problems else 0
 
 
+def line_of(text: str, index: int) -> int:
+    """Return the 1-based line number of ``index`` in ``text``."""
+    return text.count("\n", 0, index) + 1
+
+
+def check_style(readme: str) -> list[Problem]:
+    """Return what makes the README longer or noisier than it needs to be."""
+    prose = COMMENT.sub("", FENCE.sub("", BLOCK.sub("", readme)))
+    problems: list[Problem] = []
+
+    words = len(WORD.findall(prose))
+    if words > MAX_WORDS:
+        problems.append(Problem(f"{words} words of prose; the budget is {MAX_WORDS}"))
+    sections = len(SECTION.findall(prose))
+    if sections > MAX_SECTIONS:
+        problems.append(Problem(f"{sections} sections; the budget is {MAX_SECTIONS}"))
+    badges = len(BADGE.findall(prose))
+    if badges > MAX_BADGES:
+        problems.append(Problem(f"{badges} badges; at most {MAX_BADGES}"))
+
+    rules = (
+        (BOILERPLATE, "boilerplate section; put the content where a reader looks for it"),
+        (BOLD_LABEL_ITEM, "list item opens with a bold label; write the sentence plainly"),
+        (DEEP_ITEM, "list nested more than one level; flatten it or use prose"),
+        (RULE, "horizontal rule; headings already separate sections"),
+    )
+    # Line numbers refer to the README as written, so match against it, skipping code.
+    hidden = [
+        (m.start(), m.end())
+        for pattern in (BLOCK, FENCE, COMMENT)
+        for m in pattern.finditer(readme)
+    ]
+    problems.extend(
+        Problem(f"line {line_of(readme, match.start())}: {message}")
+        for pattern, message in rules
+        for match in pattern.finditer(readme)
+        if not any(start <= match.start() < end for start, end in hidden)
+    )
+    return problems
+
+
+def style() -> int:
+    """Check that the README stays short and plain."""
+    problems = check_style(README.read_text())
+    for problem in problems:
+        print(f"README.md: {problem.message}", file=sys.stderr)
+    return 1 if problems else 0
+
+
 def needs_readme(message: str) -> bool:
     """Return whether a commit with ``message`` changes what users can do."""
     header = HEADER.match(message)
@@ -155,12 +229,14 @@ def staged_files() -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    """Dispatch to ``facts`` or ``commit-msg``."""
+    """Dispatch to ``facts``, ``style`` or ``commit-msg``."""
     match argv:
         case ["facts"]:
             return facts(fix=False)
         case ["facts", "--fix"]:
             return facts(fix=True)
+        case ["style"]:
+            return style()
         case ["commit-msg", path]:
             return commit_msg(Path(path).read_text(), staged_files())
         case _:

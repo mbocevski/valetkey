@@ -136,3 +136,81 @@ def test_main_runs_facts() -> None:
 
 def test_main_runs_facts_fix_on_a_current_readme() -> None:
     assert readme_check.main(["facts", "--fix"]) == 0
+
+
+def messages(readme: str) -> list[str]:
+    return [p.message for p in readme_check.check_style(readme)]
+
+
+def test_plain_readme_passes_style() -> None:
+    readme = "# x\n\nOne plain paragraph.\n\n## Usage\n\n- a short item\n  - one level down\n"
+    assert messages(readme) == []
+
+
+def test_word_budget() -> None:
+    readme = "word " * (readme_check.MAX_WORDS + 1)
+    assert messages(readme) == [f"701 words of prose; the budget is {readme_check.MAX_WORDS}"]
+
+
+def test_code_and_generated_blocks_do_not_count() -> None:
+    filler = "word " * (readme_check.MAX_WORDS + 1)
+    readme = f"```text\n{filler}\n```\n" + block("--help", f"```text\n{filler}```\n") + "\n"
+    assert messages(readme) == []
+
+
+def test_section_budget() -> None:
+    readme = "".join(f"## s{i}\n\ntext\n\n" for i in range(readme_check.MAX_SECTIONS + 1))
+    assert messages(readme) == [f"9 sections; the budget is {readme_check.MAX_SECTIONS}"]
+
+
+def test_badge_budget() -> None:
+    badge = "![ci](https://img.shields.io/badge/ci-passing-green)"
+    assert messages(badge * 4) == [f"4 badges; at most {readme_check.MAX_BADGES}"]
+
+
+@pytest.mark.parametrize(
+    "heading", ["## Features", "## Key features", "## Overview", "### Why valetkey?", "## Summary"]
+)
+def test_boilerplate_sections(heading: str) -> None:
+    assert messages(f"# x\n\n{heading}\n\ntext\n") == [
+        "line 3: boilerplate section; put the content where a reader looks for it"
+    ]
+
+
+@pytest.mark.parametrize(
+    "item", ["- **Fast:** it is fast", "1. **Step one.** do it", "* __Bold__ x"]
+)
+def test_bold_label_items(item: str) -> None:
+    assert messages(f"# x\n\n{item}\n") == [
+        "line 3: list item opens with a bold label; write the sentence plainly"
+    ]
+
+
+def test_deeply_nested_list() -> None:
+    readme = "- a\n  - b\n    - c\n"
+    assert messages(readme) == ["line 3: list nested more than one level; flatten it or use prose"]
+
+
+def test_horizontal_rule() -> None:
+    assert messages("# x\n\ntext\n\n---\n\nmore\n") == [
+        "line 5: horizontal rule; headings already separate sections"
+    ]
+
+
+def test_rules_inside_code_are_ignored() -> None:
+    readme = "```md\n## Features\n- **Bold:** x\n---\n```\n"
+    assert messages(readme) == []
+
+
+def test_style_on_this_repository() -> None:
+    assert readme_check.main(["style"]) == 0
+
+
+def test_style_reports_problems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    readme = tmp_path / "README.md"
+    readme.write_text("## Overview\n")
+    monkeypatch.setattr(readme_check, "README", readme)
+    assert readme_check.style() == 1
+    assert "README.md: line 1: boilerplate section" in capsys.readouterr().err

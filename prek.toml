@@ -73,6 +73,14 @@ files = '^(README\.md|pyproject\.toml|src/.*|tools/readme_check\.py)$'
 pass_filenames = false
 
 [[repos.hooks]]
+id = "readme-style"
+name = "README stays short and plain"
+language = "system"
+entry = "uv run --frozen python tools/readme_check.py style"
+files = '^(README\.md|tools/readme_check\.py)$'
+pass_filenames = false
+
+[[repos.hooks]]
 id = "readme-impact"
 name = "README updated for user-visible changes"
 language = "system"

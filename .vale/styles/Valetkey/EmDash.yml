@@ -1,0 +1,7 @@
+# A paragraph that needs more than one em dash needs shorter sentences.
+extends: occurrence
+message: "More than one em dash in a paragraph: split the sentence instead."
+level: error
+scope: paragraph
+max: 1
+token: "—"

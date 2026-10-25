@@ -1,0 +1,31 @@
+# Stock phrases that stand in for a specific statement.
+extends: existence
+message: "'%s' is a stock phrase: state the specific thing."
+level: error
+ignorecase: true
+nonword: true
+tokens:
+  - '\bwhether you(?:''re| are)\b'
+  - '\bin (?:conclusion|summary|a nutshell)\b'
+  - '\bto sum (?:it )?up\b'
+  - '\b(?:let''s|let us) (?:dive|explore|take a look)\b'
+  - '\bdive (?:deep )?into\b'
+  - '\bdeep dive\b'
+  - '\blook no further\b'
+  - '\bat its core\b'
+  - '\ba testament to\b'
+  - '\bplays? an? (?:crucial|key|vital|pivotal|important) role\b'
+  - '\bin the (?:world|realm|landscape) of\b'
+  - '\b(?:is|it''s|it is) not just\b.{1,40}\b(?:it''s|it is)\b'
+  - '\bnot only\b.{1,60}\bbut also\b'
+  - '\bfeel free to\b'
+  - '\bhappy (?:coding|hacking)\b'
+  - '\bwithout further ado\b'
+  - '\bthe best part\b'
+  - '\bgame[- ]chang'
+  - '\bever[- ](?:evolving|changing|growing)\b'
+  - '\bfast[- ]paced\b'
+  - '\bthat''s where\b.{1,40}\bcomes in\b'
+  - '\bwe''ve got you covered\b'
+  - '\bunder the hood\b'
+  - '\bout of the box\b'

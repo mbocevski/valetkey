@@ -1,0 +1,13 @@
+extends: capitalization
+message: "Use sentence case for headings: '%s'."
+level: error
+scope: heading
+match: $sentence
+exceptions:
+  - valetkey
+  - MCP
+  - README
+  - Wayland
+  - Linux
+  - Python
+  - Chromium

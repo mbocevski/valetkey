@@ -27,16 +27,17 @@ Commands:
 
 ## How it will work
 
-- **You log in, once.** valetkey opens an ordinary browser window on your desktop. You sign in,
-  with two-factor authentication if the site asks for it, and close the window. The session stays
-  in a browser profile that belongs to that site alone.
-- **The client works without you.** Later, an MCP client can open the site, read pages, click and
-  type, in a headless browser that is already signed in.
-- **The kernel enforces the boundary.** Each browser runs in its own Linux network namespace. Its
-  only connection to the outside is a proxy that allows the site's hosts and refuses everything
-  else, including DNS lookups, WebRTC and connections to services on your machine.
-- **Only you can widen it.** When a page needs a host that is not allowed, the client can ask, and
-  the answer comes from you.
+You log in once. valetkey opens an ordinary browser window on your desktop, you sign in, with
+two-factor authentication if the site asks for it, and you close the window. The session stays in
+a browser profile that belongs to that site alone.
+
+After that, an MCP client can open the site, read pages, click and type in a headless browser that
+is already signed in.
+
+Each browser runs in its own Linux network namespace. Its only connection to the outside is a
+proxy that allows the site's hosts and refuses everything else, including DNS lookups, WebRTC and
+connections to services on your machine. When a page needs a host that is not allowed, the client
+can ask for it, and only you can say yes.
 
 ## Requirements
 

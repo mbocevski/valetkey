@@ -1,0 +1,44 @@
+# Adjectives that praise instead of describe. Say what it does; let the reader judge.
+extends: existence
+message: "'%s' praises instead of describing: say what it does."
+level: error
+ignorecase: true
+tokens:
+  - powerful
+  - intuitive
+  - elegant
+  - beautiful
+  - beautifully
+  - amazing
+  - awesome
+  - incredible
+  - revolutionary
+  - innovative
+  - best-in-class
+  - first-class
+  - world-class
+  - battle-tested
+  - production-ready
+  - enterprise-grade
+  - blazing
+  - lightning-fast
+  - simply
+  - easily
+  - effortless
+  - hassle-free
+  - must-have
+  - unparalleled
+  - unmatched
+  - meticulous
+  - meticulously
+  - holistic
+  - synergy
+  - paradigm
+  - foster
+  - fosters
+  - showcase
+  - showcases
+  - boasts
+  - multifaceted
+  - underscore
+  - underscores
