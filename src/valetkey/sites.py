@@ -419,6 +419,16 @@ def host_matches(host: str, entries: Iterable[str]) -> bool:
     return False
 
 
+def excluded_conflicts(excluded: str, allow: Iterable[str]) -> bool:
+    """Tell whether the ``excluded`` entry would block an ``allow`` entry.
+
+    An excluded entry overrides ``allow`` and covers its subdomains, so it blocks an allow entry
+    that equals it or sits under it. An entry under an allowed one is not a conflict: it carves
+    one host out of a wider allowed domain.
+    """
+    return any(host_matches(entry, [excluded]) for entry in allow)
+
+
 def allows(policy: Policy, host: str) -> bool:
     """Tell whether ``policy`` lets the browser connect to ``host``.
 

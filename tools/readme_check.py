@@ -76,7 +76,7 @@ class Problem:
 
 
 def run_valetkey(args: list[str]) -> str:
-    """Return what ``valetkey ARGS`` prints, at a fixed width and without colour."""
+    """Return what ``valetkey ARGS`` prints, at a fixed width, without colour or trailing spaces."""
     env = os.environ | {"COLUMNS": HELP_WIDTH, "NO_COLOR": "1", "TERM": "dumb"}
     result = subprocess.run(  # noqa: S603 - runs this interpreter on fixed arguments
         [sys.executable, "-m", "valetkey", *args],
@@ -85,7 +85,8 @@ def run_valetkey(args: list[str]) -> str:
         env=env,
         check=True,
     )
-    return result.stdout.rstrip() + "\n"
+    # The help formatter pads some lines with spaces; the file hygiene hook would strip them.
+    return "\n".join(line.rstrip() for line in result.stdout.rstrip().splitlines()) + "\n"
 
 
 def render_block(output: str) -> str:

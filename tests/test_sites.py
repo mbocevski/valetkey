@@ -587,3 +587,19 @@ def test_invalid_utf8_is_a_policy_error(roots: Roots) -> None:
 
 def test_module_exports_are_importable() -> None:
     assert {"co.uk", "com.au"} <= sites.TWO_LEVEL_SUFFIXES
+
+
+@pytest.mark.parametrize(
+    ("excluded", "allow", "expected"),
+    [
+        ("okta.com", ["login.okta.com"], True),
+        ("login.okta.com", ["login.okta.com"], True),
+        ("static.login.okta.com", ["login.okta.com"], False),
+        ("example.org", ["login.okta.com"], False),
+        ("okta.com", [], False),
+        ("192.0.2.7", ["192.0.2.7"], True),
+        ("0.2.7", ["192.0.2.7"], False),
+    ],
+)
+def test_excluded_conflicts(excluded: str, allow: list[str], *, expected: bool) -> None:
+    assert sites.excluded_conflicts(excluded, allow) is expected

@@ -94,6 +94,8 @@ def test_fix_never_needs_readme() -> None:
 
 def test_runs_valetkey_at_a_fixed_width() -> None:
     assert readme_check.run_valetkey(["--version"]).startswith("valetkey ")
+    help_text = readme_check.run_valetkey(["sites", "--help"])
+    assert all(line == line.rstrip() for line in help_text.splitlines())
 
 
 def test_facts_on_this_repository() -> None:

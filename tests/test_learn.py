@@ -300,10 +300,11 @@ def test_relogin_keeps_approved_hosts_and_clears_them_from_excluded() -> None:
     assert sites.allows(result, "sso.old.example")
 
 
-def test_relogin_drops_excluded_hosts_under_a_new_allow_entry() -> None:
-    old = policy(excluded=("static.cdn.example",))
-    result = learn.merge(old, learn.Classification(("cdn.example", "sitex.com"), ()), START, NOW)
-    assert result.excluded == ()
+def test_relogin_keeps_a_host_the_person_carved_out_of_an_allowed_domain() -> None:
+    old = policy(allow=("sitex.com",), excluded=("static.sitex.com",))
+    result = learn.merge(old, learn.Classification(("sitex.com",), ()), START, NOW)
+    assert result.excluded == ("static.sitex.com",)
+    assert not sites.allows(result, "static.sitex.com")
 
 
 def test_merge_names_the_site_and_converts_the_time() -> None:

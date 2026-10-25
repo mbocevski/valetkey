@@ -9,21 +9,101 @@ anywhere else.
 
 ## Status
 
-Early development. Nothing here is usable yet: the `valetkey` command only prints its version.
+Early development. The browser itself is not usable yet. The `valetkey` command can list sites and
+change which hosts each one may reach.
 
 ## Usage
 
 <!-- begin: valetkey --help -->
 ```text
-Usage: valetkey
+Usage: valetkey COMMAND
 
 A logged-in browser for MCP clients, contained to the sites it may reach.
 
 Commands:
+  allow: Allow a host, and its subdomains, for a site.
+  deny: Stop allowing a host for a site.
+  forget: Delete a site's policy, login profile and downloads.
+  sites: List the sites valetkey knows.
   --help, -h: Display this message and exit.
   --version: Display application version.
 ```
 <!-- end: valetkey --help -->
+
+### Managing sites
+
+`valetkey sites` lists each site with its start host, how many hosts it allows and excludes, when
+they were last learned and whether a login profile exists. Add `--json` for a script.
+
+`valetkey allow SITE HOST` lets a site reach another host and its subdomains, and removes any
+excluded entry that would block it. `valetkey deny SITE HOST` takes a host away. When a wider
+allowed entry still covers it, the host is also excluded so it stays blocked.
+
+`valetkey forget SITE` deletes the site's policy, login profile and downloads after asking. It
+refuses while the site's browser is open.
+
+<!-- begin: valetkey sites --help -->
+```text
+Usage: valetkey sites [OPTIONS]
+
+List the sites valetkey knows.
+
+Each line shows the site name, the host it starts at, how many hosts are allowed
+and excluded, when the hosts were last learned, and whether a login profile
+exists. With --json, each site is an object with the keys site, host, allowed,
+excluded, learned (a UTC time, or null) and profile (true or false).
+
+Parameters:
+  --json: Print a JSON array instead of a table. [default: False]
+```
+<!-- end: valetkey sites --help -->
+
+<!-- begin: valetkey allow --help -->
+```text
+Usage: valetkey allow SITE HOST
+
+Allow a host, and its subdomains, for a site.
+
+Any excluded entry that would block the host is removed. Allowing a host that is
+already listed changes nothing.
+
+Parameters:
+  SITE, --site: The site name, as shown by valetkey sites. [required]
+  HOST, --host: A host name, or a URL on it. [required]
+```
+<!-- end: valetkey allow --help -->
+
+<!-- begin: valetkey deny --help -->
+```text
+Usage: valetkey deny SITE HOST
+
+Stop allowing a host for a site.
+
+The host's own entry is removed from the allowed hosts. If a wider allowed entry
+still covers the host (app.example.com under example.com), the host is also
+added to the excluded hosts, so it stays blocked. Otherwise nothing more is
+needed.
+
+Parameters:
+  SITE, --site: The site name, as shown by valetkey sites. [required]
+  HOST, --host: A host name, or a URL on it. [required]
+```
+<!-- end: valetkey deny --help -->
+
+<!-- begin: valetkey forget --help -->
+```text
+Usage: valetkey forget [OPTIONS] SITE
+
+Delete a site's policy, login profile and downloads.
+
+It asks first, and refuses when input is not a terminal unless --yes is given.
+It also refuses while the site's browser is open: close that session first.
+
+Parameters:
+  SITE, --site: The site name, as shown by valetkey sites. [required]
+  --yes: Delete without asking. [default: False]
+```
+<!-- end: valetkey forget --help -->
 
 ## How it will work
 

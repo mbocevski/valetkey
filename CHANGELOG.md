@@ -9,3 +9,6 @@ Changes that affect users of valetkey. The format follows
 ### Added
 
 - The `valetkey` command, which prints its version and help.
+- The `valetkey sites` command, which lists your sites, with `--json` for scripts.
+- The `valetkey allow` and `valetkey deny` commands, which add or remove a host a site may reach.
+- The `valetkey forget` command, which deletes a site's policy, login and downloads after asking.

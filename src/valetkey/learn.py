@@ -119,20 +119,12 @@ def classify(
     navigated = _hosts(navigation_hosts)
     allow = {domain}
     allow.update(host for host in navigated if not sites.host_matches(host, [domain]))
-    excluded = {host for host in _hosts(seen_hosts) if not _conflicts(host, allow)}
+    excluded = {
+        host
+        for host in _hosts(seen_hosts)
+        if not (sites.host_matches(host, allow) or sites.excluded_conflicts(host, allow))
+    }
     return Classification(allow=tuple(sorted(allow)), excluded=tuple(sorted(excluded)))
-
-
-def _conflicts(excluded: str, allow: Iterable[str]) -> bool:
-    """Tell whether an excluded entry would block an allowed host.
-
-    An excluded entry overrides ``allow`` and covers its subdomains, so it blocks an allowed
-    entry that equals it or sits under it, and it is redundant under an allowed entry.
-    """
-    allow = tuple(allow)
-    return sites.host_matches(excluded, allow) or any(
-        sites.host_matches(entry, [excluded]) for entry in allow
-    )
 
 
 def _hosts(values: Iterable[str]) -> set[str]:
@@ -153,10 +145,11 @@ def merge(
     """Fold ``classification`` into ``existing``, keeping everything already approved.
 
     ``allow`` is the union of the old and new lists. ``excluded`` is the union of the old and new
-    lists minus every host that covers, or is covered by, an ``allow`` entry. ``start`` becomes
-    ``start_url`` and ``learned`` becomes ``now`` in UTC, rounded down to whole seconds (``now``
-    must carry a time zone). The site name is ``existing``'s, else ``site``, else one derived
-    from ``start_url``.
+    lists minus every entry that would block an ``allow`` entry (see
+    :func:`valetkey.sites.excluded_conflicts`). An excluded host under an allowed domain stays: the
+    person carved it out with ``valetkey deny``. ``start`` becomes ``start_url`` and ``learned``
+    becomes ``now`` in UTC, rounded down to whole seconds (``now`` must carry a time zone). The
+    site name is ``existing``'s, else ``site``, else one derived from ``start_url``.
     """
     old_allow = existing.allow if existing else ()
     old_excluded = existing.excluded if existing else ()
@@ -165,7 +158,7 @@ def merge(
         sorted(
             host
             for host in {*old_excluded, *classification.excluded}
-            if not _conflicts(host, allow)
+            if not sites.excluded_conflicts(host, allow)
         )
     )
     name = existing.site if existing else site or sites.site_name_for(start_url)
