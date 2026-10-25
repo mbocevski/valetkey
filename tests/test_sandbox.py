@@ -23,13 +23,14 @@ if TYPE_CHECKING:
 # --- pure functions -----------------------------------------------------------------------
 
 
-def make_sandbox(
+def make_sandbox(  # noqa: PLR0913  # one keyword per field a test varies
     base: Path,
     *,
     runtime_dir: Path = Path("/run/user/4242"),
     shared_dir: Path | None = None,
     etc_entries: tuple[str, ...] = ("passwd", "ssl"),
     die_with_parent: bool = True,
+    wayland_socket: Path | None = None,
 ) -> sandbox.Sandbox:
     """A sandbox whose paths all lie under ``base``."""
     return sandbox.Sandbox(
@@ -41,6 +42,7 @@ def make_sandbox(
         shared_dir=shared_dir,
         etc_entries=etc_entries,
         die_with_parent=die_with_parent,
+        wayland_socket=wayland_socket,
     )
 
 
@@ -50,9 +52,15 @@ def build(
     *,
     shared_dir: Path | None = None,
     die_with_parent: bool = True,
+    wayland_socket: Path | None = None,
 ) -> list[str]:
     return sandbox.bwrap_argv(
-        make_sandbox(base, shared_dir=shared_dir, die_with_parent=die_with_parent),
+        make_sandbox(
+            base,
+            shared_dir=shared_dir,
+            die_with_parent=die_with_parent,
+            wayland_socket=wayland_socket,
+        ),
         command or ["chromium"],
         roots=(Path("/opt/venv"), Path("/opt/src")),
         system_links=["--symlink", "usr/lib", "/lib"],
@@ -124,6 +132,23 @@ def test_argv_unshares_everything_and_ends_with_the_command(tmp_path: Path) -> N
         assert flag in argv
     assert "--share-net" not in argv
     assert argv[-4:] == ["--chdir", sandbox.SANDBOX_HOME, "chromium", "--headless=new"]
+
+
+def test_argv_has_no_display_by_default(tmp_path: Path) -> None:
+    argv = build(tmp_path)
+    assert "WAYLAND_DISPLAY" not in setenvs(argv)
+    assert not any("wayland" in arg for arg in argv)
+
+
+def test_argv_binds_only_the_wayland_socket_into_the_private_runtime_dir(tmp_path: Path) -> None:
+    host_socket = Path("/run/user/1000/wayland-7")
+    argv = build(tmp_path, wayland_socket=host_socket)
+    assert ("/run/user/1000/wayland-7", "/run/user/4242/wayland-7") in pairs(argv, "--bind")
+    assert setenvs(argv)["WAYLAND_DISPLAY"] == "wayland-7"
+    # The socket is mounted into the tmpfs runtime directory, so the tmpfs comes first.
+    assert argv.index("--tmpfs") < argv.index("/run/user/1000/wayland-7") < argv.index("--clearenv")
+    assert "/run/user/1000" not in argv
+    assert "--dev-bind" not in argv
 
 
 def test_argv_can_leave_out_die_with_parent(tmp_path: Path) -> None:

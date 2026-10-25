@@ -149,6 +149,11 @@ class Sandbox:
     read-write. When it lies under ``runtime_dir`` it appears at the same path inside."""
     etc_entries: tuple[str, ...] = ()
     """Entries of ``/etc`` to bind read-only. Empty means ``default_etc_entries()``."""
+    wayland_socket: Path | None = None
+    """The compositor socket of a Wayland session, for a browser with a visible window. That
+    one socket file is bound read-write (a socket needs both) at ``runtime_dir`` under its own
+    name, and ``WAYLAND_DISPLAY`` is set to the name. Nothing else of the host's runtime
+    directory appears. ``None`` means no display, which is what every headless session wants."""
     die_with_parent: bool = True
     """Kill the sandbox when the process that started it dies. See ``bwrap_argv``."""
 
@@ -253,6 +258,10 @@ def bwrap_argv(
     ]
     for path in dict.fromkeys(writable):
         argv += ["--bind", str(path), str(path)]
+    wayland_name = None
+    if sandbox.wayland_socket is not None:
+        wayland_name = sandbox.wayland_socket.name
+        argv += ["--bind", str(sandbox.wayland_socket), str(sandbox.runtime_dir / wayland_name)]
     argv += ["--clearenv"]
     environment = {
         "PATH": "/usr/bin",
@@ -260,6 +269,8 @@ def bwrap_argv(
         "XDG_RUNTIME_DIR": str(sandbox.runtime_dir),
         "LANG": "C.UTF-8",
     }
+    if wayland_name is not None:
+        environment["WAYLAND_DISPLAY"] = wayland_name
     for name, value in environment.items():
         argv += ["--setenv", name, value]
     argv += ["--chdir", home, *command]
