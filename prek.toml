@@ -88,6 +88,21 @@ entry = "uv run --frozen python tools/readme_check.py commit-msg"
 stages = ["commit-msg"]
 
 [[repos.hooks]]
+id = "changelog-lint"
+name = "CHANGELOG records user-facing changes"
+language = "system"
+entry = "uv run --frozen python tools/changelog_check.py lint"
+files = '^(CHANGELOG\.md|tools/(changelog_check|conventional)\.py)$'
+pass_filenames = false
+
+[[repos.hooks]]
+id = "changelog-impact"
+name = "CHANGELOG updated for user-facing commits"
+language = "system"
+entry = "uv run --frozen python tools/changelog_check.py commit-msg"
+stages = ["commit-msg"]
+
+[[repos.hooks]]
 id = "conventional-commit"
 name = "conventional commit message"
 language = "pygrep"

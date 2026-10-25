@@ -4,6 +4,7 @@ argv
 [Bb]ubblewrap
 bwrap
 [Cc]hromium
+(?:[Cc]hangelog|CHANGELOG)(?:s|'s)?
 CLI
 MCP
 namespaces?

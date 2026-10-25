@@ -63,6 +63,30 @@ Two more hooks keep it current:
 - A `feat` commit or a breaking change (`!`, `BREAKING CHANGE:`) must stage `README.md`. If the
   README is still accurate, add a `Docs: none` trailer to the commit message instead.
 
+## Changelog
+
+`CHANGELOG.md` records what changed for users, in the
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. New entries go under
+`## [Unreleased]`, in the sections Added, Changed, Deprecated, Removed, Fixed and Security.
+
+An entry belongs there when a user can notice the change: a command, option or MCP tool, a
+config or file location, a requirement, behavior, or a security fix. Refactors, tests, CI,
+tooling, dependency updates that change nothing for users, and wording fixes stay out.
+
+Write each entry as one sentence from the user's side: start with a capital letter, end with a
+full stop, and stay under 40 words. A lint rejects internal words (refactor, tests, CI, bump)
+and vague ones (various, minor).
+
+The commit type decides whether the changelog must change:
+
+- `feat`, `fix`, `perf`, `revert` and breaking changes must update `CHANGELOG.md`. When users
+  would not notice the change, add a `Changelog: skip` trailer instead.
+- Every other type must leave `CHANGELOG.md` alone. To reword entries or cut a release, use the
+  `changelog` or `release` scope, as in `docs(changelog): …` or `chore(release): 0.2.0`.
+
+A hook checks each commit, and CI checks every commit in a pull request. A pull request labeled
+`skip-changelog` passes without new entries.
+
 ## Commits
 
 - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `ci:`, `chore:` and so on). A
