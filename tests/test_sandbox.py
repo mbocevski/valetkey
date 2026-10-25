@@ -1,24 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
 import json
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
-import threading
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Self
-from urllib.parse import urlsplit
 
 import pytest
+from proxy_stub import ProxyStub, host_of_request
 
 from valetkey import sandbox, sites
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 # --- pure functions -----------------------------------------------------------------------
 
@@ -347,13 +340,6 @@ needs_namespaces = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REA
 
 
 @pytest.fixture
-def short_dir() -> Iterator[Path]:
-    """A short temporary directory: Unix socket paths are limited to about 100 bytes."""
-    with tempfile.TemporaryDirectory(prefix="vk-") as directory:
-        yield Path(directory)
-
-
-@pytest.fixture
 def box(short_dir: Path) -> sandbox.Sandbox:
     for name in ("profile", "downloads", "proxy", "run"):
         (short_dir / name).mkdir()
@@ -369,61 +355,6 @@ def run_inside(box: sandbox.Sandbox, command: list[str], timeout: float = 60) ->
 
 def run_python(box: sandbox.Sandbox, code: str, *args: str) -> tuple[int, str]:
     return run_inside(box, [sys.executable, "-I", "-c", code, *args])
-
-
-def host_of_request(head: str) -> str:
-    """The host a proxy request asks for: ``CONNECT host:443`` or ``GET http://host/path``."""
-    target = head.split(maxsplit=2)[1]
-    if "://" in target:
-        return urlsplit(target).hostname or ""
-    return target.rsplit(":", 1)[0]
-
-
-class ProxyStub:
-    """A stand-in for the proxy: answers every plain HTTP request on a Unix socket."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.requests: list[str] = []
-        self._loop = asyncio.new_event_loop()
-        self._ready = threading.Event()
-        self._thread = threading.Thread(target=self._serve, daemon=True)
-
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            head = (await reader.readuntil(b"\r\n\r\n")).decode()
-        except asyncio.IncompleteReadError:
-            writer.close()  # Chrome opens spare connections it never uses
-            return
-        self.requests.append(head)
-        body = b"<html><body>proxied page</body></html>"
-        writer.write(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n"
-            + f"Content-Length: {len(body)}\r\n\r\n".encode()
-            + body
-        )
-        await writer.drain()
-        writer.close()
-
-    def _serve(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        server = self._loop.run_until_complete(
-            asyncio.start_unix_server(self._handle, str(self.path))
-        )
-        self._ready.set()
-        self._loop.run_forever()
-        server.close()
-        self._loop.run_until_complete(server.wait_closed())
-
-    def __enter__(self) -> Self:
-        self._thread.start()
-        assert self._ready.wait(10)
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(10)
-        self._loop.close()
 
 
 _INSIDE_PROBE = """

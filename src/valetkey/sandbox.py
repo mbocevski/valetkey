@@ -114,7 +114,7 @@ def chrome_flags(major: int) -> list[str]:
         "--disable-extensions",
         "--disable-search-engine-choice-screen",
         "--disable-component-extensions-with-background-pages",
-        "--disable-features=NetworkTimeServiceQuerying,OptimizationHints,MediaRouter,Translate,PreconnectToSearch,SearchEnginePreconnect,NetworkPrediction,LoadingPredictor,PreconnectFromKeyedService",
+        "--disable-features=NetworkTimeServiceQuerying,OptimizationHints,MediaRouter,Translate,PreconnectToSearch,SearchEnginePreconnect,NetworkPrediction,LoadingPredictor,PreconnectFromKeyedService,AutofillServerCommunication",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
