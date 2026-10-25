@@ -4,6 +4,7 @@
     python tools/readme_check.py facts [--fix]
     python tools/readme_check.py style
     python tools/readme_check.py commit-msg MESSAGE_FILE
+    python tools/readme_check.py range BASE HEAD [--skip]
 
 ``facts`` checks what the README states about the code. A block between
 ``<!-- begin: valetkey ARGS -->`` and ``<!-- end: valetkey ARGS -->`` must hold the
@@ -18,6 +19,8 @@ rules and walls of badges. Vale checks the wording; this checks the shape.
 ``commit-msg`` checks whether a commit should have changed the README. A ``feat``
 commit or a breaking change alters what users can do, so it must stage README.md,
 or carry a ``Docs: none`` trailer that records the README is still accurate.
+``range`` applies the same rule to every commit in ``BASE..HEAD`` (a pull request);
+``--skip`` (a ``skip-readme`` label) waives it.
 """
 
 import os
@@ -34,9 +37,8 @@ import conventional
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-ROOT = Path(__file__).resolve().parent.parent
-README = ROOT / "README.md"
-PYPROJECT = ROOT / "pyproject.toml"
+README = conventional.ROOT / "README.md"
+PYPROJECT = conventional.ROOT / "pyproject.toml"
 
 BLOCK = re.compile(
     r"(?P<begin><!-- begin: valetkey(?P<args>[^>]*?) -->\n)"
@@ -199,10 +201,15 @@ def needs_readme(message: str) -> bool:
     return commit.type == "feat" or commit.breaking
 
 
+def missing_readme(message: str, files: list[str] | frozenset[str]) -> bool:
+    """Return whether a commit with ``message`` changing ``files`` leaves the README behind."""
+    no_docs = conventional.parse(message).has_trailer("Docs", "none")
+    return needs_readme(message) and "README.md" not in files and not no_docs
+
+
 def commit_msg(message: str, staged: list[str]) -> int:
     """Fail a user-visible commit that leaves the README untouched without saying so."""
-    no_docs = conventional.parse(message).has_trailer("Docs", "none")
-    if not needs_readme(message) or "README.md" in staged or no_docs:
+    if not missing_readme(message, staged):
         return 0
     print(
         "This commit changes what users can do, but README.md is not staged.\n"
@@ -212,20 +219,30 @@ def commit_msg(message: str, staged: list[str]) -> int:
     return 1
 
 
-def staged_files() -> list[str]:
-    """Return the paths staged for the commit in progress."""
-    result = subprocess.run(
-        ["git", "diff", "--cached", "--name-only"],  # noqa: S607 - git from PATH, as hooks do
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=ROOT,
-    )
-    return result.stdout.split()
+def check_range(commits: list[conventional.RangeCommit]) -> list[Problem]:
+    """Return a problem for each user-visible commit in a range that left the README behind."""
+    return [
+        Problem(
+            f"{item.sha[:12]} '{item.header}' changes what users can do but does not update "
+            "README.md; update it, or add a 'Docs: none' trailer if it is still accurate"
+        )
+        for item in commits
+        if missing_readme(item.commit.message, item.files)
+    ]
+
+
+def readme_range(base: str, head: str, *, skip: bool) -> int:
+    """Check every commit in ``BASE..HEAD``; ``skip`` (a label) waives the check."""
+    if skip:
+        return 0
+    problems = check_range(conventional.range_commits(base, head))
+    for problem in problems:
+        print(problem.message, file=sys.stderr)
+    return 1 if problems else 0
 
 
 def main(argv: list[str]) -> int:
-    """Dispatch to ``facts``, ``style`` or ``commit-msg``."""
+    """Dispatch to ``facts``, ``style``, ``commit-msg`` or ``range``."""
     match argv:
         case ["facts"]:
             return facts(fix=False)
@@ -234,7 +251,9 @@ def main(argv: list[str]) -> int:
         case ["style"]:
             return style()
         case ["commit-msg", path]:
-            return commit_msg(Path(path).read_text(), staged_files())
+            return commit_msg(Path(path).read_text(), conventional.staged_files())
+        case ["range", base, head, *flags] if flags in ([], ["--skip"]):
+            return readme_range(base, head, skip=flags == ["--skip"])
         case _:
             print(__doc__, file=sys.stderr)
             return 2

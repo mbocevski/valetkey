@@ -3,6 +3,7 @@
 import re
 from typing import TYPE_CHECKING
 
+import conventional
 import pytest
 import readme_check
 
@@ -117,12 +118,35 @@ def test_facts_fix_rewrites_a_stale_block(
 def test_commit_msg_reads_the_message_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     message = tmp_path / "COMMIT_EDITMSG"
     message.write_text("feat: add status\n")
-    monkeypatch.setattr(readme_check, "staged_files", lambda: ["README.md"])
+    monkeypatch.setattr(conventional, "staged_files", lambda: ["README.md"])
     assert readme_check.main(["commit-msg", str(message)]) == 0
 
 
-def test_staged_files_lists_the_index() -> None:
-    assert isinstance(readme_check.staged_files(), list)
+def range_commit(sha: str, message: str, *files: str) -> conventional.RangeCommit:
+    return conventional.RangeCommit(sha * 40, conventional.parse(message), frozenset(files))
+
+
+def test_range_flags_user_visible_commits_without_the_readme() -> None:
+    commits = [
+        range_commit("a", "feat: add status", "src/x.py"),
+        range_commit("b", "feat: add sites", "src/x.py", "README.md"),
+        range_commit("c", "feat: add watch\n\nDocs: none", "src/x.py"),
+        range_commit("d", "fix!: rename the socket", "src/x.py"),
+        range_commit("e", "chore: tidy", "src/x.py"),
+    ]
+    problems = [p.message for p in readme_check.check_range(commits)]
+    assert [m[:12] for m in problems] == ["a" * 12, "d" * 12]
+    assert "'feat: add status' changes what users can do" in problems[0]
+
+
+def test_range_command(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    commits = [range_commit("a", "feat: add status", "src/x.py")]
+    monkeypatch.setattr(conventional, "range_commits", lambda *_: commits)
+    assert readme_check.main(["range", "base", "head"]) == 1
+    assert "does not update README.md" in capsys.readouterr().err
+    assert readme_check.main(["range", "base", "head", "--skip"]) == 0
+    monkeypatch.setattr(conventional, "range_commits", lambda *_: [])
+    assert readme_check.main(["range", "base", "head"]) == 0
 
 
 def test_usage_error(capsys: pytest.CaptureFixture[str]) -> None:

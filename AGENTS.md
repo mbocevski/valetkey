@@ -61,7 +61,9 @@ Two more hooks keep it current:
   block is stale the commit fails; run `uv run python tools/readme_check.py facts --fix` and
   review the result. To document a new command's help, add a pair of markers for it.
 - A `feat` commit or a breaking change (`!`, `BREAKING CHANGE:`) must stage `README.md`. If the
-  README is still accurate, add a `Docs: none` trailer to the commit message instead.
+  README is still accurate, add a `Docs: none` trailer to the commit message instead. A hook
+  checks each commit, and CI checks every commit in a pull request. A pull request labeled
+  `skip-readme` passes without README changes.
 
 ## Changelog
 

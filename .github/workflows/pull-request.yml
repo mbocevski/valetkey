@@ -1,4 +1,4 @@
-name: Changelog
+name: Pull request
 
 on:
   pull_request:
@@ -11,22 +11,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  changelog:
-    name: Changelog
+  docs:
+    name: README and changelog
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
+    env:
+      BASE: ${{ github.event.pull_request.base.sha }}
+      HEAD: ${{ github.event.pull_request.head.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-      - name: Check every commit in the pull request
+      - name: README updated for user-visible commits
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
+          SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'skip-readme') }}
+        run: |
+          flag=""
+          if [ "$SKIP" = "true" ]; then flag="--skip"; fi
+          uv run --no-sync python tools/readme_check.py range "$BASE" "$HEAD" ${flag:+"$flag"}
+      - name: Changelog updated for user-facing commits
+        if: ${{ !cancelled() }}
+        env:
           SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'skip-changelog') }}
         run: |
           flag=""
