@@ -1,0 +1,654 @@
+# SPDX-License-Identifier: Apache-2.0
+
+import asyncio
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+from dataclasses import replace
+from pathlib import Path
+from typing import TYPE_CHECKING, Self
+from urllib.parse import urlsplit
+
+import pytest
+
+from valetkey import sandbox, sites
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+# --- pure functions -----------------------------------------------------------------------
+
+
+def make_sandbox(
+    base: Path,
+    *,
+    runtime_dir: Path = Path("/run/user/4242"),
+    shared_dir: Path | None = None,
+    etc_entries: tuple[str, ...] = ("passwd", "ssl"),
+    die_with_parent: bool = True,
+) -> sandbox.Sandbox:
+    """A sandbox whose paths all lie under ``base``."""
+    return sandbox.Sandbox(
+        profile_dir=base / "profile",
+        downloads_dir=base / "downloads",
+        proxy_socket=base / "proxy" / "p.sock",
+        log_file=base / "logs" / "box.log",
+        runtime_dir=runtime_dir,
+        shared_dir=shared_dir,
+        etc_entries=etc_entries,
+        die_with_parent=die_with_parent,
+    )
+
+
+def build(
+    base: Path,
+    command: list[str] | None = None,
+    *,
+    shared_dir: Path | None = None,
+    die_with_parent: bool = True,
+) -> list[str]:
+    return sandbox.bwrap_argv(
+        make_sandbox(base, shared_dir=shared_dir, die_with_parent=die_with_parent),
+        command or ["chromium"],
+        roots=(Path("/opt/venv"), Path("/opt/src")),
+        system_links=["--symlink", "usr/lib", "/lib"],
+    )
+
+
+def setenvs(argv: list[str]) -> dict[str, str]:
+    return {argv[i + 1]: argv[i + 2] for i, arg in enumerate(argv) if arg == "--setenv"}
+
+
+def pairs(argv: list[str], option: str) -> list[tuple[str, ...]]:
+    """The arguments that follow each occurrence of ``option``, as the option takes them."""
+    width = {"--bind": 2, "--ro-bind": 2, "--setenv": 2, "--symlink": 2}.get(option, 1)
+    return [tuple(argv[i + 1 : i + 1 + width]) for i, arg in enumerate(argv) if arg == option]
+
+
+@pytest.mark.parametrize(
+    ("output", "major"),
+    [
+        ("Chromium 156.0.8078.47 Arch Linux", 156),
+        ("Google Chrome 120.0.6099.109 \n", 120),
+        ("Chromium 99.0.4844.84 built on Debian", 99),
+    ],
+)
+def test_parse_chrome_major(output: str, major: int) -> None:
+    assert sandbox.parse_chrome_major(output) == major
+
+
+@pytest.mark.parametrize("output", ["", "Chromium", "version 12.3", "command not found"])
+def test_parse_chrome_major_rejects_output_without_a_version(output: str) -> None:
+    with pytest.raises(ValueError, match="no version number"):
+        sandbox.parse_chrome_major(output)
+
+
+def test_installed_chrome_major_runs_the_executable(tmp_path: Path) -> None:
+    fake = tmp_path / "fakechrome"
+    fake.write_text("#!/bin/sh\necho 'Chromium 142.0.7444.1 Test'\n")
+    fake.chmod(0o755)
+    assert sandbox.installed_chrome_major(str(fake)) == 142
+
+
+def test_chrome_flags_hold_the_containment_and_quiet_flags() -> None:
+    flags = sandbox.chrome_flags(156)
+    assert "--proxy-server=http://127.0.0.1:3128" in flags
+    assert "--proxy-bypass-list=<-loopback>" in flags
+    for flag in (
+        "--disable-background-networking",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",
+        "--disable-blink-features=AutomationControlled",
+    ):
+        assert flag in flags
+    assert len(flags) == len(set(flags))
+
+
+def test_chrome_user_agent_names_the_installed_major() -> None:
+    agent = next(f for f in sandbox.chrome_flags(131) if f.startswith("--user-agent="))
+    assert "Chrome/131.0.0.0" in agent
+    assert "Headless" not in agent
+    assert sandbox.chrome_flags(131) != sandbox.chrome_flags(132)
+
+
+def test_argv_unshares_everything_and_ends_with_the_command(tmp_path: Path) -> None:
+    argv = build(tmp_path, ["chromium", "--headless=new"])
+    assert argv[0] == "bwrap"
+    for flag in ("--unshare-all", "--new-session", "--die-with-parent", "--clearenv"):
+        assert flag in argv
+    assert "--share-net" not in argv
+    assert argv[-4:] == ["--chdir", sandbox.SANDBOX_HOME, "chromium", "--headless=new"]
+
+
+def test_argv_can_leave_out_die_with_parent(tmp_path: Path) -> None:
+    assert "--die-with-parent" not in build(tmp_path, die_with_parent=False)
+
+
+def test_argv_binds_nothing_broad(tmp_path: Path) -> None:
+    argv = build(tmp_path)
+    assert "--dev-bind" not in argv
+    assert "--dev-bind-try" not in argv
+    sources = [src for flag in ("--bind", "--ro-bind") for src, _ in pairs(argv, flag)]
+    home = str(Path.home())
+    for source in sources:
+        assert source not in {"/", "/etc", "/home", "/run", "/var", home, str(Path(home).parent)}
+        assert not Path(home).is_relative_to(source) or source == "/usr"
+        assert not source.startswith("/run/user/4242"), source
+
+
+def test_argv_system_directories_are_read_only(tmp_path: Path) -> None:
+    argv = build(tmp_path)
+    ro = pairs(argv, "--ro-bind")
+    assert ("/usr", "/usr") in ro
+    assert ("/etc/passwd", "/etc/passwd") in ro
+    assert ("/etc/ssl", "/etc/ssl") in ro
+    assert ("/opt/venv", "/opt/venv") in ro
+    assert ("/opt/src", "/opt/src") in ro
+    assert ("usr/lib", "/lib") in pairs(argv, "--symlink")
+    assert argv[argv.index("--dev") + 1] == "/dev"
+    assert argv[argv.index("--proc") + 1] == "/proc"
+
+
+def test_argv_writes_only_where_it_was_told(tmp_path: Path) -> None:
+    argv = build(tmp_path, shared_dir=tmp_path / "shared")
+    writable = {src for src, _ in pairs(argv, "--bind")}
+    assert writable == {
+        str(tmp_path / "profile"),
+        str(tmp_path / "downloads"),
+        str(tmp_path / "proxy"),
+        str(tmp_path / "shared"),
+    }
+    for src, dest in pairs(argv, "--bind"):
+        assert src == dest
+
+
+def test_argv_binds_a_shared_directory_once(tmp_path: Path) -> None:
+    argv = build(tmp_path, shared_dir=tmp_path / "proxy")
+    assert [src for src, _ in pairs(argv, "--bind")].count(str(tmp_path / "proxy")) == 1
+
+
+def test_argv_tmpfs_come_before_every_bind_that_may_sit_inside_them(tmp_path: Path) -> None:
+    argv = build(tmp_path, shared_dir=Path("/run/user/4242/agent-browser"))
+    mounts = [path for (path,) in pairs(argv, "--tmpfs")]
+    assert set(mounts) == {"/tmp", "/run/user/4242", sandbox.SANDBOX_HOME}  # noqa: S108  # inside
+    last_tmpfs = max(argv.index(path) for path in mounts)
+    later = [
+        src
+        for flag in ("--bind", "--ro-bind")
+        for src, _ in pairs(argv, flag)
+        if src.startswith("/")
+    ]
+    positions = {src: argv.index(src) for src in later if not src.startswith(("/usr", "/etc"))}
+    assert "/opt/venv" in positions
+    assert all(position > last_tmpfs for position in positions.values())
+
+
+def test_argv_environment_is_cleared_then_minimal(tmp_path: Path) -> None:
+    argv = build(tmp_path)
+    assert argv.index("--clearenv") < argv.index("--setenv")
+    assert setenvs(argv) == {
+        "PATH": "/usr/bin",
+        "HOME": sandbox.SANDBOX_HOME,
+        "XDG_RUNTIME_DIR": "/run/user/4242",
+        "LANG": "C.UTF-8",
+    }
+
+
+def test_argv_defaults_come_from_the_host(tmp_path: Path) -> None:
+    argv = sandbox.bwrap_argv(replace(make_sandbox(tmp_path), etc_entries=()), ["true"])
+    assert ("/usr", "/usr") in pairs(argv, "--ro-bind")
+    assert ("/etc/ld.so.cache", "/etc/ld.so.cache") in pairs(argv, "--ro-bind")
+    assert str(Path(sys.prefix)) in {src for src, _ in pairs(argv, "--ro-bind")}
+
+
+def test_default_etc_entries_skip_what_is_missing(tmp_path: Path) -> None:
+    (tmp_path / "passwd").touch()
+    (tmp_path / "ssl").mkdir()
+    (tmp_path / "hosts").touch()
+    assert sandbox.default_etc_entries(tmp_path) == ("ssl", "passwd")
+
+
+def test_system_link_args(tmp_path: Path) -> None:
+    (tmp_path / "usr" / "lib").mkdir(parents=True)
+    (tmp_path / "lib").symlink_to("usr/lib")
+    (tmp_path / "bin").mkdir()
+    assert sandbox.system_link_args(tmp_path) == [
+        "--ro-bind",
+        "/bin",
+        "/bin",
+        "--symlink",
+        "usr/lib",
+        "/lib",
+    ]
+
+
+def test_python_roots_leave_out_system_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+    monkeypatch.setattr(sys, "base_prefix", "/usr")
+    roots = sandbox.python_roots()
+    assert roots[0] == tmp_path / "venv"
+    assert Path(sandbox.valetkey.__file__).resolve().parent.parent in roots
+    assert all(not root.is_relative_to("/usr") for root in roots)
+
+
+def test_python_roots_list_a_shared_prefix_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sys, "prefix", str(tmp_path))
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path))
+    assert sandbox.python_roots().count(tmp_path) == 1
+
+
+def test_default_runtime_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/7")
+    assert sandbox.default_runtime_dir() == Path("/run/user/7")
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    with pytest.raises(sites.RuntimeDirUnavailableError, match="XDG_RUNTIME_DIR"):
+        sandbox.default_runtime_dir()
+
+
+def test_bridge_command_names_the_listener_and_the_socket(tmp_path: Path) -> None:
+    assert sandbox.bridge_command(tmp_path / "p.sock") == [
+        sys.executable,
+        "-m",
+        "valetkey.nsbridge",
+        "--listen",
+        "127.0.0.1:3128",
+        "--connect",
+        str(tmp_path / "p.sock"),
+    ]
+
+
+def test_start_sends_output_to_the_log_file_and_not_to_a_pipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_popen(argv: list[str], **kwargs: object) -> str:
+        seen.update(kwargs, argv=argv)
+        return "process"
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", fake_popen)
+    box = make_sandbox(tmp_path)
+    assert sandbox.start(box, ["true"]) == "process"
+    assert seen["argv"] == sandbox.bwrap_argv(box, ["true"])
+    assert seen["stdin"] == subprocess.DEVNULL
+    assert seen["stderr"] == subprocess.STDOUT
+    assert getattr(seen["stdout"], "name", None) == str(box.log_file)
+    assert box.log_file.exists()
+
+
+# --- integration: a real namespace --------------------------------------------------------
+
+
+def _usable() -> str | None:
+    """Return why the sandbox cannot run here, or ``None`` when it can."""
+    for program in ("bwrap", "chromium"):
+        if shutil.which(program) is None:
+            return f"{program} is not installed"
+    probe = subprocess.run(  # noqa: S603  # fixed argument list
+        [
+            shutil.which("bwrap") or "bwrap",
+            "--unshare-all",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--symlink",
+            "usr/lib",
+            "/lib",
+            "--symlink",
+            "usr/lib",
+            "/lib64",
+            "/usr/bin/true",
+        ],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    return None if probe.returncode == 0 else "unprivileged user namespaces are unavailable"
+
+
+_SKIP_REASON = _usable()
+integration = pytest.mark.integration
+needs_namespaces = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
+
+
+@pytest.fixture
+def short_dir() -> Iterator[Path]:
+    """A short temporary directory: Unix socket paths are limited to about 100 bytes."""
+    with tempfile.TemporaryDirectory(prefix="vk-") as directory:
+        yield Path(directory)
+
+
+@pytest.fixture
+def box(short_dir: Path) -> sandbox.Sandbox:
+    for name in ("profile", "downloads", "proxy", "run"):
+        (short_dir / name).mkdir()
+    return make_sandbox(short_dir, runtime_dir=short_dir / "run", etc_entries=())
+
+
+def run_inside(box: sandbox.Sandbox, command: list[str], timeout: float = 60) -> tuple[int, str]:
+    """Run ``command`` in the namespace and return its exit status and the log."""
+    process = sandbox.start(box, command)
+    status = process.wait(timeout=timeout)
+    return status, box.log_file.read_text()
+
+
+def run_python(box: sandbox.Sandbox, code: str, *args: str) -> tuple[int, str]:
+    return run_inside(box, [sys.executable, "-I", "-c", code, *args])
+
+
+def host_of_request(head: str) -> str:
+    """The host a proxy request asks for: ``CONNECT host:443`` or ``GET http://host/path``."""
+    target = head.split(maxsplit=2)[1]
+    if "://" in target:
+        return urlsplit(target).hostname or ""
+    return target.rsplit(":", 1)[0]
+
+
+class ProxyStub:
+    """A stand-in for the proxy: answers every plain HTTP request on a Unix socket."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.requests: list[str] = []
+        self._loop = asyncio.new_event_loop()
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            head = (await reader.readuntil(b"\r\n\r\n")).decode()
+        except asyncio.IncompleteReadError:
+            writer.close()  # Chrome opens spare connections it never uses
+            return
+        self.requests.append(head)
+        body = b"<html><body>proxied page</body></html>"
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n"
+            + f"Content-Length: {len(body)}\r\n\r\n".encode()
+            + body
+        )
+        await writer.drain()
+        writer.close()
+
+    def _serve(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        server = self._loop.run_until_complete(
+            asyncio.start_unix_server(self._handle, str(self.path))
+        )
+        self._ready.set()
+        self._loop.run_forever()
+        server.close()
+        self._loop.run_until_complete(server.wait_closed())
+
+    def __enter__(self) -> Self:
+        self._thread.start()
+        assert self._ready.wait(10)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(10)
+        self._loop.close()
+
+
+_INSIDE_PROBE = """
+import errno, json, os, socket
+from pathlib import Path
+out = {}
+out["env"] = sorted(os.environ)
+out["missing"] = {}
+for path in json.loads(os.environ.get("PROBE", "[]")):
+    out["missing"][path] = Path(path).exists()
+print(json.dumps(out))
+"""
+
+
+@integration
+@needs_namespaces
+def test_forbidden_paths_do_not_exist_inside(box: sandbox.Sandbox) -> None:
+    uid = os.getuid()
+    forbidden = [
+        os.environ.get("SSH_AUTH_SOCK", "/nonexistent/ssh-agent"),
+        f"/run/user/{uid}/gnupg",
+        f"/run/user/{uid}/gnupg/S.gpg-agent",
+        f"/run/user/{uid}/bus",
+        "/run/docker.sock",
+        "/var/run/docker.sock",
+        "/run/dbus/system_bus_socket",
+        "/run/systemd/resolve",
+        "/run/systemd/resolve/io.systemd.Resolve",
+        "/etc/resolv.conf",
+        "/etc/shadow",
+        str(Path.home() / ".ssh"),
+        str(Path.home() / ".gnupg"),
+        str(Path.home() / ".config"),
+    ]
+    code = (
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "print([p for p in sys.argv[1:] if os.path.lexists(p)])\n"
+        "print(sorted(os.environ))\n"
+        "print(sorted(Path(os.environ['XDG_RUNTIME_DIR']).iterdir()))\n"
+    )
+    status, log = run_python(box, code, *forbidden)
+    lines = log.splitlines()
+    assert status == 0, log
+    assert lines == ["[]", str(["HOME", "LANG", "PATH", "PWD", "XDG_RUNTIME_DIR"]), "[]"]
+
+
+def bound_paths(box: sandbox.Sandbox) -> list[Path]:
+    """Every host path the real argv binds from outside the system directories."""
+    argv = sandbox.bwrap_argv(box, ["true"])
+    return [
+        Path(src)
+        for flag in ("--bind", "--ro-bind")
+        for src, _ in pairs(argv, flag)
+        if not src.startswith(("/usr", "/etc", "/bin", "/sbin", "/lib"))
+    ]
+
+
+@integration
+@needs_namespaces
+def test_home_exists_only_as_the_path_to_a_bound_directory(box: sandbox.Sandbox) -> None:
+    """Wherever the project or the profile lives, each parent directory shows only the way down."""
+    bound = bound_paths(box)
+    directories = {Path("/home"), Path.home()}
+    for path in bound:
+        directories.update(parent for parent in path.parents if parent.is_relative_to("/home"))
+    expected: dict[str, list[str]] = {}
+    for directory in directories:
+        if any(directory.is_relative_to(path) for path in bound):
+            continue  # inside a bound directory, whose contents are the point
+        below = {
+            path.parts[len(directory.parts)] for path in bound if path.is_relative_to(directory)
+        }
+        if directory == Path("/home"):
+            below.add("valetkey")  # the throwaway home
+        expected[str(directory)] = sorted(below)
+    code = (
+        "import json, os, sys\n"
+        "expected = json.loads(sys.argv[1])\n"
+        "seen = {d: sorted(os.listdir(d)) if os.path.isdir(d) else [] for d in expected}\n"
+        "print(json.dumps(seen == expected), json.dumps(seen))\n"
+    )
+    status, log = run_python(box, code, json.dumps(expected))
+    assert status == 0, log
+    assert log.startswith("true"), f"expected {expected}, inside saw {log}"
+
+
+@integration
+@needs_namespaces
+def test_only_the_bound_directories_of_a_home_are_visible(
+    box: sandbox.Sandbox, short_dir: Path
+) -> None:
+    home = short_dir / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "id_ed25519").write_text("secret")
+    (home / "notes.txt").write_text("private")
+    profile = home / ".cache" / "profile"
+    profile.mkdir(parents=True)
+    code = (
+        "import os\n"
+        f"print(sorted(os.listdir({str(home)!r})))\n"
+        f"print(sorted(os.listdir({str(home / '.cache')!r})))\n"
+        f"print(os.path.exists({str(home / '.ssh')!r}))\n"
+    )
+    status, log = run_python(replace(box, profile_dir=profile), code)
+    assert status == 0, log
+    assert log.splitlines() == ["['.cache']", "['profile']", "False"]
+
+
+@integration
+@needs_namespaces
+def test_network_is_unreachable_and_dns_fails(box: sandbox.Sandbox) -> None:
+    code = """
+import errno, socket
+def attempt(kind, address):
+    s = socket.socket(socket.AF_INET, kind)
+    s.settimeout(5)
+    try:
+        s.connect(address)
+    except OSError as error:
+        return errno.errorcode[error.errno]
+    return "connected"
+print("tcp", attempt(socket.SOCK_STREAM, ("1.1.1.1", 443)))
+print("udp", attempt(socket.SOCK_DGRAM, ("8.8.8.8", 53)))
+try:
+    socket.getaddrinfo("example.com", 443)
+except socket.gaierror:
+    print("dns failed")
+print("interfaces", [name for _, name in socket.if_nameindex()])
+"""
+    status, log = run_python(box, code)
+    assert status == 0, log
+    assert "tcp ENETUNREACH" in log
+    assert "udp ENETUNREACH" in log
+    assert "dns failed" in log
+    assert "interfaces ['lo']" in log
+
+
+@integration
+@needs_namespaces
+def test_bridge_forwards_to_the_proxy_socket_on_the_host(box: sandbox.Sandbox) -> None:
+    code = """
+import socket, subprocess, sys, time
+bridge = subprocess.Popen(sys.argv[1:])
+try:
+    for _ in range(100):
+        try:
+            conn = socket.create_connection(("127.0.0.1", 3128), timeout=5)
+            break
+        except OSError:
+            time.sleep(0.1)
+    conn.sendall(b"GET http://site.test/ HTTP/1.1\\r\\nHost: site.test\\r\\n\\r\\n")
+    data = b""
+    while chunk := conn.recv(4096):
+        data += chunk
+    print(data.decode())
+finally:
+    bridge.kill()
+"""
+    with ProxyStub(box.proxy_socket) as stub:
+        status, log = run_python(box, code, *sandbox.bridge_command(box.proxy_socket))
+    assert status == 0, log
+    assert "proxied page" in log
+    assert stub.requests[0].startswith("GET http://site.test/ HTTP/1.1")
+
+
+@integration
+@needs_namespaces
+def test_shared_directory_is_visible_from_both_sides(box: sandbox.Sandbox) -> None:
+    shared = box.runtime_dir / "agent-browser"
+    shared.mkdir()
+    (shared / "from-host").write_text("host")
+    inside = replace(box, shared_dir=shared)
+    code = (
+        "from pathlib import Path\n"
+        f"d = Path({str(shared)!r})\n"
+        "print((d / 'from-host').read_text())\n"
+        "(d / 'from-inside').write_text('inside')\n"
+    )
+    status, log = run_python(inside, code)
+    assert status == 0, log
+    assert log.strip() == "host"
+    assert (shared / "from-inside").read_text() == "inside"
+
+
+@integration
+@needs_namespaces
+def test_system_directories_are_read_only_and_other_writes_stay_inside(
+    box: sandbox.Sandbox,
+) -> None:
+    code = """
+for path in ("/usr/valetkey-probe", "/etc/valetkey-probe"):
+    try:
+        open(path, "w").close()
+    except OSError as error:
+        print(path, error.strerror)
+"""
+    status, log = run_python(box, code)
+    assert status == 0, log
+    assert "/usr/valetkey-probe Read-only file system" in log
+    # /etc is a scratch directory of bind mounts: the write succeeds but never reaches the host.
+    assert not Path("/etc/valetkey-probe").exists()
+
+
+@integration
+@needs_namespaces
+def test_background_processes_end_with_the_first_command(box: sandbox.Sandbox) -> None:
+    status, log = run_inside(box, ["/usr/bin/sh", "-c", "sleep 300 & echo started"])
+    assert status == 0, log
+    ps = subprocess.run(  # fixed argument list
+        ["/usr/bin/pgrep", "-f", "sleep 300"], capture_output=True, text=True, check=False
+    )
+    assert ps.stdout.strip() == ""
+
+
+_CHROMIUM_DRIVER = """
+import json, socket, subprocess, sys, time
+flags, bridge = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+helper = subprocess.Popen(bridge)
+try:
+    for _ in range(100):
+        try:
+            socket.create_connection(("127.0.0.1", 3128), timeout=5).close()
+            break
+        except OSError:
+            time.sleep(0.1)
+    result = subprocess.run(
+        ["/usr/bin/chromium", "--headless=new", "--dump-dom", "--user-data-dir=" + sys.argv[3],
+         *flags, "http://site.test/"],
+        stdin=subprocess.DEVNULL, timeout=60, check=False,
+    )
+    sys.exit(result.returncode)
+finally:
+    helper.kill()
+"""
+
+
+@integration
+@needs_namespaces
+def test_chromium_loads_a_page_through_the_bridge(box: sandbox.Sandbox) -> None:
+    flags = sandbox.chrome_flags(sandbox.installed_chrome_major())
+    bridge = sandbox.bridge_command(box.proxy_socket)
+    with ProxyStub(box.proxy_socket) as stub:
+        status, log = run_python(
+            box, _CHROMIUM_DRIVER, json.dumps(flags), json.dumps(bridge), str(box.profile_dir)
+        )
+    assert status == 0, log
+    assert "proxied page" in log
+    request = next(r for r in stub.requests if r.startswith("GET http://site.test/ HTTP/1.1"))
+    assert "Chrome/" in request
+    assert "HeadlessChrome" not in request
+    # Chrome contacts the page's host and nothing else, bar the startup requests no flag stops.
+    assert {host_of_request(r) for r in stub.requests} - sandbox.BACKGROUND_HOSTS == {"site.test"}
