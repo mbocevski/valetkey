@@ -19,15 +19,13 @@ in ``BASE..HEAD`` (a pull request). Both apply the same rules:
 """
 
 import re
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import conventional
 
-ROOT = Path(__file__).resolve().parent.parent
-CHANGELOG = ROOT / "CHANGELOG.md"
+CHANGELOG = conventional.ROOT / "CHANGELOG.md"
 NAME = "CHANGELOG.md"
 
 SECTIONS = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security")
@@ -201,41 +199,15 @@ def check_commit(commit: conventional.Commit, *, touches_changelog: bool) -> str
     return None
 
 
-def check_range(
-    commits: list[tuple[str, conventional.Commit, bool]], *, skip: bool
-) -> list[Problem]:
-    """Check each ``(sha, commit, touches_changelog)``; ``skip`` waives missing entries."""
+def check_range(commits: list[conventional.RangeCommit], *, skip: bool) -> list[Problem]:
+    """Check each commit of a range; ``skip`` waives missing entries."""
     problems: list[Problem] = []
-    for sha, commit, touches in commits:
-        reason = check_commit(commit, touches_changelog=touches)
-        if reason is None or (skip and commit.user_facing):
+    for item in commits:
+        reason = check_commit(item.commit, touches_changelog=NAME in item.files)
+        if reason is None or (skip and item.commit.user_facing):
             continue
-        header = commit.message.splitlines()[0] if commit.message else ""
-        problems.append(Problem(f"{sha[:12]} '{header}' {reason}"))
+        problems.append(Problem(f"{item.sha[:12]} '{item.header}' {reason}"))
     return problems
-
-
-def git(*args: str) -> str:
-    """Return the output of a read-only git command run in the repository."""
-    result = subprocess.run(  # noqa: S603 - git with fixed subcommands
-        ["git", *args],  # noqa: S607 - git from PATH, as hooks do
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=ROOT,
-    )
-    return result.stdout
-
-
-def range_commits(base: str, head: str) -> list[tuple[str, conventional.Commit, bool]]:
-    """Return every non-merge commit in ``BASE..HEAD``, oldest first."""
-    shas = git("rev-list", "--reverse", "--no-merges", f"{base}..{head}").split()
-    commits = []
-    for sha in shas:
-        message = git("log", "-1", "--format=%B", sha)
-        files = git("diff-tree", "--no-commit-id", "--name-only", "-r", sha).split()
-        commits.append((sha, conventional.parse(message), NAME in files))
-    return commits
 
 
 def report(problems: list[Problem], prefix: str) -> int:
@@ -253,11 +225,12 @@ def main(argv: list[str]) -> int:
             return report(lint(text), f"{NAME}: ")
         case ["commit-msg", path]:
             commit = conventional.parse(Path(path).read_text())
-            staged = git("diff", "--cached", "--name-only").split()
+            staged = conventional.staged_files()
             reason = check_commit(commit, touches_changelog=NAME in staged)
             return report([Problem(f"This commit {reason}.")] if reason else [], "")
         case ["range", base, head, *flags] if flags in ([], ["--skip"]):
-            problems = check_range(range_commits(base, head), skip=flags == ["--skip"])
+            commits = conventional.range_commits(base, head)
+            problems = check_range(commits, skip=flags == ["--skip"])
             return report(problems, "")
         case _:
             print(__doc__, file=sys.stderr)

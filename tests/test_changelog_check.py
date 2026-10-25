@@ -138,10 +138,11 @@ def test_check_commit(*, message: str, touches: bool, fails: bool) -> None:
 
 
 def test_check_range_and_the_skip_label() -> None:
+    changelog = frozenset({"CHANGELOG.md"})
     commits = [
-        ("a" * 40, commit("feat: add status"), False),
-        ("b" * 40, commit("chore: tidy"), True),
-        ("c" * 40, commit("fix: handle EOF"), True),
+        conventional.RangeCommit("a" * 40, commit("feat: add status"), frozenset()),
+        conventional.RangeCommit("b" * 40, commit("chore: tidy"), changelog),
+        conventional.RangeCommit("c" * 40, commit("fix: handle EOF"), changelog),
     ]
     problems = [p.message for p in changelog_check.check_range(commits, skip=False)]
     assert len(problems) == 2
@@ -161,7 +162,7 @@ def test_range_reads_git(
         ("log", "-1", "--format=%B", "s2"): "docs: reword\n",
         ("diff-tree", "--no-commit-id", "--name-only", "-r", "s2"): "README.md\n",
     }
-    monkeypatch.setattr(changelog_check, "git", lambda *args: outputs[args])
+    monkeypatch.setattr(conventional, "git", lambda *args: outputs[args])
     assert changelog_check.main(["range", "base", "head"]) == 1
     assert "s1 'feat: add status' changes what users see" in capsys.readouterr().err
     assert changelog_check.main(["range", "base", "head", "--skip"]) == 0
@@ -172,15 +173,11 @@ def test_commit_msg(
 ) -> None:
     message = tmp_path / "COMMIT_EDITMSG"
     message.write_text("feat: add status\n")
-    monkeypatch.setattr(changelog_check, "git", lambda *_: "src/x.py\n")
+    monkeypatch.setattr(conventional, "git", lambda *_: "src/x.py\n")
     assert changelog_check.main(["commit-msg", str(message)]) == 1
     assert "This commit changes what users see" in capsys.readouterr().err
-    monkeypatch.setattr(changelog_check, "git", lambda *_: "CHANGELOG.md\n")
+    monkeypatch.setattr(conventional, "git", lambda *_: "CHANGELOG.md\n")
     assert changelog_check.main(["commit-msg", str(message)]) == 0
-
-
-def test_git_runs_in_the_repository() -> None:
-    assert changelog_check.git("rev-parse", "--is-inside-work-tree").strip() == "true"
 
 
 def test_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
