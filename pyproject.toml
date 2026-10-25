@@ -1,0 +1,83 @@
+[project]
+name = "valetkey"
+version = "0.1.0"
+description = "A logged-in browser for MCP clients, contained to the sites it is allowed to reach."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Marko Bocevski", email = "marko.bocevski@aiven.io" }
+]
+requires-python = ">=3.14"
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.scripts]
+valetkey = "valetkey.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "prek>=0.5.7",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.2",
+    "ty>=0.0.91",
+    "vale>=3.25.1.0",
+    "zizmor>=1.31.1",
+]
+
+[tool.uv]
+required-version = ">=0.13.5"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812", # conflicts with the formatter
+    "D203",   # conflicts with D211
+    "D213",   # conflicts with D212
+]
+
+[tool.ruff.lint.flake8-copyright]
+notice-rgx = "SPDX-License-Identifier: Apache-2.0"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "D",       # test names say what they test
+    "INP001",  # tests are not a package
+    "PLR2004", # literal values are the point of a test
+    "S101",    # pytest asserts
+]
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.pytest]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra", "--cov", "--cov-report=term-missing"]
+xfail_strict = true
+markers = ["integration: needs bwrap, Chromium and agent-browser; skipped when any is missing"]
+
+[tool.coverage.run]
+branch = true
+source = ["valetkey"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
