@@ -26,6 +26,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      # readme_check.py imports the package, so it has to be installed.
+      - run: uv sync --locked
       - name: README updated for user-visible commits
         env:
           SKIP: ${{ contains(github.event.pull_request.labels.*.name, 'skip-readme') }}
