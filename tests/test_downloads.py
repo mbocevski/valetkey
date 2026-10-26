@@ -770,6 +770,28 @@ FILES = {
         for path, value in TRICKS.items()
     },
 }
+ASSETS = {
+    "/page-with-assets": (
+        {"Content-Type": "text/html"},
+        (
+            b"<title>Assets</title><img src='/pic.png'><script src='/lib.js'></script>"
+            b"<link rel=stylesheet href='/site.css'><p>a page that loads three files</p>"
+        ),
+    ),
+    **{
+        path: (
+            {"Content-Type": kind, "Content-Disposition": f'attachment; filename="{path[1:]}"'},
+            b"x",
+        )
+        for path, kind in (
+            ("/pic.png", "image/png"),
+            ("/lib.js", "text/javascript"),
+            ("/site.css", "text/css"),
+        )
+    },
+}
+"""A page whose pictures, scripts and style sheets all carry ``Content-Disposition: attachment``,
+as pages from some file servers do. The browser uses them; none is a download."""
 INDEX = "<h1>Files</h1>" + "".join(f'<a href="{path}">{path}</a><br>' for path in FILES)
 
 
@@ -779,7 +801,7 @@ def world(short_dir: Path) -> Iterator[tuple[sites.Roots, PageServer]]:
     runtime.mkdir(mode=0o700)
     roots = sites.Roots(short_dir / "cfg", short_dir / "state", runtime)
     sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
-    with PageServer({"/": INDEX}, files=FILES) as pages:
+    with PageServer({"/": INDEX}, files=FILES | ASSETS) as pages:
         yield roots, pages
 
 
@@ -881,6 +903,26 @@ def test_a_navigation_to_an_attachment_is_reported_as_a_download(
                 "invoice.txt"
             ]
             assert names_in(await c.call("downloads", site="demo")) == ["invoice.txt"]
+
+    run(scenario())
+
+
+@pytest.mark.integration
+@needs_everything
+def test_files_a_page_loads_with_an_attachment_header_are_not_counted_as_downloads(
+    world: tuple[sites.Roots, PageServer],
+) -> None:
+    """Pictures, scripts and style sheets are used by the page, so nothing started to download."""
+    roots, pages = world
+
+    async def scenario() -> None:
+        async for c in session(roots, pages):
+            # A failed navigation first, so the tab is on the browser's error page.
+            with pytest.raises(client.DaemonError):
+                await c.call("navigate", site="demo", url="http://unreachable.invalid:1/")
+            result = await c.call("navigate", site="demo", url="http://site.test/page-with-assets")
+            assert result["downloads"] == {"new": [], "in_progress": [], "unsaved": 0}
+            assert names_in(await c.call("downloads", site="demo")) == []
 
     run(scenario())
 

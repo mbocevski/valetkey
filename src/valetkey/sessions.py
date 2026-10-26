@@ -944,10 +944,14 @@ class Session:
         self._call("network", "requests", "--clear")
 
     def attachments(self) -> int:
-        """Count the successful responses logged since the last clear that said ``attachment``.
+        """Count the successful responses logged since the last clear that the browser downloads.
 
-        A response with ``Content-Disposition: attachment`` is one the browser turns into a
-        download, whether or not a file then arrives. Only the headers are looked at.
+        A page, a frame or a link that answers with ``Content-Disposition: attachment`` is one the
+        browser turns into a download, whether or not a file then arrives. A picture, script,
+        style sheet, font or request a script makes is not: the browser uses it whatever the
+        header says, and pages from some servers carry it on all of those. So only a logged
+        request of the kind ``Document`` counts, and one with no kind (an agent-browser that does
+        not say) is taken for one. Only the headers are looked at.
         """
         logged = self._call("network", "requests").get("requests") or []
         count = 0
@@ -956,8 +960,10 @@ class Session:
                 str(k).lower(): str(v) for k, v in (request.get("responseHeaders") or {}).items()
             }
             disposition = headers.get("content-disposition", "").lstrip().lower()
+            kind = str(request.get("resourceType") or "document").lower()
             if (
-                disposition.startswith("attachment")
+                kind == "document"
+                and disposition.startswith("attachment")
                 and HTTPStatus.OK <= int(request.get("status") or 0) < HTTPStatus.MULTIPLE_CHOICES
             ):
                 count += 1

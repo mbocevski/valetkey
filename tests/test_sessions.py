@@ -484,6 +484,9 @@ def test_no_session_method_lets_a_leading_dash_reach_the_arguments(
     ]
 
 
+ATTACHMENT = {"Content-Disposition": 'attachment; filename="a.pdf"'}
+
+
 def test_attachments_counts_only_successful_attachment_responses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -508,6 +511,26 @@ def test_attachments_counts_only_successful_attachment_responses(
     ]
     monkeypatch.setattr(sessions.subprocess, "run", FakeRun(answer({})))
     assert session.attachments() == 0
+
+
+@pytest.mark.parametrize(
+    "kind", ["Image", "Script", "Stylesheet", "Font", "Media", "XHR", "Fetch", "Other", "Ping"]
+)
+def test_a_picture_or_script_with_an_attachment_header_is_not_a_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """The browser uses these whatever the header says; only a page or frame becomes a file."""
+    logged = [
+        {"status": 200, "resourceType": kind, "responseHeaders": ATTACHMENT},
+        {"status": 200, "resourceType": kind, "responseHeaders": ATTACHMENT},
+        {"status": 200, "resourceType": "Document", "responseHeaders": ATTACHMENT},
+        {"status": 200, "resourceType": "document", "responseHeaders": ATTACHMENT},
+        {"status": 200, "resourceType": "Document", "responseHeaders": {}},
+        {"status": 200, "resourceType": "", "responseHeaders": ATTACHMENT},  # says nothing
+        {"status": 200, "responseHeaders": ATTACHMENT},  # an agent-browser with no kind at all
+    ]
+    monkeypatch.setattr(sessions.subprocess, "run", FakeRun(answer({"requests": logged})))
+    assert make_session(tmp_path).attachments() == 4
 
 
 def test_password_fields_asks_the_browser_to_count_them(
