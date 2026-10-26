@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import logging
 import os
+import re
+import socket
 import stat
 import threading
 from pathlib import Path
@@ -556,6 +559,134 @@ def test_sweep_files_everything_that_is_finished(folders: tuple[Path, Path]) -> 
     downloads.sweep(incoming, box)
     assert (box / "done.txt").exists()
     assert sorted(p.name for p in incoming.iterdir()) == [".claim-abc", "half.bin.crdownload"]
+
+
+def plant_everything(incoming: Path, outside: Path) -> None:
+    """Put a link, a dangling link, a link to a directory, a directory, a pipe and a socket."""
+    (incoming / "link.pdf").symlink_to(outside / "secret.txt")
+    (incoming / "dangling").symlink_to(outside / "missing")
+    (incoming / "dirlink").symlink_to(outside)
+    (incoming / "folder").mkdir()
+    (incoming / "folder" / "inner.txt").write_text("inner", encoding="utf-8")
+    (incoming / "folder" / "inner-link").symlink_to(outside)
+    os.mkfifo(incoming / "pipe")
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(incoming / "sock"))
+
+
+@pytest.fixture
+def outside(tmp_path: Path) -> Path:
+    place = tmp_path / "outside"
+    place.mkdir()
+    (place / "secret.txt").write_text("original", encoding="utf-8")
+    (place / "other.txt").write_text("other", encoding="utf-8")
+    return place
+
+
+def logged(caplog: pytest.LogCaptureFixture) -> dict[str, str]:
+    """The entries the log says were removed from the incoming folder, with their kind."""
+    found = [
+        re.fullmatch(r"removed '(.*)', a (.*), from .*", r.getMessage()) for r in caplog.records
+    ]
+    assert all(found), [r.getMessage() for r in caplog.records]
+    return {match[1]: match[2] for match in found if match}
+
+
+def untouched(outside: Path) -> bool:
+    return sorted(p.name for p in outside.iterdir()) == ["other.txt", "secret.txt"] and (
+        (outside / "secret.txt").read_text(encoding="utf-8") == "original"
+    )
+
+
+def test_everything_that_is_not_a_regular_file_is_removed_without_being_followed(
+    folders: tuple[Path, Path], outside: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _, incoming = folders
+    plant_everything(incoming, outside)
+    (incoming / "done.txt").write_text("done", encoding="utf-8")
+    (incoming / "half.bin.crdownload").write_text("half", encoding="utf-8")
+    (incoming / ".claim-abc").write_text("claimed", encoding="utf-8")
+    with caplog.at_level(logging.INFO, logger="valetkey.downloads"):
+        removed = downloads.clear_irregular(incoming)
+    assert sorted(removed) == ["dangling", "dirlink", "folder", "link.pdf", "pipe", "sock"]
+    assert sorted(p.name for p in incoming.iterdir()) == [
+        ".claim-abc",
+        "done.txt",
+        "half.bin.crdownload",
+    ]
+    assert untouched(outside)
+    assert logged(caplog) == {
+        "link.pdf": "symbolic link",
+        "dangling": "symbolic link",
+        "dirlink": "symbolic link",
+        "folder": "directory",
+        "pipe": "pipe",
+        "sock": "special file",
+    }
+    assert len(caplog.records) == 6  # one line for each
+
+
+def test_a_clear_folder_logs_nothing(
+    folders: tuple[Path, Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    _, incoming = folders
+    (incoming / "done.txt").write_text("done", encoding="utf-8")
+    with caplog.at_level(logging.INFO, logger="valetkey.downloads"):
+        assert downloads.clear_irregular(incoming) == []
+    assert caplog.records == []
+
+
+def test_a_folder_that_is_a_symlink_or_missing_is_left_alone(tmp_path: Path, outside: Path) -> None:
+    (outside / "planted").symlink_to(outside / "secret.txt")
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside)
+    assert downloads.clear_irregular(linked) == []
+    assert downloads.clear_irregular(tmp_path / "missing") == []
+    assert (outside / "planted").is_symlink()
+
+
+def test_an_entry_that_cannot_be_removed_stays_and_is_not_reported(
+    folders: tuple[Path, Path], outside: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, incoming = folders
+    (incoming / "link.pdf").symlink_to(outside / "secret.txt")
+
+    def refuse(_path: object, **_options: object) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    assert downloads.clear_irregular(incoming) == []
+    assert (incoming / "link.pdf").is_symlink()
+
+
+def test_a_link_planted_mid_session_is_gone_after_the_next_download(
+    folders: tuple[Path, Path], outside: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    box, incoming = folders
+    (incoming / "first.txt").write_text("first", encoding="utf-8")
+    first = collect(box, {}, incoming=incoming, clock=FakeClock().clock())
+    assert [d.name for d in first.new] == ["first.txt"]
+    (incoming / "planted.pdf").symlink_to(outside / "secret.txt")  # the session goes on
+    (incoming / "second.txt").write_text("second", encoding="utf-8")
+    with caplog.at_level(logging.INFO, logger="valetkey.downloads"):
+        second = collect(box, first.seen, incoming=incoming, clock=FakeClock().clock())
+    assert [d.name for d in second.new] == ["second.txt"]
+    assert list(incoming.iterdir()) == []
+    assert not (box / "planted.pdf").exists()
+    assert untouched(outside)
+    assert logged(caplog) == {"planted.pdf": "symbolic link"}
+
+
+def test_sweep_also_removes_what_is_not_a_regular_file(
+    folders: tuple[Path, Path], outside: Path
+) -> None:
+    box, incoming = folders
+    plant_everything(incoming, outside)
+    (incoming / "done.txt").write_text("done", encoding="utf-8")
+    downloads.sweep(incoming, box)
+    assert list(incoming.iterdir()) == []
+    assert (box / "done.txt").exists()
+    assert untouched(outside)
 
 
 def test_the_real_clock_is_the_default() -> None:

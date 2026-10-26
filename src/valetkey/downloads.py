@@ -13,6 +13,9 @@ browser's side:
   removes the claim. A link only succeeds if the name is free, so two moves at once, in this
   process or another, cannot collide. A symlink or anything else that is not a regular file is
   refused and removed, never followed.
+* Whatever is in the incoming folder that is not a regular file (a symlink, a directory, a pipe)
+  is removed each time the daemon files downloads, without following it, and one line is logged
+  for each. It could only have been planted there, since the browser writes plain files.
 * In the folder the person sees, only regular files directly in it are reported. A symlink is
   never followed and never reported, whatever it points at.
 * The kind of a file is guessed from its first bytes (:func:`sniff_mime`), never from its name
@@ -27,16 +30,20 @@ what is still running as in progress.
 import contextlib
 import itertools
 import json
+import logging
 import os
+import shutil
 import stat
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-    from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 PARTIAL_SUFFIX = ".crdownload"
 CLAIM_PREFIX = ".claim-"
@@ -196,6 +203,48 @@ def scan(directory: Path) -> dict[str, tuple[Signature, int]]:
     return found
 
 
+def _kind(mode: int) -> str:
+    """Name what kind of entry ``mode`` is, for a log line."""
+    if stat.S_ISLNK(mode):
+        return "symbolic link"
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISFIFO(mode):
+        return "pipe"
+    return "special file"
+
+
+def clear_irregular(directory: Path) -> list[str]:
+    """Remove every entry directly in ``directory`` that is not a regular file, and name them.
+
+    A symlink is unlinked, never followed, so what it pointed at is untouched. A directory is
+    removed with what is in it (``shutil.rmtree`` does not follow links either), and a pipe or
+    another special file is unlinked. One line is logged for each. A ``directory`` that is itself
+    a symlink, or is missing, is left alone. An entry that cannot be removed stays.
+    """
+    removed: list[str] = []
+    try:
+        if directory.is_symlink():
+            return removed
+        entries = list(os.scandir(directory))
+    except OSError:
+        return removed
+    for entry in entries:
+        try:
+            mode = entry.stat(follow_symlinks=False).st_mode
+            if stat.S_ISREG(mode):
+                continue
+            if stat.S_ISDIR(mode):
+                shutil.rmtree(entry.path)
+            else:
+                Path(entry.path).unlink()
+        except OSError:
+            continue  # it vanished, or cannot be removed; either way there is nothing to follow
+        logger.info("removed %r, a %s, from the incoming downloads folder", entry.name, _kind(mode))
+        removed.append(entry.name)
+    return removed
+
+
 def _finished(directory: Path, name: str, size: int) -> Download | None:
     head = _read_head(directory / name)
     if head is None:
@@ -276,6 +325,7 @@ def _intake(
     Returns the running downloads (name without ``.crdownload`` to size), the signatures seen
     now, and whether any finished-looking file was left because it changed since the last look.
     """
+    clear_irregular(incoming)
     listing = scan(incoming)
     running = {
         name.removesuffix(PARTIAL_SUFFIX): size
@@ -297,8 +347,9 @@ def sweep(incoming: Path, directory: Path) -> None:
     """Move every finished file from ``incoming`` into ``directory``, at once.
 
     For when the browser is gone and nothing can still be changing: anything left that is not a
-    partial download is a finished one.
+    partial download is a finished one. Entries that are not regular files are removed.
     """
+    clear_irregular(incoming)
     for name in scan(incoming):
         if not name.endswith(PARTIAL_SUFFIX) and not name.startswith(CLAIM_PREFIX):
             move_in(incoming / name, directory)
