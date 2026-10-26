@@ -148,6 +148,12 @@ def test_chrome_flags_hold_the_containment_and_quiet_flags() -> None:
     assert len(flags) == len(set(flags))
 
 
+def test_chrome_flags_can_leave_out_the_automation_flag() -> None:
+    quiet = sandbox.chrome_flags(156, hide_automation=False)
+    assert not any("AutomationControlled" in flag for flag in quiet)
+    assert quiet == [f for f in sandbox.chrome_flags(156) if "AutomationControlled" not in f]
+
+
 def test_chrome_user_agent_names_the_installed_major() -> None:
     agent = next(f for f in sandbox.chrome_flags(131) if f.startswith("--user-agent="))
     assert "Chrome/131.0.0.0" in agent

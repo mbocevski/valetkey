@@ -241,13 +241,14 @@ def waypipe_wrapper(
 def chromium_command(profile_dir: Path, start_url: str, chrome_major: int) -> list[str]:
     """Return the Chromium command line for a login window.
 
-    The containment flags of :func:`valetkey.sandbox.chrome_flags` stay. The window is a normal
-    one with an address bar and its own profile, on Wayland. There is no ``--headless``, no
-    ``--app``, no kiosk mode and no remote debugging port.
+    The containment flags of :func:`valetkey.sandbox.chrome_flags` stay, except the one that
+    hides automation: nothing drives this window, and Chromium shows a warning bar for it. The
+    window is a normal one with an address bar and its own profile, on Wayland. There is no
+    ``--headless``, no ``--app``, no kiosk mode and no remote debugging port.
     """
     return [
         CHROMIUM,
-        *sandbox.chrome_flags(chrome_major),
+        *sandbox.chrome_flags(chrome_major, hide_automation=False),
         "--ozone-platform=wayland",
         f"--user-data-dir={profile_dir}",
         start_url,

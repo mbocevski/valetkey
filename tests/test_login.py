@@ -202,7 +202,8 @@ def test_chromium_command_is_a_visible_contained_wayland_window(tmp_path: Path) 
     assert "--ozone-platform=wayland" in command
     assert f"--user-data-dir={tmp_path / 'prof'}" in command
     assert f"--proxy-server=http://{sandbox.PROXY_ADDRESS}" in command
-    assert set(sandbox.chrome_flags(156)) <= set(command)
+    assert set(sandbox.chrome_flags(156, hide_automation=False)) <= set(command)
+    assert not any("AutomationControlled" in flag for flag in command)
     for flag in command:
         assert not flag.startswith(
             ("--headless", "--remote-debugging", "--app", "--kiosk", "--start-fullscreen")

@@ -125,13 +125,16 @@ def write_chrome_policy(directory: Path) -> Path:
     return directory
 
 
-def chrome_flags(major: int) -> list[str]:
+def chrome_flags(major: int, *, hide_automation: bool = True) -> list[str]:
     """Return the Chrome command-line flags every contained browser starts with.
 
     ``major`` is the installed Chrome major version, which the user agent repeats so that
-    headless Chrome does not announce itself as ``HeadlessChrome``.
+    headless Chrome does not announce itself as ``HeadlessChrome``. ``hide_automation`` adds
+    the flag that hides ``navigator.webdriver``. A login window is driven by a person, and
+    Chrome shows an "unsupported command-line flag" bar when it gets that flag, so it passes
+    ``False``.
     """
-    return [
+    flags = [
         f"--proxy-server=http://{PROXY_ADDRESS}",
         # Without this, Chrome skips the proxy for loopback. The namespace's own loopback
         # has nothing on it but the forwarder, so sending it through the proxy is harmless.
@@ -155,9 +158,11 @@ def chrome_flags(major: int) -> list[str]:
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
         "--hide-crash-restore-bubble",
-        "--disable-blink-features=AutomationControlled",
         f"--user-agent={_USER_AGENT.format(major=major)}",
     ]
+    if hide_automation:
+        flags.append("--disable-blink-features=AutomationControlled")
+    return flags
 
 
 @dataclass(frozen=True, slots=True)
