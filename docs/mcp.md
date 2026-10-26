@@ -28,9 +28,10 @@ Start with `browser_sites`. The others act on one site by its name.
   to click or fill.
 - `browser_click` clicks an element by reference, or by visible text and role. It looks the
   element up again at click time, and checks an `expect` of `text_appears`, `text_gone` or
-  `url_changes`. Only a click with an `expect` is ever repeated.
+  `url_changes`. Only a click with an `expect` is ever repeated, and only when the first attempt
+  changed nothing.
 - `browser_type` replaces the contents of a field, and presses Enter when `submit` is true.
-- `browser_navigate` goes to a URL on an allowed host.
+- `browser_navigate` goes to an HTTP or HTTPS address on an allowed host.
 - `browser_downloads` lists the files the browser has saved. Clicks and navigation also list new
   files.
 - `browser_screenshot` returns an image of the page.
@@ -50,10 +51,12 @@ valetkey reads the first bytes of a file to report its type and never opens or r
 
 When a page needs a host the site does not allow, the browser tools list it as refused. The agent
 may call `browser_allow` with one exact host name and a reason. Only a host that was refused, or
-that was left out at login, can be asked about. Nothing is allowed unless you say yes.
+that is in the site's excluded list (left out at login, or denied), can be asked about. Nothing is
+allowed unless you say yes.
 
-There are two ways to answer. A client that can show a question to you puts it there. Otherwise
-set `approve_command` in `$XDG_CONFIG_HOME/valetkey/config.json` to a program and its arguments:
+There are two ways to answer. A client that can show a question to you is asked first, and puts it
+there. Otherwise set `approve_command` in `$XDG_CONFIG_HOME/valetkey/config.json` to a program and
+its arguments. The file may hold no other key:
 
 ```json
 {"approve_command": ["/home/me/bin/ask-valetkey"]}
@@ -62,17 +65,22 @@ set `approve_command` in `$XDG_CONFIG_HOME/valetkey/config.json` to a program an
 The daemon runs it with one line of JSON on standard input:
 `{"site": ..., "host": ..., "seen_during_login": ..., "reason": ...}`. Exit status 0 means yes.
 Any other status means no. A command that runs longer than 60 seconds counts as unanswered. What it
-prints is never shown to the agent. The reason is the agent's claim, so show it as one.
+prints is never shown to the agent. The reason is the agent's claim, so show it as one. The command
+runs without a shell and gets a small environment: `PATH`, `HOME`, `XDG_RUNTIME_DIR`, `LANG`, and the
+display and session bus variables (`WAYLAND_DISPLAY`, `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`), which
+it can use to show you a question.
 
 With neither, nobody can be asked, and the agent tells you to run `valetkey allow SITE HOST`.
 
 ## What `browser_allow` returns
 
-- `allowed`: you said yes. The next navigation to the host will load.
-- `denied`: you said no. The agent must not ask again for that host.
-- `expired`: nobody answered, or the question was dismissed. The agent may ask again.
-- `could_not_ask`: nobody could be asked from here. The agent tells you the exact
-  `valetkey allow` command to run.
+- `allowed`: you said yes, or the host was already allowed. The next navigation to it will load.
+- `denied`: you said no. The agent must not ask again for that host, and the daemon refuses to
+  ask again while it runs.
+- `expired`: nobody answered, the question was dismissed, or the approval command took longer than
+  60 seconds. The agent may ask again.
+- `could_not_ask`: nobody could be asked from here, because no approval command is set or the one
+  that is set could not run. The agent tells you the exact `valetkey allow` command to run.
 - `not_eligible`: the host cannot be asked about, either because it was not refused for this site
   or because its name is allowed but it resolves to a private address. The message says which.
 
@@ -82,6 +90,11 @@ A host that resolves to a private address is refused even when its name is allow
 an intranet site. `browser_allow` cannot change it. The agent tells you to run
 `valetkey allow SITE --private-network RANGE` with the narrowest range that holds the address, such
 as `10.20.0.7/32` or a `/24`. [Security](security.md) explains the rule.
+
+`browser_login` follows the same rule. When the site's start host resolves to a private address it
+may not reach, the call fails and tells the agent to ask you. For a site that does not exist yet,
+the command is `valetkey add SITE START --private-network RANGE`. A login that was refused hosts for
+their private address says so in what it learned, so the agent can pass it on.
 
 ## Expired logins
 

@@ -4,38 +4,44 @@ What valetkey contains, what it does not, and who decides. Back to the [README](
 
 ## What a session can reach
 
-Each site's browser runs in its own Linux network namespace with no network interface. Its only
-way out is one local socket to a proxy that valetkey runs for that site. The proxy checks every
-connection in turn:
+Each site's browser runs in its own Linux network namespace, which has only a loopback interface.
+The browser's connections go to a small forwarder on that loopback, and the forwarder hands them to
+one local socket: a proxy that valetkey runs for that site. The proxy checks every connection in
+turn:
 
 - The port must be 443 for an encrypted connection or 80 for plain HTTP.
-- The host must be one the site's policy allows, or a subdomain of one.
+- The host must be one the site's policy allows, or a subdomain of one, and must not be in its
+  excluded list. An excluded entry wins over an allowed one.
 - The proxy looks the host up itself and connects only to a public address. Every address the name
   resolves to must pass, so DNS rebinding cannot steer the browser at a service on your machine or
   your network.
 
 Anything else is refused and recorded. The record holds the host, the port and a short reason, and
 never a path, a query or a header, because on a logged-in site those carry credentials. The browser
-cannot look up names or use WebRTC, because a namespace with no interface has no way to send either.
+cannot look up names itself or send WebRTC traffic, because the namespace has no route out. It names
+the host to the proxy, which does the lookup.
 
 The browser's files are limited too. System directories are read-only, the home directory is an
-empty throwaway one, the environment is cleared, and the only writable places are the site's
-profile, its downloads folder and the proxy socket. The SSH and GPG agents, the Docker socket,
-the session bus and the rest of your home are not there.
+empty throwaway one, and the environment is cleared. The only places it can write that last are the
+site's profile, its downloads folder, and the directories that hold the proxy's socket and the
+browser driver's socket. Its temporary directory, home and runtime directory exist only in memory.
+The SSH and GPG agents, the Docker socket, the session bus and the rest of your home are not there.
 
 ## Who decides
 
 A host is added to a site's policy only when a person says yes. Three things can change a policy:
 
-- Logging in. The hosts the login window navigated to are allowed, and background-only hosts are
-  left out and listed as excluded.
+- Logging in. The site's own domain is allowed, with its subdomains. Any other host the login
+  window navigated to, such as a sign-in provider, is allowed as that exact host. A host the page
+  only loaded in the background is left out and listed as excluded.
 - You, with `valetkey allow` and `valetkey deny`.
 - The agent's `browser_allow`, which only asks. You answer in the client's own interface or through
   the approval command, and no tool takes "the person said yes" from the agent. See
   [MCP clients](mcp.md).
 
-Only a host that was refused for the site, or that you left out at login, can be asked about. A
-steered agent cannot fill your screen with questions about arbitrary hosts.
+Only a host that was refused for the site, or that is in its excluded list, can be asked about. The
+excluded list holds the hosts left out at login and the ones you denied. A steered agent cannot
+fill your screen with questions about arbitrary hosts.
 
 ## Private networks
 
@@ -75,11 +81,15 @@ matters to you.
   be reached for a cached page to appear.
 - Whatever an allowed host serves is readable by the agent, and whatever the agent types goes to
   that host. Allow only hosts you would trust with the session.
-- Uploads are absent. No tool uploads a file, and the browser has no access to your files.
+- Uploads are absent. No tool uploads a file, and the browser can see only its own profile and the
+  site's downloads folder, not the rest of your files.
+- While a login window is open, it can reach any public host on ports 80 and 443. That is how
+  valetkey learns which hosts the site needs. The address checks still apply, so private
+  addresses stay refused unless you listed their range for the site.
 - A login window needs a Wayland session. An X11 client can read every keystroke and the whole
   screen, so valetkey refuses to open a login window on X11.
-- Chrome's own background requests, such as update checks, are refused and listed on a separate
-  line of the tool results. Allow one only if a page needs it.
+- Chrome makes some requests of its own, such as update checks. They are refused and listed on a
+  separate line of the tool results. Allow one only if a page needs it.
 
 ## Page content is untrusted
 
