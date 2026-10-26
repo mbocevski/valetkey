@@ -206,7 +206,8 @@ async def announce_session(
 
     Nothing happens when ``notify-send`` is not installed. Only the site name, which valetkey
     validated, goes into the message; nothing from a page does. A notification that does not
-    finish in :data:`NOTIFY_TIMEOUT` seconds is killed, and a failure is ignored.
+    finish in :data:`NOTIFY_TIMEOUT` seconds is killed. A failure never reaches the session; it is
+    logged as one line at the information level, so a broken notification does not hide.
     """
     program = which("notify-send")
     if program is None:
@@ -222,13 +223,18 @@ async def announce_session(
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-    except OSError:
+    except OSError as error:
+        logger.info("notify-send could not start: %s", error)
         return
     try:
-        await asyncio.wait_for(process.wait(), NOTIFY_TIMEOUT)
+        status = await asyncio.wait_for(process.wait(), NOTIFY_TIMEOUT)
     except TimeoutError:
         process.kill()
         await process.wait()
+        logger.info("notify-send did not finish in %g seconds and was stopped", NOTIFY_TIMEOUT)
+        return
+    if status != 0:
+        logger.info("notify-send exited with status %s, so no notification was shown", status)
 
 
 # -- the protocol: small pure functions ------------------------------------------------------

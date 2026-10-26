@@ -2421,15 +2421,16 @@ def test_a_failing_announcement_does_not_fail_the_open(
 class FakeNotifier:
     """Stands in for the ``notify-send`` process."""
 
-    def __init__(self, *, hang: bool = False) -> None:
+    def __init__(self, *, hang: bool = False, status: int = 0) -> None:
         self.hang = hang
+        self.status = status
         self.killed = False
         self._released = asyncio.Event()
 
     async def wait(self) -> int:
         if self.hang and not self.killed:
             await self._released.wait()
-        return 0
+        return self.status
 
     def kill(self) -> None:
         self.killed = True
@@ -2466,18 +2467,49 @@ def test_announce_is_skipped_without_notify_send(
     run(real_announce("sitex", which=lambda _name: None, spawn=spawn))
 
 
-def test_announce_ignores_a_program_that_cannot_run(
-    real_announce: Callable[..., Awaitable[None]],
+def test_announce_logs_a_program_that_cannot_run(
+    real_announce: Callable[..., Awaitable[None]], caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level("INFO", logger="valetkey.daemon")
+
     async def spawn(*_args: Any, **_kwargs: Any) -> FakeNotifier:  # noqa: ANN401
         raise PermissionError
 
     run(real_announce("sitex", which=lambda _name: "/x", spawn=spawn))
+    assert "notify-send could not start" in caplog.text
+
+
+def test_announce_logs_a_notification_that_failed(
+    real_announce: Callable[..., Awaitable[None]], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="valetkey.daemon")
+
+    async def spawn(*_args: Any, **_kwargs: Any) -> FakeNotifier:  # noqa: ANN401
+        return FakeNotifier(status=1)
+
+    run(real_announce("sitex", which=lambda _name: "/x", spawn=spawn))
+    assert "notify-send exited with status 1, so no notification was shown" in caplog.text
+
+
+def test_announce_logs_nothing_when_the_notification_was_shown_or_skipped(
+    real_announce: Callable[..., Awaitable[None]], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="valetkey.daemon")
+
+    async def spawn(*_args: Any, **_kwargs: Any) -> FakeNotifier:  # noqa: ANN401
+        return FakeNotifier()
+
+    run(real_announce("sitex", which=lambda _name: "/x", spawn=spawn))
+    run(real_announce("sitex", which=lambda _name: None, spawn=spawn))
+    assert caplog.text == ""
 
 
 def test_announce_kills_a_notification_that_hangs(
-    real_announce: Callable[..., Awaitable[None]], monkeypatch: pytest.MonkeyPatch
+    real_announce: Callable[..., Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level("INFO", logger="valetkey.daemon")
     monkeypatch.setattr(daemon, "NOTIFY_TIMEOUT", 0.05)
     notifier = FakeNotifier(hang=True)
 
@@ -2486,6 +2518,7 @@ def test_announce_kills_a_notification_that_hangs(
 
     run(real_announce("sitex", which=lambda _name: "/x", spawn=spawn))
     assert notifier.killed
+    assert "notify-send did not finish in 0.05 seconds and was stopped" in caplog.text
 
 
 def test_the_daemon_keeps_nothing_running_after_shutdown(roots: sites.Roots) -> None:
