@@ -531,11 +531,47 @@ def test_downloads_text_is_empty_when_nothing_arrived() -> None:
 def test_downloads_text_says_when_a_download_started_but_nothing_was_saved() -> None:
     one = mcp_server.downloads_text({"new": [], "in_progress": [], "unsaved": 1})
     assert one.startswith("1 download started but no file was saved.")
-    assert "file name is too long" in one
+    assert "file name is too long" in one  # nothing else is known about it
     two = mcp_server.downloads_text({"new": [entry("a.pdf")], "in_progress": [], "unsaved": 2})
     assert two.startswith("2 downloads started but no file was saved.")
     assert '"/dl/sitex/a.pdf"' in two
     assert mcp_server.downloads_text({"new": [], "in_progress": [], "unsaved": 0}) == ""
+
+
+def started(name: str, url: str = "https://sitex.test/f") -> dict[str, Any]:
+    return {"name": {"untrusted": True, "text": name}, "url": {"untrusted": True, "text": url}}
+
+
+def test_downloads_text_names_what_started_and_says_when_the_page_did_it() -> None:
+    found = {
+        "new": [],
+        "in_progress": [],
+        "unsaved": 2,
+        "started": [started("a.pdf"), started("b.pdf", "https://sitex.test/g")],
+        "by_page": True,
+    }
+    text = mcp_server.downloads_text(found)
+    assert text.startswith("2 downloads started but no file was saved.")
+    assert '"name": "a.pdf"' in text
+    assert '"url": "https://sitex.test/g"' in text
+    assert "Nothing was clicked: the page started them itself." in text
+    assert "too long" not in text
+    assert "share a file name" not in text
+    clicked = mcp_server.downloads_text(found | {"by_page": False})
+    assert "Nothing was clicked" not in clicked
+
+
+def test_downloads_text_explains_downloads_with_one_name_and_names_that_are_too_long() -> None:
+    same = {
+        "new": [],
+        "in_progress": [],
+        "unsaved": 1,
+        "started": [started("same.txt"), started("same.txt")],
+        "by_page": False,
+    }
+    assert "keeps only one of the files" in mcp_server.downloads_text(same)
+    long = same | {"started": [started("x" * 300)]}
+    assert "file name is too long" in mcp_server.downloads_text(long)
 
 
 def test_downloads_text_lists_new_and_running_files_as_page_content() -> None:

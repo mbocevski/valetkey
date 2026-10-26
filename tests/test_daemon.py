@@ -290,10 +290,13 @@ class FakeSession:
     def clear_requests(self) -> None:
         self.calls.append(("clear_requests",))
 
-    def attachments(self) -> int:
+    def started_downloads(self) -> list[sessions.Attachment]:
         if self.attach_error is not None:
             raise self.attach_error
-        return self.attached
+        return [
+            sessions.Attachment(f"https://sitex.test/file{n}", f"file{n}.bin")
+            for n in range(self.attached)
+        ]
 
     def fill(self, ref: str, text: str) -> None:
         self._use("fill", ref, text)
@@ -2478,12 +2481,41 @@ def test_a_download_that_started_but_saved_nothing_is_reported_as_unsaved(
             await c.call("snapshot", site="sitex")
             session.attached = 1  # a response said "attachment", and no file arrived
             result = await c.call("click", site="sitex", ref="e1")
-            assert result["downloads"] == {"new": [], "in_progress": [], "unsaved": 1}
+            assert result["downloads"] == {
+                "new": [],
+                "in_progress": [],
+                "unsaved": 1,
+                "started": [
+                    {
+                        "url": {"untrusted": True, "text": "https://sitex.test/file0"},
+                        "name": {"untrusted": True, "text": "file0.bin"},
+                    }
+                ],
+                "by_page": False,  # a click: the person's own action may have caused it
+            }
             nav = await c.call("navigate", site="sitex", url="https://sitex.test/x")
             assert nav["downloads"]["unsaved"] == 1
+            assert nav["downloads"]["by_page"] is True  # nothing was clicked
             session.attached = 0
             quiet = await c.call("click", site="sitex", ref="e1")
             assert quiet["downloads"]["unsaved"] == 0
+
+    run(scenario())
+
+
+def test_only_the_first_unsaved_downloads_are_named_but_all_are_counted(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    downloads_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            rig.factory.made[0].attached = daemon.MAX_STARTED + 5
+            result = await c.call("navigate", site="sitex", url="https://sitex.test/x")
+            assert result["downloads"]["unsaved"] == daemon.MAX_STARTED + 5
+            assert len(result["downloads"]["started"]) == daemon.MAX_STARTED
 
     run(scenario())
 
@@ -2496,14 +2528,14 @@ def test_counting_attachments_never_fails_the_call(roots: sites.Roots) -> None:
             await c.call("open", site="sitex")
             state = rig.daemon._sites["sitex"]  # noqa: SLF001
             session = rig.factory.made[0]
-            assert await rig.daemon._attachments(state) == 0  # noqa: SLF001
+            assert await rig.daemon._started(state) == []  # noqa: SLF001
             session.attached = 3
-            assert await rig.daemon._attachments(state) == 3  # noqa: SLF001
+            assert len(await rig.daemon._started(state)) == 3  # noqa: SLF001
 
             session.attach_error = sessions.AgentBrowserError("gone")
-            assert await rig.daemon._attachments(state) == 0  # noqa: SLF001
+            assert await rig.daemon._started(state) == []  # noqa: SLF001
             await c.call("close", site="sitex")
-            assert await rig.daemon._attachments(state) == 0  # noqa: SLF001
+            assert await rig.daemon._started(state) == []  # noqa: SLF001
 
     run(scenario())
 
@@ -2520,7 +2552,8 @@ def test_a_navigation_that_aborted_with_an_unsaved_download_says_so(roots: sites
             session.attached = 1
             result = await c.call("navigate", site="sitex", url="https://sitex.test/long-name")
             assert result["download_only"] is True
-            assert result["downloads"] == {"new": [], "in_progress": [], "unsaved": 1}
+            assert result["downloads"]["unsaved"] == 1
+            assert result["downloads"]["by_page"] is False  # the address itself was the download
 
     run(scenario())
 

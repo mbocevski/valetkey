@@ -58,6 +58,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- When downloads start but no file is saved, the result now lists each one's name and address, says if the page started them without a click, and explains names that repeat.
 - `browser_navigate` lists as refused only the hosts its own page asked for, not the beacons the previous page fired as it unloaded.
 - `browser_navigate` and `browser_open` now begin with "The page did not load: HOST is not allowed for SITE" when the proxy refused the target's host, instead of the browser's tunnel error.
 - `browser_login` closes the site's running session before it opens the login window, and says so, instead of failing with `session_running` and asking the agent to close it first.

@@ -25,6 +25,7 @@ How it is arranged:
 import base64
 import binascii
 import contextlib
+import email.message
 import itertools
 import json
 import logging
@@ -43,7 +44,7 @@ from dataclasses import dataclass, replace
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
-from urllib.parse import urldefrag, urljoin, urlsplit
+from urllib.parse import unquote, urldefrag, urljoin, urlsplit
 
 from valetkey import procs, profiles, sandbox, seccomp, sites
 
@@ -157,6 +158,14 @@ class Ref:
     """An interactive element in a snapshot."""
 
     role: str
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class Attachment:
+    """A response the browser turns into a download: its address and the name it suggests."""
+
+    url: str
     name: str
 
 
@@ -618,6 +627,16 @@ def _body_of(record: Path, where: str) -> Body:
     )
 
 
+def _suggested_name(disposition: str, url: str) -> str:
+    """Return the name a ``Content-Disposition`` header suggests, or the address's last part."""
+    header = email.message.Message()
+    header["Content-Disposition"] = disposition
+    name = header.get_filename()
+    if isinstance(name, str) and name:
+        return name
+    return unquote(urlsplit(url).path).rstrip("/").rsplit("/", 1)[-1]
+
+
 def _check_ref(ref: str) -> str:
     """Return ``ref`` as ``@eN``; raise ``ValueError`` if it is not a snapshot reference."""
     match = _REF.fullmatch(ref)
@@ -943,31 +962,33 @@ class Session:
         """Forget the network requests logged so far, so the next count starts from here."""
         self._call("network", "requests", "--clear")
 
-    def attachments(self) -> int:
-        """Count the successful responses logged since the last clear that the browser downloads.
+    def started_downloads(self) -> list[Attachment]:
+        """List the successful responses logged since the last clear that the browser downloads.
 
         A page, a frame or a link that answers with ``Content-Disposition: attachment`` is one the
         browser turns into a download, whether or not a file then arrives. A picture, script,
         style sheet, font or request a script makes is not: the browser uses it whatever the
         header says, and pages from some servers carry it on all of those. So only a logged
         request of the kind ``Document`` counts, and one with no kind (an agent-browser that does
-        not say) is taken for one. Only the headers are looked at.
+        not say) is taken for one. Only the headers are looked at. The name is the one the header
+        suggests, or the last part of the address, and both come from the page.
         """
         logged = self._call("network", "requests").get("requests") or []
-        count = 0
+        found = []
         for request in logged:
             headers = {
                 str(k).lower(): str(v) for k, v in (request.get("responseHeaders") or {}).items()
             }
-            disposition = headers.get("content-disposition", "").lstrip().lower()
+            disposition = headers.get("content-disposition", "")
             kind = str(request.get("resourceType") or "document").lower()
             if (
                 kind == "document"
-                and disposition.startswith("attachment")
+                and disposition.lstrip().lower().startswith("attachment")
                 and HTTPStatus.OK <= int(request.get("status") or 0) < HTTPStatus.MULTIPLE_CHOICES
             ):
-                count += 1
-        return count
+                url = str(request.get("url") or "")[:MAX_ADDRESS]
+                found.append(Attachment(url, _suggested_name(disposition, url)))
+        return found
 
     def resource_url(self, ref: str) -> str:
         """Return the address that the element ``ref`` stands for, as the page wrote it.

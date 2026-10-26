@@ -177,6 +177,8 @@ RESOLVE_SECONDS = 10.0
 _MAX_NAMED_HOSTS = 5
 MAX_REFUSED_HOSTS = 2000
 """How many refused hosts are remembered per site."""
+MAX_STARTED = 10
+"""The most unsaved downloads a result names; the count is always complete."""
 SD_LISTEN_FDS_START = 3
 """The first file descriptor systemd passes to a socket-activated service."""
 STATES = ("idle", "login", "session")
@@ -232,8 +234,8 @@ class BrowserSession(Protocol):
     def clear_requests(self) -> None:
         """Forget the logged network requests."""
 
-    def attachments(self) -> int:
-        """Count the logged responses that the browser turns into downloads."""
+    def started_downloads(self) -> list[sessions.Attachment]:
+        """List the logged responses that the browser turns into downloads."""
 
     def press_enter(self) -> None:
         """Press Enter in the focused element."""
@@ -2025,7 +2027,7 @@ class Daemon:
         page: sessions.Page = result.pop("_value")
         result["url"] = page.url
         result["page"] = {"title": untrusted(page.title)}
-        result["downloads"] = await self._new_downloads(connection, state, seen)
+        result["downloads"] = await self._new_downloads(connection, state, seen, unprompted=True)
         return result
 
     async def _navigation_that_downloaded(
@@ -2068,13 +2070,17 @@ class Daemon:
         state: _Site,
         seen: dict[str, downloads.Signature],
         settle: float | None = None,
+        *,
+        unprompted: bool = False,
     ) -> dict[str, Any]:
         """Report the files that arrived since ``seen``, waiting a little for running ones.
 
         Responses logged since the call began that said ``attachment`` are the downloads the
         browser started. Any beyond the files that arrived and the ones still running are
         counted as ``unsaved``: the browser started a download and nothing was written, as it
-        does when the file name is too long.
+        does when the file name is too long. Then ``started`` lists them (at most
+        :data:`MAX_STARTED`, untrusted), and ``by_page`` says the call was one that clicks nothing,
+        so the page started them itself.
         """
         site = state.name
         paths = sessions.session_paths(self.roots, site)
@@ -2087,21 +2093,28 @@ class Daemon:
             finish=self._download_wait,
         )
         connection.seen_downloads[site] = found.seen
-        started = await self._attachments(state)
-        return {
+        started = await self._started(state)
+        report: dict[str, Any] = {
             "new": [_download_entry(item) for item in found.new],
             "in_progress": [_download_entry(item) for item in found.in_progress],
-            "unsaved": max(0, started - len(found.new) - len(found.in_progress)),
+            "unsaved": max(0, len(started) - len(found.new) - len(found.in_progress)),
         }
+        if report["unsaved"]:
+            report["started"] = [
+                {"url": untrusted(item.url), "name": untrusted(item.name)}
+                for item in started[:MAX_STARTED]
+            ]
+            report["by_page"] = unprompted
+        return report
 
-    async def _attachments(self, state: _Site) -> int:
-        """Count the responses logged since the call began that the browser turns into downloads."""
+    async def _started(self, state: _Site) -> list[sessions.Attachment]:
+        """List the responses logged since the call began that the browser turns into downloads."""
         session = state.session
         if session is None:
-            return 0
+            return []
         with contextlib.suppress(sessions.AgentBrowserError, sessions.SessionError):
-            return await asyncio.to_thread(session.attachments)
-        return 0
+            return await asyncio.to_thread(session.started_downloads)
+        return []
 
     async def _op_downloads(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         site = self._site(args)

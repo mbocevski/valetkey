@@ -503,14 +503,14 @@ def test_attachments_counts_only_successful_attachment_responses(
     run = FakeRun(answer({"requests": logged}))
     monkeypatch.setattr(sessions.subprocess, "run", run)
     session = make_session(tmp_path)
-    assert session.attachments() == 2
+    assert len(session.started_downloads()) == 2
     session.clear_requests()
     assert [argv[2:] for argv, _ in run.calls] == [
         ["network", "requests"],
         ["network", "requests", "--clear"],
     ]
     monkeypatch.setattr(sessions.subprocess, "run", FakeRun(answer({})))
-    assert session.attachments() == 0
+    assert session.started_downloads() == []
 
 
 @pytest.mark.parametrize(
@@ -530,7 +530,7 @@ def test_a_picture_or_script_with_an_attachment_header_is_not_a_download(
         {"status": 200, "responseHeaders": ATTACHMENT},  # an agent-browser with no kind at all
     ]
     monkeypatch.setattr(sessions.subprocess, "run", FakeRun(answer({"requests": logged})))
-    assert make_session(tmp_path).attachments() == 4
+    assert len(make_session(tmp_path).started_downloads()) == 4
 
 
 def test_password_fields_asks_the_browser_to_count_them(
@@ -750,7 +750,7 @@ def test_the_session_has_no_eval_or_passthrough() -> None:
     public = {n for n in dir(sessions.Session) if not n.startswith("_")}
     assert public == {
         "start", "is_alive", "close", "open", "snapshot", "outline", "click", "fill", "press_enter",
-        "current_url", "screenshot", "clear_requests", "attachments", "password_fields",
+        "current_url", "screenshot", "clear_requests", "started_downloads", "password_fields",
         "resource_url", "images", "fetch",
     }  # fmt: skip
 
@@ -1813,3 +1813,30 @@ def test_start_copes_with_a_log_that_is_gone(
     FakeStart(monkeypatch, 'rm -f "$LOG"; exit 3')
     with pytest.raises(sessions.SessionError, match="exited before it loaded a page"):
         start(tmp_path)
+
+
+def test_started_downloads_name_each_by_its_header_or_its_address(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logged = [
+        {"url": "http://s.test/a?x=1", "status": 200, "responseHeaders": ATTACHMENT},
+        {
+            "url": "http://s.test/dir/My%20File.zip",
+            "status": 200,
+            "responseHeaders": {"content-disposition": "attachment"},
+        },
+        {
+            "url": "http://s.test/b/",
+            "status": 200,
+            "responseHeaders": {"Content-Disposition": 'attachment; filename=""'},
+        },
+        {"status": 200, "responseHeaders": ATTACHMENT},
+    ]
+    monkeypatch.setattr(sessions.subprocess, "run", FakeRun(answer({"requests": logged})))
+    found = make_session(tmp_path).started_downloads()
+    assert found == [
+        sessions.Attachment("http://s.test/a?x=1", "a.pdf"),
+        sessions.Attachment("http://s.test/dir/My%20File.zip", "My File.zip"),
+        sessions.Attachment("http://s.test/b/", "b"),
+        sessions.Attachment("", "a.pdf"),
+    ]
