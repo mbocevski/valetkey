@@ -1040,3 +1040,33 @@ def test_deny_host_blocks_a_host_only_a_wider_entry_covers() -> None:
     result = sites.deny_host(policy(allow=("sitex.com",)), "ads.sitex.com")
     assert result.allow == ("sitex.com",)
     assert not allows(result, "ads.sitex.com")
+
+
+# -- the cookies of a login ----------------------------------------------------------------
+
+
+def test_the_cookies_of_a_login_round_trip_and_are_left_out_when_there_are_none(
+    roots: Roots,
+) -> None:
+    held = policy(login_cookies=("app.sitex.com sessionid", ".sitex.com remember"))
+    save_policy(roots, held)
+    assert load_policy(roots, "sitex") == held
+    assert '"login_cookies": [\n    "app.sitex.com sessionid",' in policy_json(held)
+    assert "login_cookies" not in policy_json(policy())
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ["sessionid", "app.sitex.com", "App.sitex.com x", "app.sitex.com two words", "a x\n", "", " x"],
+)
+def test_a_bad_cookie_entry_is_refused(entry: str) -> None:
+    assert not sites.is_login_cookie(entry)
+    with pytest.raises(ValueError, match="login_cookies"):
+        policy(login_cookies=(entry,))
+
+
+def test_a_policy_holds_at_most_twenty_cookies() -> None:
+    names = tuple(f"app.sitex.com s{n}" for n in range(sites.MAX_LOGIN_COOKIES))
+    assert policy(login_cookies=names).login_cookies == names
+    with pytest.raises(ValueError, match="login_cookies"):
+        policy(login_cookies=(*names, "app.sitex.com more"))

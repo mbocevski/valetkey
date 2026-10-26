@@ -202,4 +202,10 @@ to a page with a password field, means the login expired. A page that sent itsel
 not count. `browser_open` then says so, and the agent calls
 `browser_login` again without asking first.
 
+A site that shows its front page logged out, without a redirect, is caught another way. When you
+log in, valetkey records the names of the sign-in cookies the site set, never their values. When
+the site is opened, before the browser starts, it reads the profile again. If none of those
+cookies is left, the login has expired and no browser is started. It says nothing when it is
+unsure: when one is still there, or the profile cannot be read.
+
 A login usually comes while the site's browser is still running. `browser_login` closes that browser first, as `browser_close` does, and says so in its result. A login window that is already open for the site is an error.

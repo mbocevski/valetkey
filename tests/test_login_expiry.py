@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import dataclasses
 import functools
 import time
 from typing import TYPE_CHECKING, Any
@@ -52,7 +53,7 @@ async def wait_for(check: Any, what: str, limit: float = 60) -> None:  # noqa: A
 
 @pytest.mark.integration
 @needs_everything
-def test_a_login_expires_when_its_cookie_is_gone_and_a_working_one_never_looks_expired(
+def test_a_login_expires_when_its_cookie_is_gone_and_a_working_one_never_looks_expired(  # noqa: PLR0915 - one story
     world: tuple[sites.Roots, LoginSite, Sway],
 ) -> None:
     roots, site, desktop = world
@@ -85,6 +86,7 @@ def test_a_login_expires_when_its_cookie_is_gone_and_a_working_one_never_looks_e
                 await wait_for(lambda: server._sites[name].kind == "idle", "still logging in")  # noqa: SLF001
                 policy = sites.load_policy(roots, name)
                 assert policy.login_pages == ("site.test/login",)
+                assert policy.login_cookies == ("site.test session",)
                 assert "site.test" in policy.allow
 
                 # Signed in: the start page stays the start page, and nothing is expired.
@@ -95,9 +97,19 @@ def test_a_login_expires_when_its_cookie_is_gone_and_a_working_one_never_looks_e
                 assert healthy["page"]["title"]["text"] == "Home"
                 await c.call("close", site=name)
 
-                # The session cookie goes: the site sends the browser to its sign-in page.
+                # The session cookie goes. The profile says so before a browser starts, and none
+                # does: the site is not even asked.
                 assert clear_cookies(sites.profile_path(roots, name))
                 before = len(site.hits)
+                gone = await c.call("open", site=name)
+                assert gone["login_expired"] is True
+                assert "the cookies it set are gone" in gone["message"]
+                assert site.hits[before:] == []
+                assert (await c.call("status", site=name))["state"] == "idle"
+
+                # Without the record of the cookies, the site sends the browser to its sign-in
+                # page, which says the same.
+                sites.save_policy(roots, dataclasses.replace(policy, login_cookies=()))
                 expired = await c.call("open", site=name)
                 assert expired["login_expired"] is True
                 assert expired["url"].startswith("http://site.test/login")

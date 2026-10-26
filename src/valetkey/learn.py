@@ -84,7 +84,7 @@ from urllib.parse import urlsplit
 from valetkey import sites, trackers
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +144,13 @@ _LAST_PAGE = (
     "SELECT u.url FROM visits AS v JOIN urls AS u ON u.id = v.url "
     "WHERE (v.transition & 255) NOT IN (3, 4) AND v.visit_time >= ? "
     "ORDER BY v.visit_time DESC, v.id DESC LIMIT 1"
+)
+
+_FIRST_SUBMIT = (
+    "SELECT v.visit_time FROM visits AS v JOIN visits AS f ON f.id = v.from_visit "
+    "WHERE (v.transition & 255) IN (1, 7) AND (f.transition & 255) NOT IN (3, 4) "
+    "AND (f.transition & 536870912) != 0 AND f.visit_duration >= 100000 "
+    "AND v.visit_time >= ? AND f.visit_time >= ? ORDER BY v.visit_time LIMIT 1"
 )
 
 type Query = tuple[str, tuple[int, ...]]
@@ -225,16 +232,24 @@ def _copy_capped(source: Path, target: Path, *, required: bool) -> bool:
     return True
 
 
-def _authorize(action: int, name: str | None, *_: object) -> int:
-    """Allow a SELECT that reads the ``urls`` and ``visits`` tables, and nothing else.
+def _allow_tables(tables: frozenset[str]) -> Callable[..., int]:
+    """Return a guard that allows a SELECT reading ``tables``, and nothing else.
 
     No function, no write, no setting, no attach, no other table: the queries here need none.
     """
-    if action == sqlite3.SQLITE_SELECT:
-        return sqlite3.SQLITE_OK
-    if action == sqlite3.SQLITE_READ and name in _TABLES:
-        return sqlite3.SQLITE_OK
-    return sqlite3.SQLITE_DENY
+
+    def authorize(action: int, name: str | None, *_: object) -> int:
+        if action == sqlite3.SQLITE_SELECT:
+            return sqlite3.SQLITE_OK
+        if action == sqlite3.SQLITE_READ and name in tables:
+            return sqlite3.SQLITE_OK
+        return sqlite3.SQLITE_DENY
+
+    return authorize
+
+
+_authorize = _allow_tables(_TABLES)
+"""The authorizer of a history: it reads the ``urls`` and ``visits`` tables."""
 
 
 def _authorize_schema(action: int, name: str | None, *_: object) -> int:
@@ -246,8 +261,8 @@ def _authorize_schema(action: int, name: str | None, *_: object) -> int:
     return sqlite3.SQLITE_DENY
 
 
-def _check_schema(database: sqlite3.Connection) -> None:
-    """Refuse a database whose ``urls`` or ``visits`` is not a plain table, or that has extras.
+def _check_schema(database: sqlite3.Connection, tables: frozenset[str] = _TABLES) -> None:
+    """Refuse a database whose ``tables`` are not plain tables, or that has extras.
 
     A view or trigger could run code of the page's choosing in place of a table, and a virtual
     table could be a module that does more than store rows. Chromium's history has tables and
@@ -265,17 +280,28 @@ def _check_schema(database: sqlite3.Connection) -> None:
             if (definition or "").lstrip().upper().startswith("CREATE VIRTUAL"):
                 message = f"{name} is a virtual table"
                 raise HistoryError(message)
-    if not found >= _TABLES:
-        message = "the schema lacks the tables of a history"
+    if not found >= tables:
+        message = "the schema lacks the tables that were to be read"
         raise HistoryError(message)
 
 
 def _query_history(history_path: Path, *queries: Query) -> list[list[tuple[Any, ...]]]:
     """Run ``queries`` on a copy of the history database and return their rows.
 
+    See :func:`query_database`.
+    """
+    return query_database(history_path, _TABLES, *queries)
+
+
+def query_database(
+    path: Path, tables: frozenset[str], *queries: Query
+) -> list[list[tuple[Any, ...]]]:
+    """Run ``queries``, which read only ``tables``, on a copy of a profile's database.
+
     The database is copied, with its ``-wal`` and ``-journal`` files, to a temporary directory
     and opened read-only there, so a browser that still holds the live file is never disturbed.
-    See the module docstring for what is done about a hostile file.
+    See the module docstring for what is done about a hostile file; it applies to any database
+    the login window wrote, such as the cookies.
 
     Raises:
         HistoryError: when the file or the database cannot be trusted or read. Its message is a
@@ -284,29 +310,31 @@ def _query_history(history_path: Path, *queries: Query) -> list[list[tuple[Any, 
     """
     try:
         with tempfile.TemporaryDirectory(prefix="valetkey-history-") as scratch:
-            copy = Path(scratch) / "History"
-            _copy_capped(history_path, copy, required=True)
+            copy = Path(scratch) / path.name
+            _copy_capped(path, copy, required=True)
             for side in _SIDE_FILES:
                 _copy_capped(
-                    history_path.with_name(history_path.name + side),
+                    path.with_name(path.name + side),
                     copy.with_name(copy.name + side),
                     required=False,
                 )
-            return _read(copy, queries)
+            return _read(copy, queries, tables)
     except (OSError, sqlite3.Error) as error:
-        logger.warning("the history at %s could not be read: %r", history_path, error)
+        logger.warning("the database at %s could not be read: %r", path, error)
         raise HistoryError(_UNREADABLE) from None
 
 
-def _read(copy: Path, queries: tuple[Query, ...]) -> list[list[tuple[Any, ...]]]:
+def _read(
+    copy: Path, queries: tuple[Query, ...], tables: frozenset[str] = _TABLES
+) -> list[list[tuple[Any, ...]]]:
     deadline = time.monotonic() + QUERY_SECONDS
     with contextlib.closing(sqlite3.connect(f"{copy.as_uri()}?mode=ro", uri=True)) as database:
         database.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)  # noqa: FBT003
         database.setconfig(sqlite3.SQLITE_DBCONFIG_TRUSTED_SCHEMA, False)  # noqa: FBT003
         database.set_progress_handler(lambda: time.monotonic() > deadline, _PROGRESS_STEP)
         database.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_BYTES)
-        _check_schema(database)
-        database.set_authorizer(_authorize)
+        _check_schema(database, tables)
+        database.set_authorizer(_allow_tables(tables))
         return [
             [
                 (row[0][:MAX_URL] if isinstance(row[0], str) else row[0], *row[1:])
@@ -316,7 +344,7 @@ def _read(copy: Path, queries: tuple[Query, ...]) -> list[list[tuple[Any, ...]]]
         ]
 
 
-def _as_int(value: object) -> int:
+def as_int(value: object) -> int:
     """Return ``value`` if it is an integer, else 0: a history is not trusted to hold numbers."""
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
@@ -348,10 +376,29 @@ def navigation(history_path: Path, *, since: datetime) -> Navigation:
         with contextlib.suppress(ValueError):
             host = sites.host_of(url)
             seen.add(host)
-            ended = _as_int(transition) & _FLAGS & _CHAIN_END
-            if ended and _as_int(duration) >= SHOWN_MS * 1000:
+            ended = as_int(transition) & _FLAGS & _CHAIN_END
+            if ended and as_int(duration) >= SHOWN_MS * 1000:
                 shown.add(host)
     return Navigation(frozenset(shown), frozenset(seen - shown))
+
+
+def first_submit(history_path: Path, *, since: datetime) -> int | None:
+    """Return when the first form was submitted since ``since``, in Chromium's time, or ``None``.
+
+    It is the same leaving of a page by a form that :func:`login_pages` looks for: the time of
+    the first visit that came from a page the person used and was reached by a form. Cookies a
+    site set before that were set to a visitor, not to a person who had signed in. A missing
+    history, or none that shows a form, gives ``None``.
+
+    Raises:
+        HistoryError: when the file is not a history database, or cannot be trusted or read.
+
+    """
+    if not history_path.is_file():
+        return None
+    moment = chrome_time(since)
+    ((*rows,),) = _query_history(history_path, (_FIRST_SUBMIT, (moment, moment)))
+    return as_int(rows[0][0]) or None if rows else None
 
 
 def login_pages(history_path: Path, start_url: str, *, since: datetime) -> tuple[str, ...]:
@@ -472,6 +519,7 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
     *,
     site: str | None = None,
     pages: Iterable[str] = (),
+    login_cookies: Iterable[str] = (),
 ) -> sites.Policy:
     """Fold ``classification`` into ``existing``, keeping everything already approved.
 
@@ -483,8 +531,9 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
     becomes ``now`` in UTC, rounded down to whole seconds (``now`` must carry a time zone). The
     site name is ``existing``'s, else ``site``, else one derived from ``start_url``. ``pages`` are
     the login pages this login recorded (see :func:`login_pages`); they replace the old ones, and
-    if none were recorded the old ones are kept. The person's ``private_networks`` are kept as
-    they are; a login never adds to them.
+    if none were recorded the old ones are kept. The same goes for ``login_cookies``, the cookies
+    this login set that look like its sign-in (see :mod:`valetkey.cookies`). The person's
+    ``private_networks`` are kept as they are; a login never adds to them.
     """
     old_allow = existing.allow if existing else ()
     old_denied = existing.denied if existing else ()
@@ -508,6 +557,8 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
         denied=old_denied,
         learned=now.astimezone(UTC).replace(microsecond=0),
         login_pages=tuple(sorted(set(pages))) or (existing.login_pages if existing else ()),
+        login_cookies=tuple(sorted(set(login_cookies)))
+        or (existing.login_cookies if existing else ()),
         private_networks=existing.private_networks if existing else (),
     )
 

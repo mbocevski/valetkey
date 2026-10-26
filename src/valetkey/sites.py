@@ -63,7 +63,10 @@ _HOST_RE = re.compile(
 _LEARNED_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 _LEARNED_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _POLICY_KEYS = ("site", "start", "allow", "excluded", "learned")
-_OPTIONAL_POLICY_KEYS = ("denied", "login_pages", "private_networks")
+MAX_LOGIN_COOKIES = 20
+"""The most cookies a policy records for a login."""
+_LOGIN_COOKIE_RE = re.compile(r"\.?[a-z0-9][a-z0-9.-]* [\x21-\x7e]{1,128}")
+_OPTIONAL_POLICY_KEYS = ("denied", "login_cookies", "login_pages", "private_networks")
 
 # Ranges a site may be given for its private-network addresses: the RFC 1918 blocks, the unique
 # local addresses of RFC 4193, and the shared address space of RFC 6598 (100.64.0.0/10). The last
@@ -323,6 +326,11 @@ def validate_site_name(name: str) -> str:
     return name
 
 
+def is_login_cookie(entry: str) -> bool:
+    """Tell whether ``entry`` is a cookie as a policy writes it: ``host name``."""
+    return isinstance(entry, str) and _LOGIN_COOKIE_RE.fullmatch(entry) is not None
+
+
 def split_site_name(name: str) -> tuple[str, str | None]:
     """Return the site and the account of ``name``; the account is ``None`` for ``sitex``."""
     site, _, account = validate_site_name(name).partition(ACCOUNT_SEPARATOR)
@@ -574,6 +582,9 @@ class Policy:
     submitted from during the login, other than the start page and the page the login ended
     on. A start URL that ends on one of them means the login has expired. It is optional, and a
     policy written before it existed has none.
+    ``login_cookies`` are the cookies (``host name``, never a value) that the login set on the
+    site's own hosts and that look like its sign-in: if none of them is in the profile when the
+    site is opened, the login has gone (see :mod:`valetkey.cookies`). It is optional.
     ``private_networks`` are the address ranges (``10.20.0.0/16``) in which a host the site
     allows may resolve although they are private, see :func:`private_network`. Only the person
     sets them. It is optional too.
@@ -589,6 +600,7 @@ class Policy:
     login_pages: tuple[str, ...] = ()
     private_networks: tuple[str, ...] = ()
     denied: tuple[str, ...] = ()
+    login_cookies: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate the fields."""
@@ -609,6 +621,12 @@ class Policy:
             if not (isinstance(page, str) and is_page_key(page)):
                 msg = f"not a page like host/path, without query or fragment: {page!r}"
                 raise ValueError(msg)
+        if len(self.login_cookies) > MAX_LOGIN_COOKIES or not all(
+            isinstance(entry, str) and _LOGIN_COOKIE_RE.fullmatch(entry)
+            for entry in self.login_cookies
+        ):
+            msg = "login_cookies must be at most 20 entries like 'host name'"
+            raise ValueError(msg)
         for network in self.private_networks:
             if not (isinstance(network, str) and private_network(network) == network):
                 msg = f"not a private range written as 10.20.0.0/16: {network!r}"
@@ -775,7 +793,8 @@ def load_policy(roots: Roots, site: str) -> Policy:
     """Read and validate ``site``'s policy file.
 
     The file must be a JSON object with the keys ``site``, ``start``, ``allow``, ``excluded``
-    and ``learned``, and may also have ``denied``, ``login_pages`` and ``private_networks``. A
+    and ``learned``, and may also have ``denied``, ``login_cookies``, ``login_pages`` and
+    ``private_networks``. A
     file without ``denied`` is one from before it existed: it has none, and its ``excluded``
     entries stay what a login left out, built again by the next login. Missing keys and
     unknown keys are both errors, and ``site`` must equal the file name.
@@ -809,6 +828,7 @@ def load_policy(roots: Roots, site: str) -> Policy:
             denied=_hosts(data, "denied") if "denied" in data else (),
             learned=_learned(data["learned"]),
             login_pages=_hosts(data, "login_pages") if "login_pages" in data else (),
+            login_cookies=_hosts(data, "login_cookies") if "login_cookies" in data else (),
             private_networks=(
                 _hosts(data, "private_networks") if "private_networks" in data else ()
             ),
@@ -856,6 +876,8 @@ def policy_json(policy: Policy) -> str:
     }
     if policy.login_pages:
         data["login_pages"] = list(policy.login_pages)
+    if policy.login_cookies:
+        data["login_cookies"] = list(policy.login_cookies)
     if policy.private_networks:
         data["private_networks"] = list(policy.private_networks)
     return json.dumps(data, indent=2) + "\n"

@@ -1549,3 +1549,30 @@ def test_the_new_trackers_are_left_out_of_a_login() -> None:
     result = learn.classify(START, ["c.bing.com", "t.myvisitors.se", "login.live.com"], [])
     assert result.allow == ("login.live.com", "sitex.com")
     assert result.excluded == ("c.bing.com", "t.myvisitors.se")
+
+
+def test_a_login_replaces_the_recorded_cookies_only_when_it_recorded_some() -> None:
+    old = policy(login_cookies=("app.sitex.com old",))
+    result = learn.Classification(("sitex.com",), ())
+    kept = learn.merge(old, result, START, NOW)
+    assert kept.login_cookies == ("app.sitex.com old",)
+    fresh = learn.merge(
+        old, result, START, NOW, login_cookies=["b.sitex.com new", "a.sitex.com new"]
+    )
+    assert fresh.login_cookies == ("a.sitex.com new", "b.sitex.com new")
+    assert learn.merge(None, result, START, NOW).login_cookies == ()
+
+
+def test_a_database_other_than_the_history_is_read_with_its_own_tables_only(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "Other"
+    with closing(sqlite3.connect(path)) as database:
+        database.executescript("CREATE TABLE a(x); CREATE TABLE b(x); INSERT INTO a VALUES (1);")
+        database.commit()
+    tables = frozenset({"a"})
+    assert learn.query_database(path, tables, ("SELECT x FROM a", ())) == [[(1,)]]
+    with pytest.raises(learn.HistoryError):
+        learn.query_database(path, tables, ("SELECT x FROM b", ()))
+    with pytest.raises(learn.HistoryError):
+        learn.query_database(path, frozenset({"a", "missing"}), ("SELECT x FROM a", ()))

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
+from cookie_jar import cookie, jar
 from environment import unusable_reason
 from mcp import Client as McpClient
 from mcp_types import ElicitResult
@@ -5260,5 +5261,116 @@ def test_a_navigation_skips_the_refusals_of_a_client_with_no_session_yet(
             with pytest.raises(DaemonError) as info:
                 await c.call("navigate", site="sitex", url="https://sitex.test/")
             assert info.value.code == "no_session"
+
+
+# -- the cookies of a login, and a login that is gone from the profile ----------------------------
+
+
+def test_a_login_records_the_cookies_that_look_like_its_sign_in(roots: sites.Roots) -> None:
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("login", target="https://newsite.test/signin")
+            (window,) = rig.logins.windows
+            profile = roots.state / "profile"
+            history = profile / "Default" / "History"
+            history.parent.mkdir(parents=True)
+            make_history(history, ["https://newsite.test/signin"])
+            later = NOW + timedelta(seconds=10)
+            jar(
+                profile,
+                cookie("app.newsite.test", "sessionid", created=later),
+                cookie("newsite.test", "_ga", created=later),
+                cookie("login.okta.test", "sid", created=later),
+                cookie("app.newsite.test", "before", created=NOW - timedelta(seconds=10)),
+            )
+            seen = [SeenHost("newsite.test", 5), SeenHost("login.okta.test", 1)]
+            await window.close_window(seen, profile)
+            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            policy = sites.load_policy(roots, "newsite")
+            assert policy.login_cookies == ("app.newsite.test sessionid",)
+
+    run(scenario())
+
+
+def test_a_later_login_that_records_no_cookie_keeps_the_ones_before(roots: sites.Roots) -> None:
+    sites.save_policy(
+        roots,
+        sites.Policy(
+            "sitex", "https://sitex.test/", ("sitex.test",), login_cookies=("sitex.test session",)
+        ),
+    )
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("login", target="sitex")
+            (window,) = rig.logins.windows
+            await window.close_window([SeenHost("sitex.test", 1)], roots.state / "profile")
+            await eventually(lambda: rig.daemon._sites["sitex"].kind == "idle")  # noqa: SLF001
+            assert sites.load_policy(roots, "sitex").login_cookies == ("sitex.test session",)
+
+    run(scenario())
+
+
+def recorded_site(roots: sites.Roots, *cookies_seen: str) -> None:
+    sites.save_policy(
+        roots,
+        sites.Policy("sitex", "https://sitex.test/", ("sitex.test",), login_cookies=cookies_seen),
+    )
+
+
+def test_an_open_says_the_login_expired_when_its_cookies_are_gone_and_starts_no_browser(
+    roots: sites.Roots,
+) -> None:
+    recorded_site(roots, "sitex.test session", "sitex.test other")
+    jar(sites.profile_path(roots, "sitex"), cookie("sitex.test", "anonymous"))
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            answer = await c.call("open", site="sitex")
+            assert answer["login_expired"] is True
+            assert "the cookies it set are gone" in answer["message"]
+            assert "Log in to sitex again" in answer["message"]
+            assert (answer["site"], answer["reused"], answer["url"]) == ("sitex", False, None)
+            assert rig.factory.made == []
+            assert (await c.call("status", site="sitex"))["state"] == "idle"
+
+    run(scenario())
+
+
+def test_an_open_with_no_cookie_database_at_all_says_the_login_expired(roots: sites.Roots) -> None:
+    recorded_site(roots, "sitex.test session")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            assert (await c.call("open", site="sitex"))["login_expired"] is True
+            assert rig.factory.made == []
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("present", ["session", "other"])
+def test_an_open_says_nothing_while_a_recorded_cookie_is_still_there(
+    roots: sites.Roots, present: str
+) -> None:
+    recorded_site(roots, "sitex.test session", "sitex.test other")
+    jar(sites.profile_path(roots, "sitex"), cookie("sitex.test", present))
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            answer = await c.call("open", site="sitex")
+            assert "login_expired" not in answer
+            assert len(rig.factory.made) == 1
+
+    run(scenario())
+
+
+def test_an_open_of_a_policy_with_no_recorded_cookie_says_nothing(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            answer = await c.call("open", site="sitex")
+            assert "login_expired" not in answer
+            assert len(rig.factory.made) == 1
 
     run(scenario())

@@ -8,6 +8,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Added
 
+- `browser_open` notices a login that has expired without a redirect, by the sign-in cookies it recorded at login, before the browser starts.
 - `valetkey sites SITE` prints one site's complete allowed, excluded and denied hosts, as text or with `--json`.
 - The `browser_deny` tool, which asks you to stop a site reaching hosts it reaches now, and `browser_sites` takes a `site` to list its complete host lists.
 - With no client prompt and no approval command, `browser_allow` asks with a desktop notification that has Allow and Deny buttons; `"notifications": false` in the config turns it off.

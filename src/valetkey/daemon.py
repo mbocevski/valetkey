@@ -132,6 +132,7 @@ from valetkey import (
     approvals,
     clicks,
     client,
+    cookies,
     display,
     downloads,
     expiry,
@@ -1559,8 +1560,25 @@ class Daemon:
                     )
                 except FileNotFoundError:
                     existing = None
+                own = [sites.registrable_domain(sites.host_of(start)), *classification.owned]
+                signed_in = await asyncio.to_thread(
+                    functools.partial(
+                        cookies.recorded,
+                        profile,
+                        history,
+                        since=state.began,
+                        now=self._now(),
+                        own=lambda host: sites.host_matches(host, own),
+                    )
+                )
                 policy = learn.merge(
-                    existing, classification, start, self._now(), site=state.name, pages=pages
+                    existing,
+                    classification,
+                    start,
+                    self._now(),
+                    site=state.name,
+                    pages=pages,
+                    login_cookies=signed_in,
                 )
                 await asyncio.to_thread(sites.save_policy, self.roots, policy)
             except learn.HistoryError as error:
@@ -1605,6 +1623,8 @@ class Daemon:
             if state.kind == "session" and not (state.session and state.session.is_alive()):
                 await self._end(state)
             reused = state.kind == "session"
+            if not reused and (gone := await self._login_cookies_gone(state)):
+                return gone
             try:
                 policy = None if reused else await self._begin_session(state)
             except _StartRefused as refusal:
@@ -1633,6 +1653,36 @@ class Daemon:
         result["reused"] = reused
         result["page"] = {"title": untrusted(title)}
         return result
+
+    async def _login_cookies_gone(self, state: _Site) -> dict[str, Any] | None:
+        """Answer an open with ``login_expired`` when the cookies of the login are gone.
+
+        This looks at the profile before any browser starts on it (see :mod:`valetkey.cookies`),
+        so nothing has yet given the site a chance to set a cookie of the same name. No browser
+        is started for such a site: it would only show it logged out. ``None`` means nothing
+        says the login is gone, and the open goes on.
+        """
+        site = state.name
+        policy = await self._load_policy(site)
+        profile = sites.profile_path(self.roots, site)
+        if not await asyncio.to_thread(
+            cookies.gone, profile, policy.login_cookies, now=self._now()
+        ):
+            return None
+        return {
+            "site": self._shown(site),
+            "contained": True,
+            "url": None,
+            "refused": [],
+            "background_refused": [],
+            "reused": False,
+            "page": {"title": untrusted("")},
+            "login_expired": True,
+            "message": (
+                f"The saved login for {site} has expired: the cookies it set are gone. Log in "
+                f"to {site} again, then open it again."
+            ),
+        }
 
     async def _begin_session(self, state: _Site) -> sites.Policy:
         policy = await self._load_policy(state.name)

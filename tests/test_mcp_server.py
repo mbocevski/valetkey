@@ -1146,6 +1146,30 @@ def test_only_a_client_that_declares_url_elicitation_gets_the_link(
     assert mcp_server.can_elicit_url(_Context(capabilities)) is expected  # ty: ignore[invalid-argument-type]
 
 
+def test_a_login_that_expired_before_a_browser_started_has_no_page_to_show(
+    short_dir: Path,
+) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["open"] = lambda _a: (
+                ENVELOPE
+                | {
+                    "url": None,
+                    "reused": False,
+                    "login_expired": True,
+                    "message": "The saved login for sitex has expired: the cookies are gone.",
+                    "page": {"title": {"untrusted": True, "text": ""}},
+                }
+            )
+            result = await mcp.call_tool("browser_open", {"site": "sitex"})
+            assert not result.is_error
+            text = text_of(result)
+            assert text.startswith("The saved login for sitex has expired. Call browser_login")
+            assert "URL: (none)" in text
+
+    run(scenario())
+
+
 def test_an_expired_login_leads_the_result_with_what_to_do(short_dir: Path) -> None:
     async def scenario() -> None:
         async with connected(short_dir) as (mcp, fake, _bridge):
