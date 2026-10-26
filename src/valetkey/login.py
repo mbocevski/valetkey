@@ -99,11 +99,14 @@ def parse_environment(text: str) -> dict[str, str]:
     return environment
 
 
-def systemd_user_environment(timeout: float = 5.0) -> dict[str, str]:
+def systemd_user_environment(
+    timeout: float = 5.0, environ: Mapping[str, str] | None = None
+) -> dict[str, str]:
     """Return the environment of the systemd user manager, or an empty one when it can't be read.
 
     Desktop compositors export ``WAYLAND_DISPLAY`` and ``DISPLAY`` there, which a service
-    started by the same manager may not have inherited.
+    started by the same manager may not have inherited. ``environ`` is the environment to ask
+    in (default: this process's): ``systemctl`` finds the manager through ``XDG_RUNTIME_DIR``.
     """
     try:
         result = subprocess.run(  # fixed argument list
@@ -112,10 +115,71 @@ def systemd_user_environment(timeout: float = 5.0) -> dict[str, str]:
             text=True,
             check=True,
             timeout=timeout,
+            env=None if environ is None else dict(environ),
         )
     except OSError, subprocess.SubprocessError:
         return {}
     return parse_environment(result.stdout)
+
+
+DESKTOP_VARIABLES = ("WAYLAND_DISPLAY", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS")
+"""The variables of the person's desktop session that the daemon uses: the display for a login
+window, and the session bus for a notification and the approval command. Nothing else is taken
+from the systemd user manager."""
+
+
+def _sane(name: str, value: str) -> bool:
+    """Tell whether ``value`` can be believed to be a ``name`` from a desktop session."""
+    if not value or not value.isprintable() or len(value) > _MAX_VARIABLE:
+        return False
+    if name == "WAYLAND_DISPLAY":
+        return value.startswith("/") or "/" not in value
+    return True
+
+
+_MAX_VARIABLE = 4096
+
+
+def daemon_environment(
+    environ: Mapping[str, str] | None = None,
+    user_environment: Callable[[Mapping[str, str]], Mapping[str, str]] = (
+        lambda env: systemd_user_environment(environ=env)
+    ),
+) -> dict[str, str]:
+    """Return the environment to start the daemon in, made whole where the client's was reduced.
+
+    Some desktop clients start a server with only ``HOME``, ``PATH`` and a few more. A daemon
+    that inherits that cannot find its runtime directory, the display for a login window or the
+    session bus. So ``XDG_RUNTIME_DIR`` is set to ``/run/user/UID`` when it is missing and that
+    directory is the user's own and private (see :func:`valetkey.sites.fallback_runtime_dir`),
+    each of :data:`DESKTOP_VARIABLES` that is missing is read from the systemd user manager, and
+    ``~/.local/bin`` and the manager's ``PATH`` entries are added to the end of ``PATH``, where
+    agent-browser is often installed. Nothing already set is replaced, the manager is asked only
+    when something is missing, and a manager that cannot be reached changes nothing.
+    """
+    env = dict(os.environ if environ is None else environ)
+    runtime = env.get("XDG_RUNTIME_DIR")
+    if not runtime or not Path(runtime).is_absolute():
+        fallback = sites.fallback_runtime_dir()
+        if fallback is not None:
+            env["XDG_RUNTIME_DIR"] = str(fallback)
+    manager: Mapping[str, str] = {}
+    if any(not env.get(name) for name in DESKTOP_VARIABLES) and env.get("XDG_RUNTIME_DIR"):
+        manager = user_environment(env)
+        for name in DESKTOP_VARIABLES:
+            if not env.get(name) and _sane(name, manager.get(name, "")):
+                env[name] = manager[name]
+    entries = [entry for entry in env.get("PATH", "").split(":") if entry]
+    local = Path(env.get("HOME") or Path.home()) / ".local" / "bin"
+    extra = [str(local), *(e for e in manager.get("PATH", "").split(":") if _plain_path(e))]
+    entries += [e for e in dict.fromkeys(extra) if e not in entries and Path(e).is_dir()]
+    if entries:
+        env["PATH"] = ":".join(entries)
+    return env
+
+
+def _plain_path(entry: str) -> bool:
+    return entry.startswith("/") and entry.isprintable()
 
 
 def find_wayland_socket(
@@ -154,7 +218,7 @@ def find_wayland_socket(
         raise NoDisplayError(NO_SESSION)
     path = Path(display)
     if not path.is_absolute():
-        runtime = lookup("XDG_RUNTIME_DIR")
+        runtime = lookup("XDG_RUNTIME_DIR") or str(sites.fallback_runtime_dir() or "")
         if "/" in display or not Path(runtime).is_absolute():
             msg = f"{NO_SESSION} (cannot place WAYLAND_DISPLAY={display!r})"
             raise NoDisplayError(msg)

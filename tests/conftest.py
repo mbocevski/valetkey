@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -8,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from valetkey import daemon
+from valetkey import daemon, sites
 
 pytest_plugins = ["pytester", "require_integration"]
 
@@ -36,14 +35,25 @@ def runtime_base() -> Iterator[str]:
 
 @pytest.fixture(autouse=True)
 def runtime_dir(monkeypatch: pytest.MonkeyPatch, runtime_base: str) -> None:
-    """Give every test a ``$XDG_RUNTIME_DIR`` of its own when the machine has none.
+    """Give every test a ``$XDG_RUNTIME_DIR`` of its own.
 
-    A login session sets it and a container or a service often does not. The tests that need it
-    gone delete it themselves. Nothing is removed per test, because a test may have replaced
-    ``os.scandir``, which ``shutil.rmtree`` needs, by the time its fixtures are torn down.
+    A login session sets one and a container often does not, so the tests would otherwise differ
+    by machine. Above all they must never reach a daemon that the person running them has
+    started in the real one. The tests that need it gone delete it themselves. Nothing is removed
+    per test, because a test may have replaced ``os.scandir``, which ``shutil.rmtree`` needs, by
+    the time its fixtures are torn down.
     """
-    if not os.environ.get("XDG_RUNTIME_DIR"):
-        monkeypatch.setenv("XDG_RUNTIME_DIR", tempfile.mkdtemp(prefix="r", dir=runtime_base))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", tempfile.mkdtemp(prefix="r", dir=runtime_base))
+
+
+@pytest.fixture(autouse=True)
+def no_user_runtime_root(monkeypatch: pytest.MonkeyPatch, runtime_base: str) -> None:
+    """Keep the tests away from the real ``/run/user/UID``, which a developer's machine has.
+
+    Without ``XDG_RUNTIME_DIR``, valetkey falls back to it; the tests of that point the root at
+    a directory of their own.
+    """
+    monkeypatch.setattr(sites, "USER_RUNTIME_ROOT", Path(runtime_base) / "no-run-user")
 
 
 @pytest.fixture(autouse=True)

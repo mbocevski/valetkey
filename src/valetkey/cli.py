@@ -898,6 +898,8 @@ class System:
     """Whether the config turns on showing a login with no screen in a browser."""
     viewer: Callable[[], Path] = display.novnc_root
     """The directory of noVNC viewer files; raises when they are not installed."""
+    runtime_fallback: Callable[[], Path | None] = sites.fallback_runtime_dir
+    """The runtime directory used when ``XDG_RUNTIME_DIR`` is missing, or ``None``."""
     machine: Callable[[], str] = platform.machine
     """The CPU architecture, which decides whether the syscall filter applies."""
     roots: sites.Roots = field(default_factory=sites.roots_from_env)
@@ -984,11 +986,28 @@ def check_agent_browser(system: System) -> Check:
 
 
 def check_runtime_dir(system: System) -> Check:
-    """Check that ``XDG_RUNTIME_DIR`` is set, which the daemon and its sockets need."""
+    """Check that the daemon has a runtime directory for its sockets.
+
+    ``XDG_RUNTIME_DIR`` is the one. A client that starts programs with a reduced environment
+    leaves it out, and ``/run/user/UID`` stands in when it is the user's own private directory;
+    that works but is worth knowing, so it is a warning.
+    """
     value = system.environ.get("XDG_RUNTIME_DIR", "")
     if value and Path(value).is_absolute():
         return Check("runtime-dir", "ok", f"XDG_RUNTIME_DIR={value}")
-    return Check("runtime-dir", "fail", "XDG_RUNTIME_DIR is not set to an absolute path")
+    fallback = system.runtime_fallback()
+    if fallback is not None:
+        detail = (
+            f"XDG_RUNTIME_DIR is not set; valetkey uses {fallback}. If your MCP client starts "
+            "programs with a reduced environment, see docs/troubleshooting.md"
+        )
+        return Check("runtime-dir", "warn", detail)
+    detail = (
+        "XDG_RUNTIME_DIR is not set to an absolute path, and there is no private /run/user "
+        "directory of yours to use instead; set it in the environment of the program that "
+        "starts valetkey"
+    )
+    return Check("runtime-dir", "fail", detail)
 
 
 def check_display(system: System) -> Check:

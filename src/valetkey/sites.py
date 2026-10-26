@@ -122,18 +122,44 @@ class Roots:
     runtime: Path | None
 
 
+USER_RUNTIME_ROOT = Path("/run/user")
+"""Where the login manager makes each user's runtime directory, ``/run/user/UID``."""
+
+
+def fallback_runtime_dir(uid: int | None = None, root: Path | None = None) -> Path | None:
+    """Return the runtime directory the login manager made for ``uid``, if it can be trusted.
+
+    A program started with a reduced environment, as some desktop clients do, has no
+    ``XDG_RUNTIME_DIR``, though ``/run/user/UID`` is right there. It is used only when it is a
+    real directory (not a link), belongs to ``uid`` and is private (mode ``0700``): the same
+    properties that make ``XDG_RUNTIME_DIR`` safe for sockets. Otherwise there is none.
+    """
+    uid = os.getuid() if uid is None else uid
+    path = (USER_RUNTIME_ROOT if root is None else root) / str(uid)
+    try:
+        found = path.lstat()
+    except OSError:
+        return None
+    private = stat.S_IMODE(found.st_mode) == stat.S_IRWXU
+    return path if stat.S_ISDIR(found.st_mode) and found.st_uid == uid and private else None
+
+
 def roots_from_env(environ: Mapping[str, str] | None = None) -> Roots:
     """Read the XDG base directories from ``environ`` (default: ``os.environ``).
 
     An unset, empty or relative value falls back to the XDG default, as the specification asks.
-    There is no default for the runtime directory.
+    The runtime directory has no default, with one exception: the process's own environment
+    without ``XDG_RUNTIME_DIR`` uses :func:`fallback_runtime_dir`. A given ``environ`` never does.
     """
     env = os.environ if environ is None else environ
     home = Path(env.get("HOME") or Path.home())
+    runtime = _absolute_or(env.get("XDG_RUNTIME_DIR"), None)
+    if runtime is None and environ is None:
+        runtime = fallback_runtime_dir()
     return Roots(
         config=_absolute_or(env.get("XDG_CONFIG_HOME"), home / ".config"),
         state=_absolute_or(env.get("XDG_STATE_HOME"), home / ".local" / "state"),
-        runtime=_absolute_or(env.get("XDG_RUNTIME_DIR"), None),
+        runtime=runtime,
     )
 
 
@@ -345,8 +371,9 @@ def runtime_path(roots: Roots) -> Path:
     """Return the runtime directory, ``$XDG_RUNTIME_DIR/valetkey``. Nothing is created.
 
     Raises:
-        RuntimeDirUnavailableError: when ``XDG_RUNTIME_DIR`` was not set. There is no fallback,
-            because sockets and other runtime files must not land in a shared directory.
+        RuntimeDirUnavailableError: when ``XDG_RUNTIME_DIR`` was not set and ``/run/user/UID`` is
+            not a private directory of the user. There is no other fallback, because sockets and
+            other runtime files must not land in a shared directory.
 
     """
     if roots.runtime is None:

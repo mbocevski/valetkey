@@ -864,6 +864,7 @@ class FakeSystem:
         self.offered: dict[str, int] | WaylandError = {"wl_compositor": 6, MANAGER: 1}
         self.units = tmp_path / "units"
         self.cpu = "x86_64"
+        self.fallback: Path | None = None
         self.roots = sites.Roots(tmp_path / "cfg", tmp_path / "state", None)
         self.system_units: tuple[Path, ...] = ()
         self.calls: list[list[str]] = []
@@ -906,6 +907,7 @@ class FakeSystem:
             remote_logins=lambda: self.remote,
             viewer=self.viewer_files,
             machine=lambda: self.cpu,
+            runtime_fallback=lambda: self.fallback,
             roots=self.roots,
             unit_dirs=(self.units, *self.system_units),
         )
@@ -1045,10 +1047,22 @@ def test_doctor_names_the_versions_the_code_holds() -> None:
 
 @pytest.mark.parametrize("environ", [{}, {"XDG_RUNTIME_DIR": ""}, {"XDG_RUNTIME_DIR": "run"}])
 def test_doctor_needs_a_runtime_dir(tmp_path: Path, environ: dict[str, str]) -> None:
-    assert results(FakeSystem(tmp_path, environ=environ))["runtime-dir"] == (
-        "fail",
-        "XDG_RUNTIME_DIR is not set to an absolute path",
-    )
+    status, detail = results(FakeSystem(tmp_path, environ=environ))["runtime-dir"]
+    assert status == "fail"
+    assert "XDG_RUNTIME_DIR is not set to an absolute path" in detail
+    assert "no private /run/user directory of yours" in detail
+
+
+@pytest.mark.parametrize("environ", [{}, {"XDG_RUNTIME_DIR": ""}, {"XDG_RUNTIME_DIR": "run"}])
+def test_doctor_says_when_it_uses_the_login_managers_runtime_dir(
+    tmp_path: Path, environ: dict[str, str]
+) -> None:
+    fake = FakeSystem(tmp_path, environ=environ)
+    fake.fallback = Path("/run/user/1000")
+    status, detail = results(fake)["runtime-dir"]
+    assert status == "warn"
+    assert "valetkey uses /run/user/1000" in detail
+    assert "docs/troubleshooting.md" in detail
 
 
 def test_doctor_warns_when_the_compositor_cannot_restrict_the_login_window(tmp_path: Path) -> None:

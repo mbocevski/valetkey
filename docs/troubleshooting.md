@@ -26,6 +26,24 @@ A version newer than the one valetkey was tested with is a warning. It usually w
 logs the same warning once, and the tests in `tests/test_agent_browser_drift.py` show what to check
 after an upgrade.
 
+## The client starts valetkey with a reduced environment
+
+Some MCP clients start a server with only `HOME`, `PATH` and a few more variables. Then
+`browser_sites` fails with "XDG_RUNTIME_DIR is not set", and `valetkey doctor` warns about the
+`runtime-dir` check.
+
+valetkey copes with the common cases. Without `XDG_RUNTIME_DIR` it uses `/run/user/UID`, but only
+when that is your own private directory. When it has to start the daemon itself, it fills in
+`WAYLAND_DISPLAY`, `DISPLAY` and `DBUS_SESSION_BUS_ADDRESS` from the systemd user manager, and
+adds `~/.local/bin` and the manager's `PATH` to the daemon's. If the socket is enabled
+(`systemctl --user enable --now valetkeyd.socket`), systemd starts the daemon with your session's
+environment and none of this is needed.
+
+If it still fails, set the variables in the client's configuration for the server, in the
+`env` block of its entry: `XDG_RUNTIME_DIR` (such as `/run/user/1000`), `WAYLAND_DISPLAY` and
+`DBUS_SESSION_BUS_ADDRESS`. If the client cannot find `valetkey`, give the full path of the
+program as the command.
+
 ## No Wayland display
 
 Logging in opens a window on your desktop, so `browser_login` fails without one. The message says

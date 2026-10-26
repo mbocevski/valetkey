@@ -1398,6 +1398,7 @@ def test_the_daemon_is_started_with_no_inherited_stdio(monkeypatch: pytest.Monke
         return Fake()
 
     monkeypatch.setattr(mcp_server.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(mcp_server.login, "systemd_user_environment", lambda **_: {})
 
     async def scenario() -> None:
         bridge = Bridge(daemon_command=["valetkeyd-stand-in"], exit_grace=0.2)
@@ -1410,6 +1411,63 @@ def test_the_daemon_is_started_with_no_inherited_stdio(monkeypatch: pytest.Monke
     assert seen["stdin"] == subprocess.DEVNULL
     assert seen["stderr"] == subprocess.STDOUT
     assert getattr(seen["stdout"], "name", "").endswith("daemon.log")
+
+
+def test_a_daemon_started_by_a_client_with_a_reduced_environment_is_not_blind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client gave this process HOME, PATH and little else; the daemon still gets a desktop."""
+    runtime = tmp_path / "run-user" / str(os.getuid())
+    runtime.mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(sites, "USER_RUNTIME_ROOT", runtime.parent)
+    for name in list(os.environ):
+        if name != "PATH":
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    asked: list[dict[str, str]] = []
+
+    def manager(environ: dict[str, str] | None = None, **_: object) -> dict[str, str]:
+        asked.append(dict(environ or {}))
+        return {"WAYLAND_DISPLAY": "wayland-1", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/b"}
+
+    monkeypatch.setattr(mcp_server.login, "systemd_user_environment", manager)
+    seen: dict[str, Any] = {}
+
+    class Fake:
+        def poll(self) -> int:
+            return 1
+
+    def fake_popen(argv: list[str], **kwargs: Any) -> Fake:  # noqa: ANN401
+        seen.update(kwargs, argv=argv)
+        return Fake()
+
+    monkeypatch.setattr(mcp_server.subprocess, "Popen", fake_popen)
+
+    async def scenario() -> None:
+        bridge = Bridge(daemon_command=["valetkeyd-stand-in"], exit_grace=0.2)
+        with pytest.raises(DaemonError):
+            await bridge.call("sites")
+
+    run(scenario())
+    env = seen["env"]
+    assert env["XDG_RUNTIME_DIR"] == str(runtime)
+    assert env["WAYLAND_DISPLAY"] == "wayland-1"
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/b"
+    assert asked[0]["XDG_RUNTIME_DIR"] == str(runtime)
+
+
+def test_the_tool_error_is_still_the_runtime_dir_one_when_there_is_no_stand_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    monkeypatch.setattr(sites, "USER_RUNTIME_ROOT", tmp_path / "none")
+
+    async def scenario() -> None:
+        with pytest.raises(DaemonError) as info:
+            await Bridge().call("sites")
+        assert info.value.code == "no_runtime_dir"
+
+    run(scenario())
 
 
 # -- the process: stdout is the protocol ---------------------------------------------------

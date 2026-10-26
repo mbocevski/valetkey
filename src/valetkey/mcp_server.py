@@ -43,7 +43,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
-from valetkey import approvals, client, sites
+from valetkey import approvals, client, login, sites
 from valetkey.client import Client, DaemonError
 from valetkey.proxy import PRIVATE_ADDRESS
 
@@ -532,6 +532,9 @@ class Bridge:
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
+                    # A client may start this program with a reduced environment; the daemon
+                    # should not be as blind as that.
+                    env=login.daemon_environment(),
                 )
         except OSError as error:
             message = f"could not start valetkeyd: {error}"

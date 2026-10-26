@@ -794,3 +794,80 @@ def test_add_and_remove_a_private_network() -> None:
         sites.add_private_network(policy, "8.8.8.0/24")
     with pytest.raises(ValueError, match=r"."):
         sites.remove_private_network(policy, "nonsense")
+
+
+# -- the runtime directory when the environment lost it ----------------------------------------
+
+
+def make_user_runtime(root: Path, uid: int, mode: int = 0o700) -> Path:
+    directory = root / str(uid)
+    directory.mkdir(parents=True)
+    directory.chmod(mode)
+    return directory
+
+
+def test_the_login_managers_runtime_dir_stands_in_when_it_is_private_and_ours(
+    tmp_path: Path,
+) -> None:
+    mine = make_user_runtime(tmp_path, os.getuid())
+    assert sites.fallback_runtime_dir(root=tmp_path) == mine
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o750, 0o770, 0o777, 0o500])
+def test_a_runtime_dir_others_can_enter_or_that_is_not_0700_is_not_used(
+    tmp_path: Path, mode: int
+) -> None:
+    make_user_runtime(tmp_path, os.getuid(), mode)
+    assert sites.fallback_runtime_dir(root=tmp_path) is None
+
+
+def test_a_missing_foreign_or_linked_runtime_dir_is_not_used(tmp_path: Path) -> None:
+    assert sites.fallback_runtime_dir(root=tmp_path) is None  # nothing there
+    make_user_runtime(tmp_path, os.getuid() + 1)
+    assert sites.fallback_runtime_dir(root=tmp_path) is None  # another user's
+    (tmp_path / "elsewhere").mkdir(mode=0o700)
+    (tmp_path / str(os.getuid())).symlink_to(tmp_path / "elsewhere")
+    assert sites.fallback_runtime_dir(root=tmp_path) is None  # a link is not a real directory
+    (tmp_path / "plain").mkdir()
+    (tmp_path / "plain" / str(os.getuid())).write_text("a file", encoding="utf-8")
+    assert sites.fallback_runtime_dir(root=tmp_path / "plain") is None
+
+
+def test_a_directory_that_belongs_to_another_uid_is_not_used(tmp_path: Path) -> None:
+    make_user_runtime(tmp_path, os.getuid())
+    other = os.getuid() + 1
+    (tmp_path / str(other)).symlink_to(tmp_path / str(os.getuid()), target_is_directory=True)
+    # Asked for another user's directory, what is found is ours and so not theirs.
+    assert sites.fallback_runtime_dir(uid=other, root=tmp_path) is None
+
+
+def test_the_process_environment_without_a_runtime_dir_uses_the_stand_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mine = make_user_runtime(tmp_path, os.getuid())
+    monkeypatch.setattr(sites, "USER_RUNTIME_ROOT", tmp_path)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    assert roots_from_env().runtime == mine
+    assert sites.runtime_path(roots_from_env()) == mine / "valetkey"
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "relative")
+    assert roots_from_env().runtime == mine
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "set"))
+    assert roots_from_env().runtime == tmp_path / "set"  # a variable that is set wins
+
+
+def test_a_given_environment_never_uses_the_stand_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_user_runtime(tmp_path, os.getuid())
+    monkeypatch.setattr(sites, "USER_RUNTIME_ROOT", tmp_path)
+    assert roots_from_env({"HOME": "/h"}).runtime is None
+    with pytest.raises(sites.RuntimeDirUnavailableError):
+        sites.runtime_path(roots_from_env({"HOME": "/h"}))
+
+
+def test_no_stand_in_leaves_the_error_as_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sites, "USER_RUNTIME_ROOT", tmp_path)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    assert roots_from_env().runtime is None

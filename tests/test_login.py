@@ -1302,3 +1302,207 @@ def test_a_local_login_has_no_wrapper(roots: sites.Roots) -> None:
 
     run(scenario())
     assert fake.boxes[0].wrapper == ()
+
+
+# -- the environment the daemon starts in ---------------------------------------------------------
+
+
+def user_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make a private ``/run/user/UID`` of ours in ``tmp_path`` and point the fallback at it."""
+    directory = tmp_path / "run-user" / str(os.getuid())
+    directory.mkdir(parents=True, mode=0o700)
+    monkeypatch.setattr(login.sites, "USER_RUNTIME_ROOT", directory.parent)
+    return directory
+
+
+def asked_with(seen: list[Mapping[str, str]], answer: dict[str, str]) -> Any:  # noqa: ANN401
+    def ask(env: Mapping[str, str]) -> Mapping[str, str]:
+        seen.append(dict(env))
+        return answer
+
+    return ask
+
+
+def test_a_reduced_environment_gets_its_runtime_dir_and_the_desktop_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = user_runtime(tmp_path, monkeypatch)
+    seen: list[Mapping[str, str]] = []
+    manager = {
+        "WAYLAND_DISPLAY": "wayland-1",
+        "DISPLAY": ":0",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        "SECRET": "not on the list",
+        "XDG_CURRENT_DESKTOP": "sway",
+    }
+    reduced = {"HOME": str(tmp_path), "PATH": "/usr/bin", "LOGNAME": "me", "SHELL": "/bin/sh"}
+    env = login.daemon_environment(reduced, asked_with(seen, manager))
+    assert env["XDG_RUNTIME_DIR"] == str(runtime)
+    assert env["WAYLAND_DISPLAY"] == "wayland-1"
+    assert env["DISPLAY"] == ":0"
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+    assert "SECRET" not in env
+    assert "XDG_CURRENT_DESKTOP" not in env  # only the three, whatever else the manager holds
+    assert env["LOGNAME"] == "me"
+    assert seen[0]["XDG_RUNTIME_DIR"] == str(
+        runtime
+    )  # the command that asks the manager finds it through this
+    assert reduced == {
+        "HOME": str(tmp_path),
+        "PATH": "/usr/bin",
+        "LOGNAME": "me",
+        "SHELL": "/bin/sh",
+    }  # the caller's mapping is not touched
+
+
+def test_nothing_already_set_is_replaced_and_a_whole_environment_does_not_ask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_runtime(tmp_path, monkeypatch)
+    whole = {
+        "HOME": str(tmp_path),
+        "PATH": "/usr/bin",
+        "XDG_RUNTIME_DIR": "/run/user/777",
+        "WAYLAND_DISPLAY": "wayland-9",
+        "DISPLAY": ":9",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x",
+    }
+    assert login.daemon_environment(whole, never_asked) == whole
+    partial = {**whole, "WAYLAND_DISPLAY": ""}
+    env = login.daemon_environment(partial, asked_with([], {"WAYLAND_DISPLAY": "wayland-1"}))
+    assert env["WAYLAND_DISPLAY"] == "wayland-1"
+    assert env["DISPLAY"] == ":9"
+    assert env["XDG_RUNTIME_DIR"] == "/run/user/777"
+
+
+def never_asked(_env: Mapping[str, str]) -> Mapping[str, str]:
+    msg = "the user manager should not have been asked"
+    raise AssertionError(msg)
+
+
+def test_a_manager_that_cannot_be_asked_changes_nothing_but_the_runtime_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = user_runtime(tmp_path, monkeypatch)
+    env = login.daemon_environment({"HOME": str(tmp_path), "PATH": "/usr/bin"}, lambda _e: {})
+    assert env == {"HOME": str(tmp_path), "PATH": "/usr/bin", "XDG_RUNTIME_DIR": str(runtime)}
+
+
+def test_without_any_runtime_dir_the_manager_is_not_asked_and_nothing_is_invented(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(login.sites, "USER_RUNTIME_ROOT", tmp_path / "none")
+    env = login.daemon_environment({"HOME": str(tmp_path), "PATH": "/usr/bin"}, never_asked)
+    assert "XDG_RUNTIME_DIR" not in env
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("WAYLAND_DISPLAY", "../../etc/x"),
+        ("WAYLAND_DISPLAY", "a/b"),
+        ("DISPLAY", "bad\x1b[31m"),
+        ("DBUS_SESSION_BUS_ADDRESS", "x" * 5000),
+        ("DISPLAY", ""),
+    ],
+)
+def test_a_value_the_manager_gives_that_cannot_be_right_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    user_runtime(tmp_path, monkeypatch)
+    env = login.daemon_environment(
+        {"HOME": str(tmp_path), "PATH": "/usr/bin"}, asked_with([], {name: value})
+    )
+    assert not env.get(name)
+
+
+def test_an_absolute_wayland_display_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_runtime(tmp_path, monkeypatch)
+    env = login.daemon_environment(
+        {"HOME": str(tmp_path), "PATH": "/usr/bin"},
+        asked_with([], {"WAYLAND_DISPLAY": "/run/user/1000/wayland-1"}),
+    )
+    assert env["WAYLAND_DISPLAY"] == "/run/user/1000/wayland-1"
+
+
+def test_path_gains_local_bin_and_the_managers_directories_at_the_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_runtime(tmp_path, monkeypatch)
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    extra = tmp_path / "tools"
+    extra.mkdir()
+    manager = {"PATH": f"/usr/bin:{extra}:relative/dir:{tmp_path / 'missing'}:/bad\x1b"}
+    env = login.daemon_environment(
+        {"HOME": str(tmp_path), "PATH": "/usr/local/bin:/usr/bin"}, asked_with([], manager)
+    )
+    assert env["PATH"] == f"/usr/local/bin:/usr/bin:{tmp_path / '.local' / 'bin'}:{extra}"
+
+
+def test_path_is_left_alone_when_it_has_everything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    user_runtime(tmp_path, monkeypatch)
+    local = tmp_path / ".local" / "bin"
+    local.mkdir(parents=True)
+    whole = {"HOME": str(tmp_path), "PATH": f"{local}:/usr/bin", "XDG_RUNTIME_DIR": "/r"}
+    assert (
+        login.daemon_environment(
+            {**whole, "WAYLAND_DISPLAY": "w", "DISPLAY": ":0", "DBUS_SESSION_BUS_ADDRESS": "u"},
+            never_asked,
+        )["PATH"]
+        == whole["PATH"]
+    )
+    assert login.daemon_environment({"HOME": str(tmp_path)}, lambda _e: {})["PATH"] == str(local)
+
+
+def test_the_process_environment_is_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = user_runtime(tmp_path, monkeypatch)
+    for name in ("XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seen: list[Mapping[str, str]] = []
+    monkeypatch.setattr(
+        login, "systemd_user_environment", lambda **kw: seen.append(kw["environ"]) or {}
+    )
+    env = login.daemon_environment()
+    assert env["XDG_RUNTIME_DIR"] == str(runtime)
+    assert seen[0]["XDG_RUNTIME_DIR"] == str(runtime)
+
+
+def test_systemd_user_environment_asks_in_the_environment_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[Any] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
+        seen.append(kwargs["env"])
+        return subprocess.CompletedProcess(argv, 0, "A=1\n", "")
+
+    monkeypatch.setattr(login.subprocess, "run", fake_run)
+    assert login.systemd_user_environment(environ={"XDG_RUNTIME_DIR": "/r"}) == {"A": "1"}
+    assert seen == [{"XDG_RUNTIME_DIR": "/r"}]
+
+
+def test_find_uses_the_login_managers_runtime_dir_for_a_relative_display(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = user_runtime(tmp_path, monkeypatch)
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(runtime / "wayland-3"))
+    try:
+        found = login.find_wayland_socket({"WAYLAND_DISPLAY": "wayland-3"}, dict)
+    finally:
+        listener.close()
+    assert found == runtime / "wayland-3"
+
+
+def test_no_path_is_made_up_when_there_is_none_and_nothing_to_add(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(login.sites, "USER_RUNTIME_ROOT", tmp_path / "none")
+    assert "PATH" not in login.daemon_environment({"HOME": str(tmp_path)}, never_asked)
