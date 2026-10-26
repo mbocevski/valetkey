@@ -383,8 +383,9 @@ def add_site(
     site: str = "sitex",
     allow: tuple[str, ...] = ("sitex.test",),
     excluded: tuple[str, ...] = (),
+    denied: tuple[str, ...] = (),
 ) -> sites.Policy:
-    policy = sites.Policy(site, f"https://{site}.test/", allow, excluded)
+    policy = sites.Policy(site, f"https://{site}.test/", allow, excluded, denied=denied)
     sites.save_policy(roots, policy)
     return policy
 
@@ -782,7 +783,13 @@ def test_reload_policy_reaches_the_live_proxy(roots: sites.Roots) -> None:
         options = {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
         async with serving(roots, proxy_options=options) as rig, await rig.connect() as c:
             idle = await c.call("reload_policy", site="sitex")
-            assert idle == {"site": "sitex", "allow": ["sitex.test"], "excluded": [], "live": False}
+            assert idle == {
+                "site": "sitex",
+                "allow": ["sitex.test"],
+                "excluded": [],
+                "denied": [],
+                "live": False,
+            }
             await c.call("open", site="sitex")
             proxy = session_socket(roots, "sitex")
             await asyncio.to_thread(refuse_via_proxy, proxy, "new.test")
@@ -911,6 +918,7 @@ def test_a_login_learns_a_policy_and_reports_it_once(roots: sites.Roots) -> None
                     "start": "https://newsite.test/signin",
                     "allow": [],
                     "excluded": [],
+                    "denied": [],
                     "learned": None,
                     "summary": None,
                 }
@@ -978,7 +986,7 @@ async def eventually(check: Callable[[], bool], limit: float = 10) -> None:
 
 
 def test_a_login_merges_into_an_existing_policy(roots: sites.Roots) -> None:
-    add_site(roots, "sitex", allow=("sitex.test", "approved.test"), excluded=("old.test",))
+    add_site(roots, "sitex", allow=("sitex.test", "approved.test"), denied=("old.test",))
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
@@ -989,7 +997,8 @@ def test_a_login_merges_into_an_existing_policy(roots: sites.Roots) -> None:
             await eventually(lambda: rig.daemon._sites["sitex"].kind == "idle")  # noqa: SLF001
             policy = sites.load_policy(roots, "sitex")
             assert policy.allow == ("approved.test", "sitex.test")
-            assert policy.excluded == ("cdn.other.test", "old.test")
+            assert policy.excluded == ("cdn.other.test",)
+            assert policy.denied == ("old.test",)
 
     run(scenario())
 
@@ -1059,7 +1068,7 @@ def test_login_errors_become_answers(roots: sites.Roots) -> None:
 
 
 def test_a_host_the_profile_visited_before_the_login_is_not_learned(roots: sites.Roots) -> None:
-    add_site(roots, "sitex", allow=("sitex.test",), excluded=("evil.example",))
+    add_site(roots, "sitex", allow=("sitex.test",), denied=("evil.example",))
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
@@ -1082,7 +1091,7 @@ def test_a_host_the_profile_visited_before_the_login_is_not_learned(roots: sites
             await eventually(lambda: rig.daemon._sites["sitex"].kind == "idle")  # noqa: SLF001
             policy = sites.load_policy(roots, "sitex")
             assert policy.allow == ("sitex.test",)
-            assert policy.excluded == ("evil.example",)
+            assert policy.denied == ("evil.example",)
 
     run(scenario())
 
@@ -1135,6 +1144,38 @@ def test_a_login_names_what_it_allowed_and_what_it_only_passed_through(roots: si
             assert "valetkey deny newsite HOST" in entry["summary"]
             assert "only redirected: tracker.test." in entry["summary"]
             assert "valetkey allow newsite HOST" in entry["summary"]
+
+    run(scenario())
+
+
+def test_a_login_allows_the_cdn_domains_of_the_site_and_sorts_the_rest(roots: sites.Roots) -> None:
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("login", target="https://www.shop.test/")
+            (window,) = rig.logins.windows
+            profile = roots.state / "profile"
+            history = profile / "Default" / "History"
+            history.parent.mkdir(parents=True)
+            make_history(history, ["https://www.shop.test/signin"])
+            seen = [
+                SeenHost(host, 1)
+                for host in (
+                    "www.shop.test",
+                    "cdn.shop.example",
+                    "images.shop.invalid",
+                    "fonts.cdn.test",
+                    "www.google-analytics.com",
+                )
+            ]
+            await window.close_window(seen, profile)
+            await eventually(lambda: rig.daemon._sites["shop"].kind == "idle")  # noqa: SLF001
+            policy = sites.load_policy(roots, "shop")
+            assert policy.allow == ("shop.example", "shop.invalid", "shop.test")
+            assert policy.excluded == ("fonts.cdn.test", "www.google-analytics.com")
+            (entry,) = (await c.call("sites"))["sites"]
+            assert "share the site's name: shop.example, shop.invalid." in entry["summary"]
+            assert "(CDNs, services): fonts.cdn.test." in entry["summary"]
+            assert "Left out 1 ads and tracking host." in entry["summary"]
 
     run(scenario())
 

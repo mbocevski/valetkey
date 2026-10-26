@@ -988,6 +988,7 @@ class Daemon:
                     "start": policy.start if policy else state.start,
                     "allow": list(policy.allow) if policy else [],
                     "excluded": list(policy.excluded) if policy else [],
+                    "denied": list(policy.denied) if policy else [],
                     "learned": policy.learned.strftime("%Y-%m-%dT%H:%M:%SZ")
                     if policy and policy.learned
                     else None,
@@ -1013,6 +1014,7 @@ class Daemon:
             "site": site,
             "allow": list(policy.allow),
             "excluded": list(policy.excluded),
+            "denied": list(policy.denied),
             "live": live,
         }
 

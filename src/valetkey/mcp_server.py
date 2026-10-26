@@ -460,6 +460,8 @@ def sites_text(listing: list[dict[str, Any]]) -> str:
             lines.append("  May reach: nothing learned yet")
         if entry.get("excluded"):
             lines.append(_hosts_line("Left out", entry["excluded"]))
+        if entry.get("denied"):
+            lines.append(_hosts_line("Denied", entry["denied"]))
         if entry.get("summary"):
             lines.append(f"  Last login: {entry['summary']}")
         blocks.append("\n".join(lines))

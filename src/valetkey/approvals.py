@@ -168,12 +168,13 @@ def eligibility(
 
     ``refused`` are the hosts the site's proxy refused because the policy did not allow them. A
     host qualifies when it is one of them, or when it is itself an entry of ``excluded`` (seen
-    during the login and left out). Anything else is ``not_eligible``, and nobody is asked. A
-    host the policy already allows is ``already_allowed``, unless it was refused because of the
+    during the login and left out) or of ``denied``. Anything else is ``not_eligible``, and nobody
+    is asked. A host the policy already allows is ``already_allowed``, unless it was refused
+    because of the
     address it resolves to (``address_refused``): that is not the agent's to ask about, only the
     person can list a private range, so it is ``not_eligible`` and the message says how.
     """
-    seen = host in policy.excluded
+    seen = host in policy.excluded or host in policy.denied
     if sites.allows(policy, host):
         if host in address_refused:
             return Eligibility("not_eligible", private_message(policy.site, host))

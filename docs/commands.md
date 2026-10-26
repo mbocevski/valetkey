@@ -14,7 +14,7 @@ Commands:
   allow: Allow a host, and its subdomains, for a site.
   bridge: Take login windows from a server onto this desktop, until stopped.
   daemon: Run the valetkeyd daemon in the foreground.
-  deny: Stop allowing a host for a site.
+  deny: Stop allowing a host for a site, and keep it blocked.
   doctor: Check that this machine can run valetkey.
   forget: Delete a site's policy, login profile and downloads.
   install-units: Write the systemd user units that run the valetkey daemon.
@@ -30,7 +30,7 @@ bridges.
 
 ## Listing sites
 
-`valetkey sites` lists each site with its start host, how many hosts it allows and excludes, the
+`valetkey sites` lists each site with its start host, how many hosts it allows, excludes and denies, the
 private address ranges it may reach, when the hosts were last learned and whether a login
 profile exists. Add `--json` for a script.
 
@@ -40,13 +40,13 @@ Usage: valetkey sites [OPTIONS]
 
 List the sites valetkey knows.
 
-Each line shows the site name, the host it starts at, how many hosts are allowed
-and excluded, when the hosts were last learned, the private address ranges it
-may reach (a dash for none), and whether a login profile exists. With --json,
-each site is an object with the keys site, account (the part after the colon of
-sitex:work, or null), host, allowed, excluded, learned (a UTC time, or null),
-private_networks (a list) and profile (true or false). A site with several
-accounts has a line for each.
+Each line shows the site name, the host it starts at, how many hosts are
+allowed, excluded by a login and denied by you, when the hosts were last
+learned, the private address ranges it may reach (a dash for none), and whether
+a login profile exists. With --json, each site is an object with the keys site,
+account (the part after the colon of sitex:work, or null), host, allowed,
+excluded, denied, learned (a UTC time, or null), private_networks (a list) and
+profile (true or false). A site with several accounts has a line for each.
 
 Parameters:
   --json: Print a JSON array instead of a table. [default: False]
@@ -56,8 +56,9 @@ Parameters:
 ## Allowing and denying hosts
 
 `valetkey allow SITE HOST` lets a site reach another host and its subdomains, and removes any
-excluded entry that would block it. `valetkey deny SITE HOST` takes a host away. When a wider
-allowed entry still covers the host, it is also excluded so that it stays blocked.
+excluded entry that would block it. `valetkey deny SITE HOST` takes a host away and adds it to the
+site's denied hosts, which block it even under a wider allowed entry. A login never allows a denied
+host again; `valetkey allow` does.
 
 `valetkey allow SITE --private-network RANGE` lets the site's allowed hosts resolve to addresses
 in a private range such as `10.20.0.0/24`. Use the narrowest range that holds the address. See
@@ -91,13 +92,13 @@ of a host.
 ```text
 Usage: valetkey deny [OPTIONS] SITE [ARGS]
 
-Stop allowing a host for a site.
+Stop allowing a host for a site, and keep it blocked.
 
-The host's own entry is removed from the allowed hosts. If a wider allowed entry
-still covers the host (app.example.com under example.com), the host is also
-added to the excluded hosts, so it stays blocked. Otherwise nothing more is
-needed. With --private-network and a range instead of a host, the range is no
-longer listed.
+The host's own entry is removed from the allowed hosts and the host is added to
+the denied hosts, which block it even under a wider allowed entry
+(app.example.com under example.com). A login never allows a denied host again;
+valetkey allow does. With --private-network and a range instead of a host, the
+range is no longer listed.
 
 Parameters:
   SITE, --site: The site name, as shown by valetkey sites, with its account
@@ -126,8 +127,8 @@ account its bare name works. Once it has several, a bare name is refused, and th
 existed first is written `sitex:main`. An account label starts with a letter, so `intranet:8080`
 is always a host and a port.
 
-`valetkey add sitex:work START --copy-hosts-from sitex` creates the account with the allowed and
-excluded hosts of another account, and nothing else: not its private ranges, and not what its
+`valetkey add sitex:work START --copy-hosts-from sitex` creates the account with the allowed, excluded and
+denied hosts of another account, and nothing else: not its private ranges, and not what its
 login learned. `valetkey forget sitex:work` deletes that account only.
 
 <!-- begin: valetkey add --help -->
@@ -146,9 +147,9 @@ policy and keeps the login profile.
 
 A site can have more than one account, each with its own login, policy and
 downloads. Name one sitex:work. With --copy-hosts-from the new account starts
-with the allowed and excluded hosts of another account of the site, and with
-nothing else of it: not its private ranges, which are a permission of their own,
-and not what its login learned.
+with the allowed, excluded and denied hosts of another account of the site, and
+with nothing else of it: not its private ranges, which are a permission of their
+own, and not what its login learned.
 
 Parameters:
   SITE, --site: The new site's name, with an account after a colon for another
@@ -158,8 +159,8 @@ account of a site
   START, --start: The URL the login starts at. [required]
   --private-network STR...: A private address range the site may reach, such as
 10.20.0.0/24. Repeat it.
-  --copy-hosts-from STR: Start with the allowed and excluded hosts of this other
-account of the site.
+  --copy-hosts-from STR: Start with the host lists of this other account of the
+site.
   --force: Replace the policy of an existing site. [default: False]
 ```
 <!-- end: valetkey add --help -->

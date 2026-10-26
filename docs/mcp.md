@@ -20,8 +20,7 @@ starts `valetkey daemon` itself, and that daemon keeps running so several client
 Start with `browser_sites`. The others act on one site by its name.
 
 - `browser_sites` lists the sites you have set up, their state, the hosts each may reach, and what
-  the last login learned. That names the other sites the login allowed, and the hosts it only passed
-  through and did not allow.
+  the last login learned. That names the other sites the login allowed, and the hosts it left out.
 - `browser_login` opens a login window on your screen and returns at once. Pass `account` to add
   another account to a site (see [accounts](#accounts)). With no screen it
   uses a connected bridge if `remote_logins.waypipe` is on, so the window opens on your laptop.

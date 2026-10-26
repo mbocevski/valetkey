@@ -63,7 +63,7 @@ _HOST_RE = re.compile(
 _LEARNED_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 _LEARNED_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _POLICY_KEYS = ("site", "start", "allow", "excluded", "learned")
-_OPTIONAL_POLICY_KEYS = ("login_pages", "private_networks")
+_OPTIONAL_POLICY_KEYS = ("denied", "login_pages", "private_networks")
 
 # Ranges a site may be given for its private-network addresses: the RFC 1918 blocks, the unique
 # local addresses of RFC 4193, and the shared address space of RFC 6598 (100.64.0.0/10). The last
@@ -564,8 +564,13 @@ class Policy:
     """The hosts one site may reach.
 
     ``allow`` lists hosts the browser may connect to, each also covering its subdomains.
-    ``excluded`` lists hosts that were seen and judged not needed (trackers, error reporting); a
-    host under an excluded entry is refused even when an ``allow`` entry also covers it.
+    ``excluded`` lists hosts that a login saw and left out (trackers, error reporting, anything
+    the pages used that it did not allow); a login builds it again each time. ``denied`` lists
+    hosts the person turned down, with ``valetkey deny``; a login never changes it and never
+    allows a host it blocks. A host under an entry of either list is refused even when an
+    ``allow`` entry also covers it. A policy file written before ``denied`` existed has none, and
+    its ``excluded`` entries become ``denied`` when it is read, because nothing says which of them
+    the person chose.
     ``learned`` is when the lists were last built, in UTC with whole seconds, or ``None``.
     ``login_pages`` are the pages (as :func:`page_key` writes them, ``host/path``) a form was
     submitted from during the login, other than the start page and the page the login ended
@@ -585,12 +590,13 @@ class Policy:
     learned: datetime | None = None
     login_pages: tuple[str, ...] = ()
     private_networks: tuple[str, ...] = ()
+    denied: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate the fields."""
         validate_site_name(self.site)
         _validate_start(self.start)
-        for entries in (self.allow, self.excluded):
+        for entries in (self.allow, self.excluded, self.denied):
             for entry in entries:
                 if not (isinstance(entry, str) and is_plausible_host(entry)):
                     msg = (
@@ -677,9 +683,10 @@ def allow_host(policy: Policy, host: str) -> tuple[Policy, bool, list[str]]:
     """
     added = host not in policy.allow
     allow = (*policy.allow, host) if added else policy.allow
-    kept = tuple(entry for entry in policy.excluded if not excluded_conflicts(entry, [host]))
-    removed = [entry for entry in policy.excluded if entry not in kept]
-    return replace(policy, allow=allow, excluded=kept), added, removed
+    excluded = tuple(e for e in policy.excluded if not excluded_conflicts(e, [host]))
+    denied = tuple(e for e in policy.denied if not excluded_conflicts(e, [host]))
+    removed = [e for e in (*policy.excluded, *policy.denied) if e not in (*excluded, *denied)]
+    return replace(policy, allow=allow, excluded=excluded, denied=denied), added, removed
 
 
 def private_network(text: str) -> str:
@@ -745,16 +752,20 @@ def allows(policy: Policy, host: str) -> bool:
     """Tell whether ``policy`` lets the browser connect to ``host``.
 
     True when ``host`` matches an ``allow`` entry (see :func:`host_matches`) and no ``excluded``
-    entry. Pure and cheap: meant to be called for every connection.
+    or ``denied`` entry. Pure and cheap: meant to be called for every connection.
     """
-    return host_matches(host, policy.allow) and not host_matches(host, policy.excluded)
+    return host_matches(host, policy.allow) and not (
+        host_matches(host, policy.excluded) or host_matches(host, policy.denied)
+    )
 
 
 def load_policy(roots: Roots, site: str) -> Policy:
     """Read and validate ``site``'s policy file.
 
     The file must be a JSON object with the keys ``site``, ``start``, ``allow``, ``excluded``
-    and ``learned``, and may also have ``login_pages`` and ``private_networks``. Missing keys and
+    and ``learned``, and may also have ``denied``, ``login_pages`` and ``private_networks``. A
+    file without ``denied`` is one from before it existed: its ``excluded`` entries are read as
+    ``denied``, the safe reading, and ``excluded`` is empty until a login fills it. Missing keys and
     unknown keys are both errors, and ``site`` must equal the file name.
 
     Raises:
@@ -778,11 +789,14 @@ def load_policy(roots: Roots, site: str) -> Policy:
         if data["site"] != site:
             msg = f"site is {data['site']!r} but the file is named for {site!r}"
             raise PolicyError(msg)
+        excluded = _hosts(data, "excluded")
+        denied = _hosts(data, "denied") if "denied" in data else excluded
         return Policy(
             site=_text(data, "site"),
             start=_text(data, "start"),
             allow=_hosts(data, "allow"),
-            excluded=_hosts(data, "excluded"),
+            excluded=excluded if "denied" in data else (),
+            denied=denied,
             learned=_learned(data["learned"]),
             login_pages=_hosts(data, "login_pages") if "login_pages" in data else (),
             private_networks=(
@@ -827,6 +841,7 @@ def policy_json(policy: Policy) -> str:
         "start": policy.start,
         "allow": list(policy.allow),
         "excluded": list(policy.excluded),
+        "denied": list(policy.denied),
         "learned": None if learned is None else learned.strftime(_LEARNED_FORMAT),
     }
     if policy.login_pages:

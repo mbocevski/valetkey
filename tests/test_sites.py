@@ -54,9 +54,13 @@ HAND_WRITTEN = """{
   "excluded": [
     "o123.ingest.sentry.io"
   ],
+  "denied": [
+    "ads.sitex.com"
+  ],
   "learned": "2026-10-25T21:40:00Z"
 }
 """
+LEGACY = HAND_WRITTEN.replace('  "denied": [\n    "ads.sitex.com"\n  ],\n', "")
 
 
 @pytest.fixture
@@ -588,6 +592,7 @@ def test_hand_written_file_loads(roots: Roots) -> None:
         start="https://sitex.com/",
         allow=("sitex.com", "login.okta.com"),
         excluded=("o123.ingest.sentry.io",),
+        denied=("ads.sitex.com",),
         learned=datetime(2026, 10, 25, 21, 40, tzinfo=UTC),
     )
 
@@ -985,3 +990,36 @@ def test_no_stand_in_leaves_the_error_as_it_was(
     monkeypatch.setattr(sites, "USER_RUNTIME_ROOT", tmp_path)
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     assert roots_from_env().runtime is None
+
+
+# -- denied hosts --------------------------------------------------------------------------
+
+
+def test_a_file_from_before_denied_reads_its_excluded_entries_as_denied(roots: Roots) -> None:
+    write_policy_file(roots, "sitex", LEGACY)
+    loaded = load_policy(roots, "sitex")
+    assert (loaded.excluded, loaded.denied) == ((), ("o123.ingest.sentry.io",))
+    assert not allows(loaded, "o123.ingest.sentry.io")
+    assert '"denied": [\n    "o123.ingest.sentry.io"\n  ]' in policy_json(loaded)
+    save_policy(roots, loaded)
+    assert load_policy(roots, "sitex") == loaded
+
+
+def test_a_denied_entry_blocks_a_host_like_an_excluded_one() -> None:
+    held = policy(allow=("sitex.com",), excluded=("a.sitex.com",), denied=("b.sitex.com",))
+    assert allows(held, "sitex.com")
+    assert not allows(held, "a.sitex.com")
+    assert not allows(held, "x.b.sitex.com")
+
+
+def test_allowing_a_host_lifts_what_blocks_it_from_both_lists() -> None:
+    held = policy(allow=("sitex.com",), excluded=("x.org",), denied=("org", "y.net"))
+    changed, added, removed = sites.allow_host(held, "x.org")
+    assert added
+    assert (changed.excluded, changed.denied) == ((), ("y.net",))
+    assert removed == ["x.org", "org"]
+
+
+def test_a_denied_entry_must_be_a_plausible_host() -> None:
+    with pytest.raises(ValueError, match="plausible host"):
+        policy(denied=("Bad Host",))

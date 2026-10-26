@@ -218,6 +218,11 @@ def test_sites_text() -> None:
     assert text.count("Left out") == 1
 
 
+def test_denied_hosts_are_listed_apart_from_the_ones_left_out() -> None:
+    text = mcp_server.sites_text([listing(excluded=["t.test"], denied=["no.test"])])
+    assert "  Left out (1): t.test\n  Denied (1): no.test" in text
+
+
 def test_long_host_lists_are_cut_short() -> None:
     hosts = [f"h{n}.test" for n in range(9)]
     text = mcp_server.sites_text([listing(allow=hosts, excluded=hosts[:3])])

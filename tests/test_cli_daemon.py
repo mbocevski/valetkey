@@ -192,7 +192,9 @@ def test_deny_tells_the_daemon_too(roots: sites.Roots, capsys: pytest.CaptureFix
         status, out, _ = run(capsys, "deny", "sitex", "sitex.test")
     assert status == 0
     assert (
-        out == "sitex: sitex.test is no longer allowed.\nsitex: applied to the running session.\n"
+        out == "sitex: sitex.test is no longer allowed.\n"
+        "sitex: sitex.test is denied, so a login will not allow it again.\n"
+        "sitex: applied to the running session.\n"
     )
     assert fake.ops == ["reload_policy"]
 

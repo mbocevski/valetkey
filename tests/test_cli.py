@@ -117,8 +117,8 @@ def test_sites_lists_one_and_several(
     status, out, _ = run(capsys, "sites")
     assert status == 0
     assert out.splitlines() == [
-        "SITE   HOST           ALLOWED  EXCLUDED  LEARNED               NETWORKS  PROFILE",
-        "sitex  app.sitex.com  2        1         2026-10-26T09:00:00Z  -         yes",
+        "SITE   HOST           ALLOWED  EXCLUDED  DENIED  LEARNED               NETWORKS  PROFILE",
+        "sitex  app.sitex.com  2        1         0       2026-10-26T09:00:00Z  -         yes",
     ]
     make_site(roots, "another")
     status, out, _ = run(capsys, "sites")
@@ -138,6 +138,7 @@ def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]
             "host": "app.another.com",
             "allowed": 1,
             "excluded": 0,
+            "denied": 0,
             "learned": None,
             "private_networks": [],
             "profile": True,
@@ -148,6 +149,7 @@ def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]
             "host": "app.sitex.com",
             "allowed": 1,
             "excluded": 0,
+            "denied": 0,
             "learned": "2026-10-26T09:00:00Z",
             "private_networks": [],
             "profile": False,
@@ -204,7 +206,7 @@ def test_allow_removes_the_exclusions_that_would_block_it(
     assert status == 0
     assert sites.allows(saved, "login.okta.com")
     assert saved.excluded == tuple(e for e in excluded if e != gone)
-    assert (f"no longer excluding {gone}" in out) is (gone is not None)
+    assert (f"no longer excluding or denying {gone}" in out) is (gone is not None)
 
 
 def test_allow_clears_an_exclusion_of_an_already_allowed_host(
@@ -262,18 +264,26 @@ def test_unreadable_policy_is_reported(
     assert "broken.json" in err
 
 
-def test_deny_removes_an_allowed_host(
+def test_deny_removes_an_allowed_host_and_denies_it(
     roots: sites.Roots, capsys: pytest.CaptureFixture[str]
 ) -> None:
     make_site(roots, allow=("sitex.com", "login.okta.com"))
     status, out, _ = run(capsys, "deny", "sitex", "login.okta.com")
-    assert (status, out) == (0, "sitex: login.okta.com is no longer allowed.\n")
+    assert status == 0
+    assert out.splitlines() == [
+        "sitex: login.okta.com is no longer allowed.",
+        "sitex: login.okta.com is denied, so a login will not allow it again.",
+    ]
     saved = sites.load_policy(roots, "sitex")
-    assert (saved.allow, saved.excluded) == (("sitex.com",), ())
+    assert (saved.allow, saved.excluded, saved.denied) == (
+        ("sitex.com",),
+        (),
+        ("login.okta.com",),
+    )
     assert not sites.allows(saved, "login.okta.com")
 
 
-def test_deny_excludes_a_host_a_wider_entry_still_covers(
+def test_deny_blocks_a_host_a_wider_entry_still_covers(
     roots: sites.Roots, capsys: pytest.CaptureFixture[str]
 ) -> None:
     make_site(roots, allow=("sitex.com", "app.sitex.com"))
@@ -281,10 +291,10 @@ def test_deny_excludes_a_host_a_wider_entry_still_covers(
     assert status == 0
     assert out.splitlines() == [
         "sitex: app.sitex.com is no longer allowed.",
-        "sitex: a wider allowed entry still covers app.sitex.com, so it is now excluded.",
+        "sitex: app.sitex.com is denied, so a login will not allow it again.",
     ]
     saved = sites.load_policy(roots, "sitex")
-    assert (saved.allow, saved.excluded) == (("sitex.com",), ("app.sitex.com",))
+    assert (saved.allow, saved.denied) == (("sitex.com",), ("app.sitex.com",))
     assert not sites.allows(saved, "app.sitex.com")
     assert sites.allows(saved, "www.sitex.com")
 
@@ -296,18 +306,23 @@ def test_deny_carves_out_a_host_with_no_entry_of_its_own(
     status, out, _ = run(capsys, "deny", "sitex", "ads.sitex.com")
     assert status == 0
     assert "no longer allowed" not in out
-    assert sites.load_policy(roots, "sitex").excluded == ("ads.sitex.com",)
-    status, _, _ = run(capsys, "deny", "sitex", "ads.sitex.com")
-    assert sites.load_policy(roots, "sitex").excluded == ("ads.sitex.com",)
+    assert sites.load_policy(roots, "sitex").denied == ("ads.sitex.com",)
+    status, out, _ = run(capsys, "deny", "sitex", "ads.sitex.com")
+    assert out == "sitex: ads.sitex.com was already denied and not allowed. Nothing changed.\n"
+    assert sites.load_policy(roots, "sitex").denied == ("ads.sitex.com",)
 
 
-def test_deny_of_a_host_that_was_never_allowed_changes_nothing(
+def test_deny_of_a_host_that_is_already_denied_changes_nothing(
     roots: sites.Roots, capsys: pytest.CaptureFixture[str]
 ) -> None:
     make_site(roots)
+    run(capsys, "deny", "sitex", "other.example")
     before = sites.policy_path(roots, "sitex").stat().st_mtime_ns
     status, out, _ = run(capsys, "deny", "sitex", "other.example")
-    assert (status, out) == (0, "sitex: other.example was not allowed. Nothing changed.\n")
+    assert (status, out) == (
+        0,
+        "sitex: other.example was already denied and not allowed. Nothing changed.\n",
+    )
     assert sites.policy_path(roots, "sitex").stat().st_mtime_ns == before
 
 
@@ -1996,10 +2011,11 @@ def test_add_makes_another_account_that_starts_with_the_hosts_of_one(
             "sitex",
             "https://sitex.com/",
             ("sitex.com", "login.okta.com"),
-            ("ads.sitex.com", "login.okta.com.evil.test"),
+            ("ads.sitex.com",),
             datetime(2026, 10, 26, 9, 0, tzinfo=UTC),
             ("sitex.com/signin",),
             ("10.0.0.0/8",),
+            ("login.okta.com.evil.test",),
         ),
     )
     status, out, _ = run(
@@ -2008,12 +2024,12 @@ def test_add_makes_another_account_that_starts_with_the_hosts_of_one(
     assert status == 0
     assert out.splitlines() == [
         "sitex:work: added, starting at https://work.sitex.com/.",
-        "sitex:work: copied 2 allowed and 2 excluded hosts from sitex.",
+        "sitex:work: copied 2 allowed and 2 left-out hosts from sitex.",
         "sitex:work: now ask your client to log in to sitex:work.",
     ]
     copy = sites.load_policy(roots, "sitex:work")
     assert copy.allow == ("work.sitex.com", "sitex.com", "login.okta.com")
-    assert copy.excluded == ("ads.sitex.com", "login.okta.com.evil.test")
+    assert (copy.excluded, copy.denied) == (("ads.sitex.com",), ("login.okta.com.evil.test",))
     assert copy.private_networks == ()
     assert copy.learned is None
     assert copy.login_pages == ()

@@ -187,12 +187,12 @@ def list_sites(
 ) -> int:
     """List the sites valetkey knows.
 
-    Each line shows the site name, the host it starts at, how many hosts are allowed and
-    excluded, when the hosts were last learned, the private address ranges it may reach (a
-    dash for none), and whether a login profile exists. With --json, each site is an object with
-    the keys site, account (the part after the colon of ``sitex:work``, or null), host, allowed,
-    excluded, learned (a UTC time, or null), ``private_networks`` (a list) and profile (true or
-    false). A site with several accounts has a line for each.
+    Each line shows the site name, the host it starts at, how many hosts are allowed, excluded
+    by a login and denied by you, when the hosts were last learned, the private address ranges it
+    may reach (a dash for none), and whether a login profile exists. With --json, each site is an
+    object with the keys site, account (the part after the colon of ``sitex:work``, or null),
+    host, allowed, excluded, denied, learned (a UTC time, or null), ``private_networks`` (a list)
+    and profile (true or false). A site with several accounts has a line for each.
     """
     roots = sites.roots_from_env()
     rows: list[dict[str, object]] = []
@@ -211,6 +211,7 @@ def list_sites(
                 "host": sites.host_of(policy.start),
                 "allowed": len(policy.allow),
                 "excluded": len(policy.excluded),
+                "denied": len(policy.denied),
                 "learned": _learned(policy),
                 "private_networks": list(policy.private_networks),
                 "profile": sites.profile_path(roots, name).is_dir(),
@@ -232,13 +233,16 @@ def _print_sites(rows: list[dict[str, object]]) -> None:
             str(row["host"]),
             str(row["allowed"]),
             str(row["excluded"]),
+            str(row["denied"]),
             str(row["learned"] or "never"),
             ", ".join(map(str, row["private_networks"] or ())) or "-",  # ty: ignore[invalid-argument-type]
             "yes" if row["profile"] else "no",
         ]
         for row in rows
     ]
-    _print_table(["SITE", "HOST", "ALLOWED", "EXCLUDED", "LEARNED", "NETWORKS", "PROFILE"], body)
+    _print_table(
+        ["SITE", "HOST", "ALLOWED", "EXCLUDED", "DENIED", "LEARNED", "NETWORKS", "PROFILE"], body
+    )
 
 
 def _print_table(header: list[str], body: list[list[str]]) -> None:
@@ -275,7 +279,7 @@ CopyHosts = Annotated[
     str | None,
     Parameter(
         name="--copy-hosts-from",
-        help="Start with the allowed and excluded hosts of this other account of the site.",
+        help="Start with the host lists of this other account of the site.",
     ),
 ]
 
@@ -299,9 +303,9 @@ def add(
     ``--force``, which replaces the policy and keeps the login profile.
 
     A site can have more than one account, each with its own login, policy and downloads. Name
-    one ``sitex:work``. With ``--copy-hosts-from`` the new account starts with the allowed and
-    excluded hosts of another account of the site, and with nothing else of it: not its private
-    ranges, which are a permission of their own, and not what its login learned.
+    one ``sitex:work``. With ``--copy-hosts-from`` the new account starts with the allowed,
+    excluded and denied hosts of another account of the site, and with nothing else of it: not
+    its private ranges, which are a permission of their own, and not what its login learned.
 
     Parameters
     ----------
@@ -313,7 +317,7 @@ def add(
     network
         A private address range such as ``10.20.0.0/24``. Repeat it for more.
     copy_hosts_from
-        An existing account of the site whose allowed and excluded hosts to start with.
+        An existing account of the site whose host lists to start with.
     force
         Replace the policy of an existing site.
 
@@ -327,8 +331,8 @@ def add(
     _say(f"{site}: added, starting at {policy.start}.")
     if copy_hosts_from:
         _say(
-            f"{site}: copied {len(policy.allow) - 1} allowed and {len(policy.excluded)} excluded "
-            f"hosts from {copy_hosts_from}."
+            f"{site}: copied {len(policy.allow) - 1} allowed and "
+            f"{len(policy.excluded) + len(policy.denied)} left-out hosts from {copy_hosts_from}."
         )
     for entry in policy.private_networks:
         _say(f"{site}: hosts it allows may resolve inside {entry}.")
@@ -354,12 +358,13 @@ def _new_site(  # noqa: PLR0913 - one thing each: the name, the start, the range
         host = sites.host_of(start)
     except ValueError as error:
         raise CommandError(str(error)) from error
-    allow, excluded = (host,), ()
+    allow, excluded, denied = (host,), (), ()
     if copy_from is not None:
         source = _load(roots, copy_from)
         allow = tuple(dict.fromkeys((host, *source.allow)))
         excluded = tuple(e for e in source.excluded if not sites.excluded_conflicts(e, allow))
-    policy = sites.Policy(site, start, allow, excluded, private_networks=listed)
+        denied = tuple(e for e in source.denied if not sites.excluded_conflicts(e, allow))
+    policy = sites.Policy(site, start, allow, excluded, private_networks=listed, denied=denied)
     taken = sites.policy_path(roots, site).exists() or sites.profile_path(roots, site).exists()
     if taken and not force:
         msg = (
@@ -444,18 +449,18 @@ def allow(site: str, host: str | None = None, *, network: PrivateNetwork = None)
     applied = save_and_reload(roots, site, changed)
     _say(f"{site}: {name} is allowed." if added else f"{site}: {name} was already allowed.")
     if removed:
-        _say(f"{site}: no longer excluding {', '.join(removed)}.")
+        _say(f"{site}: no longer excluding or denying {', '.join(removed)}.")
     _say_applied(site, applied=applied)
     return 0
 
 
 @app.command
 def deny(site: str, host: str | None = None, *, network: PrivateNetwork = None) -> int:
-    """Stop allowing a host for a site.
+    """Stop allowing a host for a site, and keep it blocked.
 
-    The host's own entry is removed from the allowed hosts. If a wider allowed entry still
-    covers the host (``app.example.com`` under ``example.com``), the host is also added to the
-    excluded hosts, so it stays blocked. Otherwise nothing more is needed. With
+    The host's own entry is removed from the allowed hosts and the host is added to the denied
+    hosts, which block it even under a wider allowed entry (``app.example.com`` under
+    ``example.com``). A login never allows a denied host again; ``valetkey allow`` does. With
     ``--private-network`` and a range instead of a host, the range is no longer listed.
 
     Parameters
@@ -481,25 +486,21 @@ def deny(site: str, host: str | None = None, *, network: PrivateNetwork = None) 
         site = policy.site
         name = _host(str(host))
         allowed = tuple(entry for entry in policy.allow if entry != name)
-        covered = sites.host_matches(name, allowed)
-        excluded = policy.excluded
-        if covered and name not in excluded:
-            excluded = (*excluded, name)
+        denied = policy.denied if name in policy.denied else (*policy.denied, name)
         changed = (
-            replace(policy, allow=allowed, excluded=excluded)
-            if allowed != policy.allow or excluded != policy.excluded
+            replace(policy, allow=allowed, denied=denied)
+            if allowed != policy.allow or denied != policy.denied
             else None
         )
     except CommandError as error:
         return _fail(error)
     applied = save_and_reload(roots, site, changed)
-    removed = allowed != policy.allow
-    if removed:
+    if allowed != policy.allow:
         _say(f"{site}: {name} is no longer allowed.")
-    if covered:
-        _say(f"{site}: a wider allowed entry still covers {name}, so it is now excluded.")
-    if not removed and not covered:
-        _say(f"{site}: {name} was not allowed. Nothing changed.")
+    if denied != policy.denied:
+        _say(f"{site}: {name} is denied, so a login will not allow it again.")
+    if changed is None:
+        _say(f"{site}: {name} was already denied and not allowed. Nothing changed.")
     _say_applied(site, applied=applied)
     return 0
 
