@@ -1100,9 +1100,9 @@ def test_a_daemon_that_loses_the_start_race_does_not_fail_the_bridge(xdg: Path) 
         late.handlers["sites"] = lambda _a: {"sites": []}
 
         async def winner() -> None:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.4)
             async with late.serving():
-                await asyncio.sleep(2)
+                await asyncio.sleep(0.8)
 
         racer = asyncio.ensure_future(winner())
         try:
@@ -1213,7 +1213,7 @@ def test_the_daemon_is_started_with_no_inherited_stdio(monkeypatch: pytest.Monke
     monkeypatch.setattr(mcp_server.subprocess, "Popen", fake_popen)
 
     async def scenario() -> None:
-        bridge = Bridge(daemon_command=["valetkeyd-stand-in"])
+        bridge = Bridge(daemon_command=["valetkeyd-stand-in"], exit_grace=0.2)
         with pytest.raises(DaemonError):
             await bridge.call("sites")
 

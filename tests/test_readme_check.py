@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
-from typing import TYPE_CHECKING
+import subprocess
+from typing import TYPE_CHECKING, Any
 
 import conventional
 import pytest
@@ -16,6 +17,31 @@ REQUIREMENT = (
     f"{sessions.short_version_text(sessions.MIN_VERSION)} or newer, "
     f"tested with {sessions.version_text(sessions.TESTED_VERSION)}"
 )
+
+_VALETKEY_RUNS: dict[tuple[str, ...], subprocess.CompletedProcess[str]] = {}
+_REAL_RUN = subprocess.run
+
+
+def _run_once(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
+    """Run ``python -m valetkey ...`` for real the first time and remember the answer.
+
+    Starting the command is most of what these tests cost, and the same few help screens are
+    asked for again and again. The answer to one question about the installed program does not
+    change during a test run. Anything else runs as asked.
+    """
+    if command[1:3] != ["-m", "valetkey"]:
+        return _REAL_RUN(command, **kwargs)
+    key = (*command, kwargs["env"]["COLUMNS"])
+    if key not in _VALETKEY_RUNS:
+        _VALETKEY_RUNS[key] = _REAL_RUN(command, **kwargs)
+    return _VALETKEY_RUNS[key]
+
+
+@pytest.fixture(autouse=True)
+def _remember_valetkey_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(readme_check.subprocess, "run", _run_once)
+
+
 PYPROJECT = '[project]\nname = "x"\nrequires-python = ">=3.14"\n'
 
 

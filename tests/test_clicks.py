@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import re
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -501,19 +502,37 @@ document.getElementById('form').onsubmit = (e) => {
 PAGES = {"/": FIXTURE, "/two": "<title>Two</title><h1>second page</h1>"}
 
 
+START = "http://site.test/"
+
+
+@pytest.fixture(scope="module")
+def shared_browser() -> Iterator[tuple[sessions.Session, ProxyStub]]:
+    """One real session for the module: starting a browser costs more than any test here."""
+    with tempfile.TemporaryDirectory(prefix="vk-") as directory:
+        base = Path(directory)
+        runtime = base / "rt"
+        runtime.mkdir(mode=0o700)
+        roots = sites.Roots(base / "cfg", base / "state", runtime)
+        paths = sessions.session_paths(roots, "demo")
+        paths.proxy_socket.parent.mkdir(parents=True)
+        with (
+            PageServer(PAGES) as pages,
+            ProxyStub(paths.proxy_socket, pages.address) as proxy,
+            sessions.Session.start(roots, "demo", START, timeout=60) as session,
+        ):
+            yield session, proxy
+
+
 @pytest.fixture
-def browser(short_dir: Path) -> Iterator[Browser]:
-    runtime = short_dir / "rt"
-    runtime.mkdir(mode=0o700)
-    roots = sites.Roots(short_dir / "cfg", short_dir / "state", runtime)
-    paths = sessions.session_paths(roots, "demo")
-    paths.proxy_socket.parent.mkdir(parents=True)
-    with (
-        PageServer(PAGES) as pages,
-        ProxyStub(paths.proxy_socket, pages.address) as proxy,
-        sessions.Session.start(roots, "demo", "http://site.test/", timeout=60) as session,
-    ):
-        yield Browser(session, proxy)
+def browser(shared_browser: tuple[sessions.Session, ProxyStub]) -> Browser:
+    """The shared session on a freshly loaded fixture page.
+
+    Loading the page again discards the page's state, so every test starts from the same page
+    as it would in a browser of its own. ``hits`` counts only what the page reports from here on.
+    """
+    session, proxy = shared_browser
+    session.open(START)
+    return Browser(session, proxy, len(proxy.requests))
 
 
 @dataclass
@@ -522,12 +541,14 @@ class Browser:
 
     session: sessions.Session
     proxy: ProxyStub
+    first: int = 0
+    """How many requests the proxy had seen when this test's page loaded."""
 
     def hits(self) -> list[str]:
-        """What the page's own scripts reported, in order (``flaky click 1``, ...)."""
+        """What the page's own scripts reported since the test began (``flaky click 1``, ...)."""
         time.sleep(0.5)  # a beacon is sent after the click returns
         found = []
-        for head in list(self.proxy.requests):
+        for head in list(self.proxy.requests)[self.first :]:
             target = head.split(maxsplit=2)[1]
             if "/hit/" in target:
                 found.append(unquote(target.split("/hit/", 1)[1].split("?", 1)[0]))
@@ -642,7 +663,7 @@ def typed_value(browser: Browser) -> str:
 @pytest.mark.integration
 @needs_everything
 def test_text_is_typed_exactly_as_given(browser: Browser) -> None:
-    field = next(r for r, e in browser.session.snapshot().refs.items() if e.role == "textbox")
+    field = next(r for r, e in browser.session.snapshot().refs.items() if e.name == "Query")
     for text in ("Ada Lovelace", "--json", "--session other", "-x", "--headed", "- a dash"):
         browser.session.fill(field, text)
         assert typed_value(browser) == text
@@ -652,7 +673,7 @@ def test_text_is_typed_exactly_as_given(browser: Browser) -> None:
 @pytest.mark.integration
 @needs_everything
 def test_typing_can_submit_with_enter(browser: Browser) -> None:
-    field = next(r for r, e in browser.session.snapshot().refs.items() if e.role == "textbox")
+    field = next(r for r, e in browser.session.snapshot().refs.items() if e.name == "Query")
     browser.session.fill(field, "Ada")
     assert "Submitted: Ada" not in browser.text()
     browser.session.press_enter()
@@ -729,4 +750,4 @@ def test_option_like_text_is_typed_literally_and_the_browser_is_left_alone(
         assert read_back == text, (name, text)
         assert browser_pids(session) == before, f"{text!r} restarted the browser"
         assert session.is_alive()
-        assert session.current_url() == "http://site.test/"
+        assert session.current_url() == START

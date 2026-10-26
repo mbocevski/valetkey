@@ -210,7 +210,7 @@ pc.onicecandidate = (e) => { if (e.candidate) found.push(e.candidate.candidate);
 pc.createDataChannel('x');
 pc.createOffer().then((o) => pc.setLocalDescription(o));
 setTimeout(() => out('candidates=' + found.length +
-  ' srflx=' + found.filter((c) => / typ srflx/.test(c)).length), 6000);""",
+  ' srflx=' + found.filter((c) => / typ srflx/.test(c)).length), 3000);""",
 }
 
 
