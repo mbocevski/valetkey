@@ -23,7 +23,12 @@ Each connection goes through four checks, in this order:
 3. The address: the proxy resolves the host itself and connects only to public addresses. A name
    that resolves to loopback, private, link-local or other non-public addresses is refused, which
    stops DNS rebinding from reaching services on the local machine or network. IP literals get
-   the same check. The proxy never falls back to an address that failed it.
+   the same check. Every address the name resolves to must pass, because a rebinding answer
+   often mixes public and private ones, and the proxy connects only to an address that passed.
+   The one exception is a site's ``private_networks``: a private address inside a range the
+   person listed passes, for that site only. Loopback, link-local, multicast, unspecified and
+   reserved addresses and the cloud metadata services (``sites.NEVER_ALLOWED_ADDRESSES``) are
+   refused whatever is listed.
 4. The connection to the upstream server.
 
 Refusals are answered with ``403 Forbidden`` and recorded. What gets recorded is the host, the
@@ -46,7 +51,7 @@ from urllib.parse import urlsplit
 from valetkey import sites
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
     from pathlib import Path
     from typing import Self
     from urllib.parse import SplitResult
@@ -63,7 +68,8 @@ HTTP_PORT = 80
 _CHUNK = 64 * 1024
 _PLAIN_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"})
 _DROPPED_HEADERS = frozenset({b"host", b"connection", b"proxy-connection", b"keep-alive"})
-_REFUSED_ADDRESS = "resolves to a private address"
+PRIVATE_ADDRESS = "resolves to a private address"
+"""The reason given for an address the proxy will not connect to."""
 NOT_ALLOWED = "not in the allow list"
 """The reason a host is refused when the policy does not allow it."""
 
@@ -245,7 +251,7 @@ def address_refusal(address: str) -> str | None:
     try:
         ip = ipaddress.ip_address(address)
     except ValueError:
-        return _REFUSED_ADDRESS
+        return PRIVATE_ADDRESS
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
     blocked = (
@@ -257,7 +263,35 @@ def address_refusal(address: str) -> str | None:
         or ip.is_reserved
         or not ip.is_global
     )
-    return _REFUSED_ADDRESS if blocked else None
+    return PRIVATE_ADDRESS if blocked else None
+
+
+def private_address_allowed(address: str, networks: Iterable[str]) -> bool:
+    """Tell whether ``address`` is private but inside one of the site's listed ``networks``.
+
+    Never true for loopback, link-local, multicast, unspecified or reserved addresses, nor for
+    ``sites.NEVER_ALLOWED_ADDRESSES``, whatever is listed. An IPv4-mapped IPv6 address is judged
+    by the IPv4 address inside it, so a mapped form cannot slip past a range written for IPv4.
+    """
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
+        or ip.is_reserved
+        or ip in sites.NEVER_ALLOWED_ADDRESSES
+    ):
+        return False
+    return any(
+        ip.version == network.version and ip in network
+        for network in map(ipaddress.ip_network, networks)
+    )
 
 
 async def system_resolver(host: str, port: int) -> list[str]:
@@ -441,13 +475,17 @@ class Proxy:
             await self._refuse(writer, request, reason)
             return
         addresses = await self._resolve(request)
-        public = [address for address in addresses if self._address_check(address) is None]
-        if not public:
-            await self._refuse(writer, request, _REFUSED_ADDRESS)
+        networks = self._policy.private_networks
+        if any(
+            self._address_check(address) is not None
+            and not private_address_allowed(address, networks)
+            for address in addresses
+        ):
+            await self._refuse(writer, request, PRIVATE_ADDRESS)
             return
         if self._mode is Mode.RECORD and request.host not in self._quiet:
             self._note_seen(request.host)
-        upstream_reader, upstream_writer = await self._connect(public, request.port)
+        upstream_reader, upstream_writer = await self._connect(addresses, request.port)
         try:
             if request.method == "CONNECT":
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")

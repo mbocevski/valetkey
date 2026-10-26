@@ -145,16 +145,35 @@ class Eligibility:
     seen_during_login: bool = False
 
 
-def eligibility(policy: sites.Policy, host: str, refused: Collection[str]) -> Eligibility:
+def private_message(site: str, host: str) -> str:
+    """Say that ``host`` is allowed but resolves to a private address, and who can change that."""
+    return (
+        f"{host} is allowed for {site}, but its address is private and not in a range the person "
+        f"listed. Only the person can change that, with `valetkey allow {site} --private-network "
+        "RANGE`, where RANGE is the narrowest range that holds the address (one address such as "
+        "10.20.0.7/32, or a /24). It cannot be asked about from here."
+    )
+
+
+def eligibility(
+    policy: sites.Policy,
+    host: str,
+    refused: Collection[str],
+    address_refused: Collection[str] = (),
+) -> Eligibility:
     """Decide whether ``host`` may be asked about for ``policy``'s site.
 
     ``refused`` are the hosts the site's proxy refused because the policy did not allow them. A
     host qualifies when it is one of them, or when it is itself an entry of ``excluded`` (seen
     during the login and left out). Anything else is ``not_eligible``, and nobody is asked. A
-    host the policy already allows is ``already_allowed``.
+    host the policy already allows is ``already_allowed``, unless it was refused because of the
+    address it resolves to (``address_refused``): that is not the agent's to ask about, only the
+    person can list a private range, so it is ``not_eligible`` and the message says how.
     """
     seen = host in policy.excluded
     if sites.allows(policy, host):
+        if host in address_refused:
+            return Eligibility("not_eligible", private_message(policy.site, host))
         return Eligibility("already_allowed", f"{host} is already allowed.", seen)
     if host in refused or seen:
         return Eligibility("eligible", "", seen)

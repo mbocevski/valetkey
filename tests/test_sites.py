@@ -702,3 +702,95 @@ def test_allow_host_adds_it_and_drops_every_exclusion_that_covers_it() -> None:
 def test_allow_host_for_an_allowed_host_changes_nothing() -> None:
     policy = sites.Policy("s", "https://s.test/", ("s.test",), (), datetime(2026, 1, 1, tzinfo=UTC))
     assert sites.allow_host(policy, "s.test") == (policy, False, [])
+
+
+# -- private networks ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "canonical"),
+    [
+        ("10.20.0.0/16", "10.20.0.0/16"),
+        ("10.0.0.0/8", "10.0.0.0/8"),
+        ("172.16.0.0/12", "172.16.0.0/12"),
+        ("192.168.1.7/32", "192.168.1.7/32"),
+        ("100.64.0.0/10", "100.64.0.0/10"),
+        ("FD12:3456:789A::/48", "fd12:3456:789a::/48"),
+        ("fd12:3456:789a:1::/64", "fd12:3456:789a:1::/64"),
+    ],
+)
+def test_private_network_accepts_and_canonicalises(text: str, canonical: str) -> None:
+    assert sites.private_network(text) == canonical
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "10.20.0.0", "10.20.0.1/24", "10.0.0.0/7", "0.0.0.0/0", "8.8.8.0/24", "127.0.0.0/8",
+        "127.0.0.1/32", "169.254.169.254/32", "169.254.0.0/16", "224.0.0.0/8", "172.15.0.0/16",
+        "172.32.0.0/16", "192.169.0.0/16", "100.128.0.0/16", "::1/128", "fe80::/64", "fc00::/7",
+        "fd00::/8", "fd00::/47", "2001:db8::/48", "::ffff:10.0.0.0/104", "", "/8", "10.0.0.0/",
+        "a/b", "10.0.0.0/33", 5, None, ["10.0.0.0/8"],
+    ],
+)  # fmt: skip
+def test_private_network_refuses_the_rest(text: Any) -> None:  # noqa: ANN401
+    with pytest.raises(ValueError, match=r"."):
+        sites.private_network(text)
+
+
+def test_policy_with_private_networks_round_trips(tmp_path: Path) -> None:
+    roots = sites.Roots(tmp_path / "c", tmp_path / "s", tmp_path / "r")
+    policy = sites.Policy(
+        "intra", "https://wiki.corp.test/", ("corp.test",), (), None, ("corp.test/login",),
+        ("10.20.0.0/16", "fd12:3456:789a::/48"),
+    )  # fmt: skip
+    sites.save_policy(roots, policy)
+    assert sites.load_policy(roots, "intra") == policy
+    assert '"private_networks": [\n    "10.20.0.0/16"' in sites.policy_json(policy)
+
+
+def test_a_policy_without_the_field_is_still_valid_and_writes_none(tmp_path: Path) -> None:
+    roots = sites.Roots(tmp_path / "c", tmp_path / "s", tmp_path / "r")
+    plain = sites.Policy("intra", "https://wiki.corp.test/", ("corp.test",))
+    sites.save_policy(roots, plain)
+    assert "private_networks" not in sites.policy_path(roots, "intra").read_text(encoding="utf-8")
+    assert sites.load_policy(roots, "intra").private_networks == ()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [["10.20.0.1/16"], ["8.8.8.0/24"], ["10.20.0.0"], [5], "10.20.0.0/16", ["FD12:3456:789A::/48"]],
+)
+def test_a_policy_file_with_a_bad_range_is_rejected(tmp_path: Path, value: Any) -> None:  # noqa: ANN401
+    roots = sites.Roots(tmp_path / "c", tmp_path / "s", tmp_path / "r")
+    sites.save_policy(roots, sites.Policy("intra", "https://wiki.corp.test/", ("corp.test",)))
+    path = sites.policy_path(roots, "intra")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["private_networks"] = value
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(sites.PolicyError):
+        sites.load_policy(roots, "intra")
+
+
+def test_a_policy_object_with_a_bad_range_is_rejected() -> None:
+    with pytest.raises(ValueError, match="private range"):
+        sites.Policy("s", "https://s.test/", ("s.test",), private_networks=("8.8.8.0/24",))
+
+
+def test_add_and_remove_a_private_network() -> None:
+    policy = sites.Policy("s", "https://s.test/", ("s.test",))
+    added, done = sites.add_private_network(policy, "10.20.0.0/24")
+    assert (done, added.private_networks) == (True, ("10.20.0.0/24",))
+    again, done = sites.add_private_network(added, "10.20.0.0/24")
+    assert (done, again) == (False, added)
+    both, _ = sites.add_private_network(added, "192.168.0.0/24")
+    assert both.private_networks == ("10.20.0.0/24", "192.168.0.0/24")
+    removed, done = sites.remove_private_network(both, "10.20.0.0/24")
+    assert (done, removed.private_networks) == (True, ("192.168.0.0/24",))
+    same, done = sites.remove_private_network(removed, "10.20.0.0/24")
+    assert (done, same) == (False, removed)
+    assert both.allow == policy.allow
+    with pytest.raises(ValueError, match=r"."):
+        sites.add_private_network(policy, "8.8.8.0/24")
+    with pytest.raises(ValueError, match=r"."):
+        sites.remove_private_network(policy, "nonsense")

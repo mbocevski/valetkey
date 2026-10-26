@@ -1758,3 +1758,14 @@ def test_allow_text_always_carries_the_manual_command_when_nobody_could_ask() ->
     )
     assert kept.count("valetkey allow sitex a.assets.test") == 1
     assert mcp_server.allow_text("not_eligible", "h", "No.", "s") == "Result: not_eligible. No."
+
+
+def test_a_refusal_for_a_private_address_says_only_the_person_can_permit_it() -> None:
+    private = [{"host": "wiki.corp.test", "port": 443, "reason": "resolves to a private address"}]
+    text = mcp_server.refused_line(private)
+    assert "wiki.corp.test:443 (resolves to a private address)" in text
+    assert "valetkey allow SITE --private-network RANGE" in text
+    assert "narrowest range" in text
+    assert "browser_allow cannot do this" in text
+    plain = mcp_server.refused_line([{"host": "a.test", "port": 443, "reason": "r"}])
+    assert "--private-network" not in plain

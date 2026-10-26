@@ -73,9 +73,10 @@ Usage: valetkey sites [OPTIONS]
 List the sites valetkey knows.
 
 Each line shows the site name, the host it starts at, how many hosts are allowed
-and excluded, when the hosts were last learned, and whether a login profile
-exists. With --json, each site is an object with the keys site, host, allowed,
-excluded, learned (a UTC time, or null) and profile (true or false).
+and excluded, when the hosts were last learned, the private address ranges it
+may reach (a dash for none), and whether a login profile exists. With --json,
+each site is an object with the keys site, host, allowed, excluded, learned (a
+UTC time, or null), private_networks (a list) and profile (true or false).
 
 Parameters:
   --json: Print a JSON array instead of a table. [default: False]
@@ -84,33 +85,42 @@ Parameters:
 
 <!-- begin: valetkey allow --help -->
 ```text
-Usage: valetkey allow SITE HOST
+Usage: valetkey allow [OPTIONS] SITE [ARGS]
 
 Allow a host, and its subdomains, for a site.
 
 Any excluded entry that would block the host is removed. Allowing a host that is
-already listed changes nothing.
+already listed changes nothing. With --private-network and a range such as
+10.20.0.0/24 instead of a host, the site's allowed hosts may also resolve to
+addresses in that range, which they otherwise may not because it is private. Use
+the narrowest range that holds the address. Only private ranges are accepted,
+none wider than /8 (IPv6: /48).
 
 Parameters:
   SITE, --site: The site name, as shown by valetkey sites. [required]
-  HOST, --host: A host name, or a URL on it. [required]
+  HOST, --host: A host name, or a URL on it.
+  --private-network STR: A private address range such as 10.20.0.0/24, instead
+of a host.
 ```
 <!-- end: valetkey allow --help -->
 
 <!-- begin: valetkey deny --help -->
 ```text
-Usage: valetkey deny SITE HOST
+Usage: valetkey deny [OPTIONS] SITE [ARGS]
 
 Stop allowing a host for a site.
 
 The host's own entry is removed from the allowed hosts. If a wider allowed entry
 still covers the host (app.example.com under example.com), the host is also
 added to the excluded hosts, so it stays blocked. Otherwise nothing more is
-needed.
+needed. With --private-network and a range instead of a host, the range is no
+longer listed.
 
 Parameters:
   SITE, --site: The site name, as shown by valetkey sites. [required]
-  HOST, --host: A host name, or a URL on it. [required]
+  HOST, --host: A host name, or a URL on it.
+  --private-network STR: A private address range such as 10.20.0.0/24, instead
+of a host.
 ```
 <!-- end: valetkey deny --help -->
 

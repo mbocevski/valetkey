@@ -3282,3 +3282,184 @@ def test_a_real_daemon_will_not_have_a_never_refused_host_asked_about(roots: sit
     assert text.startswith("Result: not_eligible.")
     assert reply.asked == 0
     assert "never.test" not in policy_text(roots)
+
+
+# -- private networks ----------------------------------------------------------------------
+
+
+def intranet_options(address: str) -> dict[str, Any]:
+    """Proxy options that resolve every name to ``address`` and keep the real address check."""
+
+    async def resolve(_host: str, _port: int) -> list[str]:
+        return [address]
+
+    async def connect(_address: str, _port: int) -> Any:  # noqa: ANN401
+        return await asyncio.open_connection("127.0.0.1", 9)
+
+    return {"resolver": resolve, "connector": connect}
+
+
+def test_a_host_refused_for_its_address_is_not_one_the_agent_can_ask_about(
+    roots: sites.Roots, tmp_path: Path
+) -> None:
+    add_site(roots)
+    marker = tmp_path / "ran"
+    write_approver(roots, f"touch {marker}\nexit 0")
+    before = policy_text(roots)
+
+    async def scenario() -> None:
+        options = intranet_options("10.20.1.5")
+        async with serving(roots, proxy_options=options) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            await asyncio.to_thread(
+                refuse_via_proxy, session_socket(roots, "sitex"), "app.sitex.test"
+            )
+            status = await c.call("status", site="sitex")
+            assert [r["reason"] for r in status["refused"]] == ["resolves to a private address"]
+            checked = await c.call("allow_check", site="sitex", host="app.sitex.test")
+            assert checked["status"] == "not_eligible"
+            assert "valetkey allow sitex --private-network RANGE" in checked["message"]
+            for op in ("allow_ask", "allow_apply"):
+                answer = await c.call(
+                    op, site="sitex", host="app.sitex.test", channel="elicitation"
+                )
+                assert answer["result"] == "not_eligible"
+            assert not marker.exists()
+
+    run(scenario())
+    assert policy_text(roots) == before
+
+
+def test_listing_the_range_lets_the_running_session_reach_the_host(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            writer.write(await reader.read(1))
+            writer.close()
+
+        upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+        port = upstream.sockets[0].getsockname()[1]
+        reached: list[str] = []
+
+        async def resolve(_host: str, _port: int) -> list[str]:
+            return ["10.20.1.5"]
+
+        async def connect(address: str, _port: int) -> Any:  # noqa: ANN401
+            reached.append(address)
+            return await asyncio.open_connection("127.0.0.1", port)
+
+        options = {"resolver": resolve, "connector": connect}
+        async with serving(roots, proxy_options=options) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            proxy = session_socket(roots, "sitex")
+            await asyncio.to_thread(refuse_via_proxy, proxy, "app.sitex.test")
+            assert (await c.call("allow_check", site="sitex", host="app.sitex.test"))["status"] == (
+                "not_eligible"
+            )
+            policy, _ = sites.add_private_network(sites.load_policy(roots, "sitex"), "10.20.1.0/24")
+            sites.save_policy(roots, policy)
+            await c.call("reload_policy", site="sitex")
+            reader, writer = await asyncio.open_unix_connection(proxy)
+            writer.write(b"CONNECT app.sitex.test:443 HTTP/1.1\r\nHost: app.sitex.test:443\r\n\r\n")
+            assert (await reader.readline()).startswith(b"HTTP/1.1 200")
+            writer.close()
+            await writer.wait_closed()
+            assert set(reached) == {"10.20.1.5"}
+            # Nothing about the ranges is something the daemon lets an agent change.
+            assert (await c.call("allow_check", site="sitex", host="app.sitex.test"))["status"] == (
+                "already_allowed"
+            )
+        upstream.close()
+        await upstream.wait_closed()
+
+    run(scenario())
+
+
+def test_browser_allow_says_not_eligible_for_a_host_refused_for_its_address(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    reply = Reply("accept")
+
+    async def scenario() -> str:
+        options = intranet_options("10.20.1.5")
+        async with serving(roots, proxy_options=options) as rig:
+            bridge = mcp_server.Bridge(rig.path)
+            try:
+                async with McpClient(
+                    mcp_server.build_server(bridge), elicitation_callback=reply, mode="legacy"
+                ) as mcp:
+                    await mcp.call_tool("browser_open", {"site": "sitex"})
+                    await asyncio.to_thread(
+                        refuse_via_proxy, session_socket(roots, "sitex"), "app.sitex.test"
+                    )
+                    result = await mcp.call_tool(
+                        "browser_allow",
+                        {"site": "sitex", "host": "app.sitex.test", "reason": "please"},
+                    )
+                    return "\n".join(p.text for p in result.content if p.type == "text")
+            finally:
+                await bridge.close()
+
+    text = run(scenario())
+    assert text.startswith("Result: not_eligible.")
+    assert "--private-network RANGE" in text
+    assert reply.asked == 0
+    assert sites.load_policy(roots, "sitex").private_networks == ()
+
+
+@pytest.mark.integration
+@needs_everything
+def test_a_private_address_loads_only_inside_a_listed_range(roots: sites.Roots) -> None:
+    sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
+    addresses = {"site.test": "10.20.1.5", "meta.site.test": "169.254.169.254"}
+
+    async def scenario() -> None:
+        with PageServer(PAGES) as pages:
+            reached: list[str] = []
+
+            async def resolve(host: str, _port: int) -> list[str]:
+                return [addresses[host]]
+
+            async def connect(address: str, _port: int) -> Any:  # noqa: ANN401
+                reached.append(address)
+                return await asyncio.open_connection(*pages.address)
+
+            server = daemon.Daemon(roots, proxy_options={"resolver": resolve, "connector": connect})
+            await server.start()
+            try:
+                async with await client.Client.connect(client.socket_path(roots)) as one:
+                    refused: list[dict[str, Any]] = []
+                    try:
+                        refused += (await one.call("open", site="demo"))["refused"]
+                    except DaemonError as error:
+                        refused += error.details.get("refused", [])
+                    refused += (await one.call("status", site="demo"))["refused"]
+                    assert {"site.test"} <= {entry["host"] for entry in refused}
+                    assert reached == []
+                    # The person lists the range; the live session follows at once.
+                    listed = sites.add_private_network(
+                        sites.load_policy(roots, "demo"), "10.20.1.0/24"
+                    )[0]
+                    sites.save_policy(roots, listed)
+                    await one.call("reload_policy", site="demo")
+                    page = await one.call("navigate", site="demo", url="http://site.test/two")
+                    assert page["page"]["title"]["text"] == "Two"
+                    assert set(reached) == {"10.20.1.5"}
+                    # An allowed name that resolves to the metadata address stays refused.
+                    metadata: list[dict[str, Any]] = []
+                    try:
+                        metadata += (
+                            await one.call("navigate", site="demo", url="http://meta.site.test/")
+                        )["refused"]
+                    except DaemonError as error:
+                        metadata += error.details.get("refused", [])
+                    metadata += (await one.call("status", site="demo"))["refused"]
+                    assert "meta.site.test" in {entry["host"] for entry in metadata}
+                    assert set(reached) == {"10.20.1.5"}
+                    await one.call("close", site="demo")
+            finally:
+                await server.shutdown()
+
+    run(scenario())

@@ -178,9 +178,10 @@ def list_sites(
     """List the sites valetkey knows.
 
     Each line shows the site name, the host it starts at, how many hosts are allowed and
-    excluded, when the hosts were last learned, and whether a login profile exists. With
-    --json, each site is an object with the keys site, host, allowed, excluded, learned (a UTC
-    time, or null) and profile (true or false).
+    excluded, when the hosts were last learned, the private address ranges it may reach (a
+    dash for none), and whether a login profile exists. With --json, each site is an object with
+    the keys site, host, allowed, excluded, learned (a UTC time, or null), ``private_networks`` (a
+    list) and profile (true or false).
     """
     roots = sites.roots_from_env()
     rows: list[dict[str, object]] = []
@@ -197,6 +198,7 @@ def list_sites(
                 "allowed": len(policy.allow),
                 "excluded": len(policy.excluded),
                 "learned": _learned(policy),
+                "private_networks": list(policy.private_networks),
                 "profile": sites.profile_path(roots, name).is_dir(),
             }
         )
@@ -217,11 +219,12 @@ def _print_sites(rows: list[dict[str, object]]) -> None:
             str(row["allowed"]),
             str(row["excluded"]),
             str(row["learned"] or "never"),
+            ", ".join(map(str, row["private_networks"] or ())) or "-",  # ty: ignore[invalid-argument-type]
             "yes" if row["profile"] else "no",
         ]
         for row in rows
     ]
-    _print_table(["SITE", "HOST", "ALLOWED", "EXCLUDED", "LEARNED", "PROFILE"], body)
+    _print_table(["SITE", "HOST", "ALLOWED", "EXCLUDED", "LEARNED", "NETWORKS", "PROFILE"], body)
 
 
 def _print_table(header: list[str], body: list[list[str]]) -> None:
@@ -232,12 +235,57 @@ def _print_table(header: list[str], body: list[list[str]]) -> None:
         )
 
 
+PrivateNetwork = Annotated[
+    str | None,
+    Parameter(
+        name="--private-network",
+        help="A private address range such as 10.20.0.0/24, instead of a host.",
+    ),
+]
+
+
+def _private_network_change(site: str, network: str, *, add: bool) -> int:
+    """List (or remove) a private address range for ``site`` and say what happened."""
+    roots = sites.roots_from_env()
+    try:
+        policy = _load(roots, site)
+        try:
+            changed, done = (sites.add_private_network if add else sites.remove_private_network)(
+                policy, network
+            )
+        except ValueError as error:
+            raise CommandError(str(error)) from error
+    except CommandError as error:
+        return _fail(error)
+    applied = save_and_reload(roots, site, changed if done else None)
+    name = sites.private_network(network)
+    if add:
+        _say(
+            f"{site}: hosts it allows may now resolve inside {name}."
+            if done
+            else f"{site}: {name} was already listed."
+        )
+    else:
+        _say(f"{site}: {name} is no longer listed." if done else f"{site}: {name} was not listed.")
+    _say_applied(site, applied=applied)
+    return 0
+
+
+def _host_or_network(host: str | None, network: str | None) -> None:
+    if (host is None) == (network is None):
+        msg = "give a host, or --private-network and a range, but not both"
+        raise CommandError(msg)
+
+
 @app.command
-def allow(site: str, host: str) -> int:
+def allow(site: str, host: str | None = None, *, network: PrivateNetwork = None) -> int:
     """Allow a host, and its subdomains, for a site.
 
     Any excluded entry that would block the host is removed. Allowing a host that is already
-    listed changes nothing.
+    listed changes nothing. With ``--private-network`` and a range such as ``10.20.0.0/24``
+    instead of a host, the site's allowed hosts may also resolve to addresses in that range,
+    which they otherwise may not because it is private. Use the narrowest range that holds the
+    address. Only private ranges are accepted, none wider than /8 (IPv6: /48).
 
     Parameters
     ----------
@@ -245,12 +293,20 @@ def allow(site: str, host: str) -> int:
         The site name, as shown by ``valetkey sites``.
     host
         A host name, or a URL on it.
+    network
+        A private address range such as ``10.20.0.0/24``, instead of a host.
 
     """
+    try:
+        _host_or_network(host, network)
+    except CommandError as error:
+        return _fail(error)
+    if network is not None:
+        return _private_network_change(site, network, add=True)
     roots = sites.roots_from_env()
     try:
         policy = _load(roots, site)
-        name = _host(host)
+        name = _host(str(host))
         changed, added, removed = sites.allow_host(policy, name)
         if not (added or removed):
             changed = None
@@ -265,12 +321,13 @@ def allow(site: str, host: str) -> int:
 
 
 @app.command
-def deny(site: str, host: str) -> int:
+def deny(site: str, host: str | None = None, *, network: PrivateNetwork = None) -> int:
     """Stop allowing a host for a site.
 
     The host's own entry is removed from the allowed hosts. If a wider allowed entry still
     covers the host (``app.example.com`` under ``example.com``), the host is also added to the
-    excluded hosts, so it stays blocked. Otherwise nothing more is needed.
+    excluded hosts, so it stays blocked. Otherwise nothing more is needed. With
+    ``--private-network`` and a range instead of a host, the range is no longer listed.
 
     Parameters
     ----------
@@ -278,12 +335,20 @@ def deny(site: str, host: str) -> int:
         The site name, as shown by ``valetkey sites``.
     host
         A host name, or a URL on it.
+    network
+        A private address range such as ``10.20.0.0/24``, instead of a host.
 
     """
+    try:
+        _host_or_network(host, network)
+    except CommandError as error:
+        return _fail(error)
+    if network is not None:
+        return _private_network_change(site, network, add=False)
     roots = sites.roots_from_env()
     try:
         policy = _load(roots, site)
-        name = _host(host)
+        name = _host(str(host))
         allowed = tuple(entry for entry in policy.allow if entry != name)
         covered = sites.host_matches(name, allowed)
         excluded = policy.excluded

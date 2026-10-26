@@ -27,10 +27,12 @@ Changes that affect users of valetkey. The format follows
 - The `valetkey status` and `valetkey watch` commands, which show the open browser sessions and login windows, and a desktop notification when a session starts.
 - `valetkey doctor` warns when the installed agent-browser is newer than the version valetkey was tested with, and the README names that version.
 - A `PKGBUILD` in `packaging/arch` that builds an Arch Linux package with the daemon's systemd units.
+- `valetkey allow SITE --private-network RANGE` and `valetkey deny` let a site's allowed hosts resolve to addresses in a private range you list, for that site only; `valetkey sites` shows the ranges.
 
 ### Changed
 
 - `valetkey allow` and `valetkey deny` now apply to a running session at once, and `valetkey forget` closes a running session before it deletes.
+- The proxy refuses a host when any address it resolves to is private or otherwise not public, not only when all are, because a mixed answer is how DNS rebinding looks.
 
 ### Fixed
 

@@ -684,14 +684,14 @@ def test_public_ip_literal_is_connected_without_resolving(sock: Path) -> None:
     run(scenario())
 
 
-def test_connection_falls_back_to_the_next_public_address(sock: Path) -> None:
+def test_connection_falls_back_to_the_next_address(sock: Path) -> None:
     tried: list[str] = []
 
     async def resolve(_host: str, _port: int) -> list[str]:
-        return ["10.0.0.5", "192.0.2.1", "198.51.100.7", "127.0.0.1"]
+        return ["192.0.2.1", "198.51.100.7", "127.0.0.1"]
 
-    def check(address: str) -> str | None:
-        return PRIVATE if address.startswith("10.") else None
+    def check(_address: str) -> str | None:
+        return None
 
     async def scenario() -> None:
         async with Upstream().serving() as upstream:
@@ -1031,3 +1031,169 @@ def test_defaults_are_sensible() -> None:
     assert proxy_module.MAX_HEAD_BYTES == 16 * 1024
     assert proxy_module.MAX_REFUSALS == 1000
     assert Proxy(POLICY).mode is Mode.ENFORCE
+
+
+# -- private networks ----------------------------------------------------------------------
+
+INTRANET = sites.Policy(
+    site="intra",
+    start="https://wiki.corp.test/",
+    allow=("corp.test",),
+    private_networks=("10.20.0.0/16", "100.64.0.0/10", "fd00:ec2::/48", "fd12:3456:789a::/48"),
+)
+
+
+@pytest.mark.parametrize(
+    ("address", "allowed"),
+    [
+        ("10.20.1.5", True),
+        ("10.20.255.255", True),
+        ("::ffff:10.20.1.5", True),
+        ("100.64.0.9", True),
+        ("100.127.255.254", True),
+        ("fd12:3456:789a::7", True),
+        ("10.21.0.1", False),
+        ("10.19.255.255", False),
+        ("::ffff:10.21.0.1", False),
+        ("192.168.1.1", False),
+        ("93.184.216.34", False),
+        ("fd12:3456:789b::7", False),
+        # never, whatever is listed
+        ("127.0.0.1", False),
+        ("::1", False),
+        ("::ffff:127.0.0.1", False),
+        ("169.254.169.254", False),
+        ("::ffff:169.254.169.254", False),
+        ("169.254.0.7", False),
+        ("100.100.100.200", False),
+        ("fd00:ec2::254", False),
+        ("0.0.0.0", False),  # noqa: S104
+        ("224.0.0.1", False),
+        ("240.0.0.1", False),
+        ("not an address", False),
+        ("", False),
+    ],
+)
+def test_a_private_address_is_allowed_only_inside_a_listed_range(
+    address: str, *, allowed: bool
+) -> None:
+    assert proxy_module.private_address_allowed(address, INTRANET.private_networks) is allowed
+
+
+def test_no_listed_range_allows_nothing() -> None:
+    assert not proxy_module.private_address_allowed("10.20.1.5", ())
+
+
+def test_a_listed_range_of_the_other_family_does_not_match() -> None:
+    assert not proxy_module.private_address_allowed("10.20.1.5", ("fd12:3456:789a::/48",))
+    assert not proxy_module.private_address_allowed("fd12:3456:789a::7", ("10.0.0.0/8",))
+
+
+async def through_intranet(
+    sock: Path, policy: sites.Policy, answers: list[str], target: str = "wiki.corp.test:443"
+) -> tuple[int, list[str], list[Refusal]]:
+    """Connect through a proxy that uses the real address check; return what happened."""
+    tried: list[str] = []
+
+    async def resolve(_host: str, _port: int) -> list[str]:
+        return answers
+
+    async with Upstream().serving() as upstream:
+
+        async def connect(address: str, _port: int) -> proxy_module.Streams:
+            tried.append(address)
+            return await asyncio.open_connection("127.0.0.1", upstream.port)
+
+        proxy = Proxy(policy, resolver=resolve, connector=connect)
+        async with proxy.serving(sock):
+            response = await send_and_hangup(sock, connect_request(target))
+        return status_of(response), tried, proxy.refused_since()[0]
+
+
+def test_a_site_reaches_an_address_in_its_listed_range(sock: Path) -> None:
+    status, tried, refused = run(through_intranet(sock, INTRANET, ["10.20.1.5"]))
+    assert (status, tried, refused) == (200, ["10.20.1.5"], [])
+
+
+def test_the_same_address_is_refused_without_the_field(sock: Path) -> None:
+    plain = sites.Policy(site="intra", start="https://wiki.corp.test/", allow=("corp.test",))
+    status, tried, refused = run(through_intranet(sock, plain, ["10.20.1.5"]))
+    assert (status, tried) == (403, [])
+    assert refused == [Refusal(1, "wiki.corp.test", 443, PRIVATE)]
+
+
+def test_an_address_outside_the_range_is_refused(sock: Path) -> None:
+    status, tried, _ = run(through_intranet(sock, INTRANET, ["10.21.0.1"]))
+    assert (status, tried) == (403, [])
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        ["93.184.216.34", "10.99.0.1"],  # a public address with one outside the range
+        ["10.20.1.5", "127.0.0.1"],
+        ["10.20.1.5", "169.254.169.254"],
+        ["10.20.1.5", "100.100.100.200"],
+        ["10.20.1.5", "fd00:ec2::254"],
+        ["127.0.0.1", "10.20.1.5"],
+        ["10.20.1.5", "not an address"],
+    ],
+)
+def test_every_address_of_the_answer_must_pass(sock: Path, answers: list[str]) -> None:
+    status, tried, refused = run(through_intranet(sock, INTRANET, answers))
+    assert (status, tried) == (403, [])
+    assert [r.reason for r in refused] == [PRIVATE]
+
+
+def test_public_and_listed_addresses_may_be_mixed(sock: Path) -> None:
+    answers = ["93.184.216.34", "10.20.1.5", "::ffff:10.20.1.9"]
+    status, tried, _ = run(through_intranet(sock, INTRANET, answers))
+    assert (status, tried) == (200, ["93.184.216.34"])
+
+
+@pytest.mark.parametrize("address", ["169.254.169.254", "100.100.100.200", "fd00:ec2::254"])
+def test_the_metadata_services_stay_refused_inside_a_listed_range(sock: Path, address: str) -> None:
+    status, tried, _ = run(through_intranet(sock, INTRANET, [address]))
+    assert (status, tried) == (403, [])
+
+
+def test_an_ip_literal_is_still_not_an_allowed_host(sock: Path) -> None:
+    status, tried, refused = run(
+        through_intranet(sock, INTRANET, ["10.20.1.5"], target="10.20.1.5:443")
+    )
+    assert (status, tried) == (403, [])
+    assert [r.reason for r in refused] == [NOT_ALLOWED]
+
+
+def test_one_sites_range_does_not_open_another_site(sock: Path) -> None:
+    other = sites.Policy(
+        site="other", start="https://wiki.corp.test/", allow=("corp.test",),
+        private_networks=("10.30.0.0/16",),
+    )  # fmt: skip
+    first = run(through_intranet(sock, INTRANET, ["10.20.1.5"]))
+    second = run(through_intranet(sock, other, ["10.20.1.5"]))
+    assert (first[0], second[0]) == (200, 403)
+
+
+def test_a_new_range_applies_to_the_running_proxy(sock: Path) -> None:
+    plain = sites.Policy(site="intra", start="https://wiki.corp.test/", allow=("corp.test",))
+
+    async def scenario() -> None:
+        async def resolve(_host: str, _port: int) -> list[str]:
+            return ["10.20.1.5"]
+
+        async with Upstream().serving() as upstream:
+
+            async def connect(_address: str, _port: int) -> proxy_module.Streams:
+                return await asyncio.open_connection("127.0.0.1", upstream.port)
+
+            proxy = Proxy(plain, resolver=resolve, connector=connect)
+            async with proxy.serving(sock):
+                first = await send_and_hangup(sock, connect_request("wiki.corp.test:443"))
+                proxy.update_policy(INTRANET)
+                second = await send_and_hangup(sock, connect_request("wiki.corp.test:443"))
+                proxy.update_policy(plain)
+                third = await send_and_hangup(sock, connect_request("wiki.corp.test:443"))
+            assert [status_of(r) for r in (first, second, third)] == [403, 200, 403]
+
+    run(scenario())

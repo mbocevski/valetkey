@@ -122,6 +122,21 @@ def test_an_excluded_host_under_an_allowed_domain_is_still_asked_about() -> None
     assert approvals.eligibility(both, "track.sitex.com", set()).status == "eligible"
 
 
+def test_an_allowed_host_refused_for_its_address_is_not_the_agents_to_ask_about() -> None:
+    found = approvals.eligibility(policy(), "app.sitex.com", set(), {"app.sitex.com"})
+    assert found.status == "not_eligible"
+    assert "valetkey allow sitex --private-network RANGE" in found.message
+    assert "cannot be asked about" in found.message
+    assert approvals.eligibility(policy(), "app.sitex.com", set(), {"other.test"}).status == (
+        "already_allowed"
+    )
+    # A host that is not allowed is judged as before, whatever happened to its address.
+    unlisted = approvals.eligibility(
+        policy(), "cdn.other.net", {"cdn.other.net"}, {"cdn.other.net"}
+    )
+    assert unlisted.status == "eligible"
+
+
 # -- the question ------------------------------------------------------------------------------
 
 

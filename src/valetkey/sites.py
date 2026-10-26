@@ -46,7 +46,25 @@ _HOST_RE = re.compile(
 _LEARNED_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 _LEARNED_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _POLICY_KEYS = ("site", "start", "allow", "excluded", "learned")
-_OPTIONAL_POLICY_KEYS = ("login_pages",)
+_OPTIONAL_POLICY_KEYS = ("login_pages", "private_networks")
+
+# Ranges a site may be given for its private-network addresses: the RFC 1918 blocks, the unique
+# local addresses of RFC 4193, and the shared address space of RFC 6598 (100.64.0.0/10). The last
+# is what mesh VPNs and carrier-grade NAT hand out, so an intranet reached over one lives there;
+# it is never routed on the public internet.
+_PRIVATE_SUPERNETS = tuple(
+    ipaddress.ip_network(text)
+    for text in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7")
+)
+MIN_PRIVATE_PREFIX = {4: 8, 6: 48}
+"""The shortest prefix a listed range may have, by IP version. A /8 is already 16 million
+addresses; an IPv6 site prefix is a /48 (RFC 4193)."""
+NEVER_ALLOWED_ADDRESSES = tuple(
+    ipaddress.ip_address(text) for text in ("169.254.169.254", "fd00:ec2::254", "100.100.100.200")
+)
+"""The cloud metadata services (Amazon on IPv4 and IPv6, Alibaba). Three of them sit inside the
+ranges a site may list, and a page that reaches one can read the machine's credentials, so they
+are refused whatever is listed."""
 
 # Suffixes made of two labels under which people register their own name (``example.co.uk``).
 # This is a small stand-in for the public suffix list: a host under any other suffix is taken to
@@ -382,6 +400,9 @@ class Policy:
     submitted from during the login, other than the start page and the page the login ended
     on. A start URL that ends on one of them means the login has expired. It is optional, and a
     policy written before it existed has none.
+    ``private_networks`` are the address ranges (``10.20.0.0/16``) in which a host the site
+    allows may resolve although they are private, see :func:`private_network`. Only the person
+    sets them. It is optional too.
 
     Construction validates every field and raises ``ValueError`` on a bad one.
     """
@@ -392,6 +413,7 @@ class Policy:
     excluded: tuple[str, ...] = ()
     learned: datetime | None = None
     login_pages: tuple[str, ...] = ()
+    private_networks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate the fields."""
@@ -411,6 +433,10 @@ class Policy:
         for page in self.login_pages:
             if not (isinstance(page, str) and is_page_key(page)):
                 msg = f"not a page like host/path, without query or fragment: {page!r}"
+                raise ValueError(msg)
+        for network in self.private_networks:
+            if not (isinstance(network, str) and private_network(network) == network):
+                msg = f"not a private range written as 10.20.0.0/16: {network!r}"
                 raise ValueError(msg)
 
 
@@ -485,6 +511,65 @@ def allow_host(policy: Policy, host: str) -> tuple[Policy, bool, list[str]]:
     return replace(policy, allow=allow, excluded=kept), added, removed
 
 
+def private_network(text: str) -> str:
+    """Return ``text`` as a range a site may list, in its one canonical spelling.
+
+    The range must be written with a prefix length and no host bits (``10.20.0.0/16``), lie
+    inside the private address space (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7) and be no
+    wider than ``MIN_PRIVATE_PREFIX``. Loopback, link-local and the like are outside that space,
+    so they can never be listed.
+
+    Raises:
+        ValueError: when it is none of that.
+
+    """
+    if not isinstance(text, str) or "/" not in text:
+        msg = f"write the range with a prefix length, such as 10.20.0.0/24: {text!r}"
+        raise ValueError(msg)
+    try:
+        network = ipaddress.ip_network(text, strict=True)
+    except ValueError as exc:
+        msg = f"not a network such as 10.20.0.0/24 (no host bits set): {text!r}"
+        raise ValueError(msg) from exc
+    if not any(
+        network.version == wide.version and network.subnet_of(wide)  # ty: ignore[invalid-argument-type]
+        for wide in _PRIVATE_SUPERNETS
+    ):
+        msg = f"{text} is not in a private range (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7)"
+        raise ValueError(msg)
+    if network.prefixlen < MIN_PRIVATE_PREFIX[network.version]:
+        msg = f"{text} is too wide: use /{MIN_PRIVATE_PREFIX[network.version]} or narrower"
+        raise ValueError(msg)
+    return str(network)
+
+
+def add_private_network(policy: Policy, text: str) -> tuple[Policy, bool]:
+    """Return ``policy`` with the range ``text`` listed, and whether that was a change.
+
+    Raises:
+        ValueError: when ``text`` is not a range a site may list (see :func:`private_network`).
+
+    """
+    network = private_network(text)
+    if network in policy.private_networks:
+        return policy, False
+    return replace(policy, private_networks=(*policy.private_networks, network)), True
+
+
+def remove_private_network(policy: Policy, text: str) -> tuple[Policy, bool]:
+    """Return ``policy`` without the range ``text``, and whether that was a change.
+
+    Raises:
+        ValueError: when ``text`` is not a range written like the listed ones.
+
+    """
+    network = private_network(text)
+    kept = tuple(entry for entry in policy.private_networks if entry != network)
+    if kept == policy.private_networks:
+        return policy, False
+    return replace(policy, private_networks=kept), True
+
+
 def allows(policy: Policy, host: str) -> bool:
     """Tell whether ``policy`` lets the browser connect to ``host``.
 
@@ -498,8 +583,8 @@ def load_policy(roots: Roots, site: str) -> Policy:
     """Read and validate ``site``'s policy file.
 
     The file must be a JSON object with the keys ``site``, ``start``, ``allow``, ``excluded``
-    and ``learned``, and may also have ``login_pages``. Missing keys and unknown keys are both
-    errors, and ``site`` must equal the file name.
+    and ``learned``, and may also have ``login_pages`` and ``private_networks``. Missing keys and
+    unknown keys are both errors, and ``site`` must equal the file name.
 
     Raises:
         FileNotFoundError: when the site has no policy file.
@@ -529,6 +614,9 @@ def load_policy(roots: Roots, site: str) -> Policy:
             excluded=_hosts(data, "excluded"),
             learned=_learned(data["learned"]),
             login_pages=_hosts(data, "login_pages") if "login_pages" in data else (),
+            private_networks=(
+                _hosts(data, "private_networks") if "private_networks" in data else ()
+            ),
         )
     except ValueError as exc:
         msg = f"{path}: {exc}"
@@ -572,6 +660,8 @@ def policy_json(policy: Policy) -> str:
     }
     if policy.login_pages:
         data["login_pages"] = list(policy.login_pages)
+    if policy.private_networks:
+        data["private_networks"] = list(policy.private_networks)
     return json.dumps(data, indent=2) + "\n"
 
 

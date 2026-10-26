@@ -108,7 +108,7 @@ from valetkey import (
     sites,
 )
 from valetkey.client import MAX_LINE_BYTES, DaemonError
-from valetkey.proxy import NOT_ALLOWED, Mode, Proxy
+from valetkey.proxy import NOT_ALLOWED, PRIVATE_ADDRESS, Mode, Proxy
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -440,6 +440,12 @@ def _remember_refusals(state: _Site, proxy: Proxy) -> None:
     for refusal in proxy.refused_since(0)[0]:
         if refusal.reason == NOT_ALLOWED and len(state.refused_hosts) < MAX_REFUSED_HOSTS:
             state.refused_hosts[refusal.host] = None
+        if (
+            refusal.reason == PRIVATE_ADDRESS
+            and refusal.seq > state.address_floor
+            and len(state.address_hosts) < MAX_REFUSED_HOSTS
+        ):
+            state.address_hosts[refusal.host] = None
 
 
 def _download_entry(item: downloads.Download) -> dict[str, Any]:
@@ -478,6 +484,8 @@ class _Site:
     since: datetime | None = None
     host: str | None = None
     refused_hosts: dict[str, None] = field(default_factory=dict)
+    address_hosts: dict[str, None] = field(default_factory=dict)
+    address_floor: int = 0  # refusals up to this number of the live proxy predate a reload
     """Hosts the proxy refused for this site because the policy did not allow them, in any
     session since the daemon started. Only these can be asked about."""
     denied_hosts: set[str] = field(default_factory=set)
@@ -882,7 +890,10 @@ class Daemon:
         policy = await self._load_policy(site)
         state = self._state(site)
         live = state.proxy is not None
+        # The ranges may have changed: only refusals from now on say anything about them.
+        state.address_hosts.clear()
         if state.proxy is not None:
+            state.address_floor = state.proxy.refused_since(0)[1]
             state.proxy.update_policy(policy)
         return {
             "site": site,
@@ -907,7 +918,11 @@ class Daemon:
         state = self._state(site)
         if state.proxy is not None:
             _remember_refusals(state, state.proxy)
-        return policy, name, approvals.eligibility(policy, name, state.refused_hosts)
+        return (
+            policy,
+            name,
+            approvals.eligibility(policy, name, state.refused_hosts, state.address_hosts),
+        )
 
     async def _op_allow_check(
         self, _connection: _Connection, args: dict[str, Any]
@@ -1172,6 +1187,7 @@ class Daemon:
                 await asyncio.to_thread(downloads.sweep, paths.incoming_dir, paths.downloads_dir)
             if proxy is not None:
                 _remember_refusals(state, proxy)
+                state.address_floor = 0  # the next proxy numbers its refusals from 1
                 await proxy.close()
             if session is not None or proxy is not None:
                 directory = sessions.session_paths(self.roots, state.name).directory

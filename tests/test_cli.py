@@ -115,13 +115,13 @@ def test_sites_lists_one_and_several(
     status, out, _ = run(capsys, "sites")
     assert status == 0
     assert out.splitlines() == [
-        "SITE   HOST           ALLOWED  EXCLUDED  LEARNED               PROFILE",
-        "sitex  app.sitex.com  2        1         2026-10-26T09:00:00Z  yes",
+        "SITE   HOST           ALLOWED  EXCLUDED  LEARNED               NETWORKS  PROFILE",
+        "sitex  app.sitex.com  2        1         2026-10-26T09:00:00Z  -         yes",
     ]
     make_site(roots, "another")
     status, out, _ = run(capsys, "sites")
     assert [line.split()[0] for line in out.splitlines()] == ["SITE", "another", "sitex"]
-    assert out.splitlines()[1].split()[-2:] == ["never", "no"]
+    assert out.splitlines()[1].split()[-3:] == ["never", "-", "no"]
 
 
 def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]) -> None:
@@ -136,6 +136,7 @@ def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]
             "allowed": 1,
             "excluded": 0,
             "learned": None,
+            "private_networks": [],
             "profile": True,
         },
         {
@@ -144,6 +145,7 @@ def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]
             "allowed": 1,
             "excluded": 0,
             "learned": "2026-10-26T09:00:00Z",
+            "private_networks": [],
             "profile": False,
         },
     ]
@@ -543,8 +545,9 @@ def test_forget_survives_a_file_that_vanishes(
 def test_command_help_names_the_options(capsys: pytest.CaptureFixture[str]) -> None:
     assert "--json" in run(capsys, "sites", "--help")[1]
     assert "--yes" in run(capsys, "forget", "--help")[1]
+    assert "--private-network" in run(capsys, "allow", "--help")[1]
     with pytest.raises(SystemExit) as exit_info:
-        main(["allow", "onlyone"])
+        main(["allow"])
     assert exit_info.value.code == 2
 
 
@@ -1350,3 +1353,82 @@ def test_allow_and_deny_keep_the_login_pages(
     assert sites.load_policy(roots, "sitex").login_pages == ("sitex.com/login",)
     run(capsys, "deny", "sitex", "login.okta.com")
     assert sites.load_policy(roots, "sitex").login_pages == ("sitex.com/login",)
+
+
+# -- private networks ----------------------------------------------------------------------
+
+
+def test_sites_shows_the_listed_ranges(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    run(capsys, "allow", "sitex", "--private-network", "10.20.0.0/24")
+    run(capsys, "allow", "sitex", "--private-network", "fd00:1:2::/48")
+    _, out, _ = run(capsys, "sites")
+    assert (
+        out.splitlines()[1].split()[-2:-1] == ["10.20.0.0/24,"]
+        or "10.20.0.0/24, fd00:1:2::/48" in out
+    )
+    _, out, _ = run(capsys, "sites", "--json")
+    assert json.loads(out)[0]["private_networks"] == ["10.20.0.0/24", "fd00:1:2::/48"]
+
+
+def test_allow_and_deny_a_private_network(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    status, out, _ = run(capsys, "allow", "sitex", "--private-network", "10.20.0.0/24")
+    assert (status, out) == (0, "sitex: hosts it allows may now resolve inside 10.20.0.0/24.\n")
+    assert sites.load_policy(roots, "sitex").private_networks == ("10.20.0.0/24",)
+    before = sites.policy_path(roots, "sitex").stat().st_mtime_ns
+    _, out, _ = run(capsys, "allow", "sitex", "--private-network", "10.20.0.0/24")
+    assert out == "sitex: 10.20.0.0/24 was already listed.\n"
+    assert sites.policy_path(roots, "sitex").stat().st_mtime_ns == before
+    _, out, _ = run(capsys, "deny", "sitex", "--private-network", "10.20.0.0/24")
+    assert out == "sitex: 10.20.0.0/24 is no longer listed.\n"
+    assert sites.load_policy(roots, "sitex").private_networks == ()
+    _, out, _ = run(capsys, "deny", "sitex", "--private-network", "10.20.0.0/24")
+    assert out == "sitex: 10.20.0.0/24 was not listed.\n"
+
+
+@pytest.mark.parametrize(
+    "network",
+    ["10.20.0.0", "10.20.0.1/24", "8.8.8.0/24", "127.0.0.0/8", "169.254.0.0/16", "10.0.0.0/7",
+     "0.0.0.0/0", "::1/128", "fe80::/64", "fc00::/7", "::ffff:10.0.0.0/104", "nonsense/8"],
+)  # fmt: skip
+def test_a_range_that_is_not_private_or_too_wide_is_refused(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str], network: str
+) -> None:
+    make_site(roots)
+    before = sites.policy_path(roots, "sitex").read_text(encoding="utf-8")
+    status, _, err = run(capsys, "allow", "sitex", "--private-network", network)
+    assert status == 1
+    assert err.startswith("valetkey: ")
+    assert sites.policy_path(roots, "sitex").read_text(encoding="utf-8") == before
+
+
+def test_a_host_and_a_range_cannot_be_given_together_or_both_left_out(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    for command in ("allow", "deny"):
+        for extra in (["a.test", "--private-network", "10.0.0.0/24"], []):
+            status, _, err = run(capsys, command, "sitex", *extra)
+            assert (status, "not both" in err) == (1, True)
+
+
+@pytest.mark.usefixtures("roots")
+def test_a_range_change_for_an_unknown_site_fails(capsys: pytest.CaptureFixture[str]) -> None:
+    status, _, err = run(capsys, "allow", "nosuch", "--private-network", "10.0.0.0/24")
+    assert status == 1
+    assert "nosuch" in err
+
+
+def test_allow_a_host_keeps_the_listed_ranges(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    run(capsys, "allow", "sitex", "--private-network", "10.20.0.0/24")
+    run(capsys, "allow", "sitex", "login.okta.com")
+    run(capsys, "deny", "sitex", "login.okta.com")
+    assert sites.load_policy(roots, "sitex").private_networks == ("10.20.0.0/24",)
