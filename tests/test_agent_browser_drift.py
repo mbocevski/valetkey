@@ -13,6 +13,7 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,35 @@ PAGE = (
     "<button onclick=\"document.title='clicked'\">Go</button><input type='password'>"
 )
 SITE = "probe"
+
+
+def belonging_to(directory: Path) -> list[tuple[int, str]]:
+    """The processes that have ``directory`` in their arguments or their environment.
+
+    agent-browser's own daemon is started with no arguments at all and finds its directory in the
+    environment, so the arguments alone would miss exactly the process that is easiest to leak.
+    Only this directory is looked for, so nothing else on the machine is ever named.
+    """
+    found = []
+    needle = str(directory).encode()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            arguments = (entry / "cmdline").read_bytes()
+            environment = (entry / "environ").read_bytes()
+        except OSError:
+            continue  # it ended, or it is not ours to read
+        if needle in arguments or needle in environment:
+            found.append((int(entry.name), arguments.replace(b"\0", b" ").decode(errors="replace")))
+    return found
+
+
+def kill_all_of(directory: Path) -> None:
+    """Kill, by process id, every process that belongs to ``directory``."""
+    for pid, _ in belonging_to(directory):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGKILL)
 
 
 class Driver:
@@ -120,20 +150,31 @@ class Driver:
         return next(arguments for found, arguments in self._processes() if found == pid)
 
     def stop(self) -> None:
-        """Close the session, then stop whatever is left that belongs to this directory."""
+        """Close the session, then kill whatever still belongs to this directory, by process id."""
         with contextlib.suppress(Exception, pytest.fail.Exception):
             self.run("close")
-        for pid, arguments in self._processes():
-            if any(str(self.base) in argument for argument in arguments):
-                with contextlib.suppress(Exception, pytest.fail.Exception):
-                    os.kill(pid, signal.SIGKILL)
+        kill_all_of(self.base)
+
+
+@pytest.fixture(scope="module")
+def module_dir() -> Iterator[Path]:
+    """One short directory for the whole module, checked for leftovers when the module ends."""
+    directory = Path(tempfile.mkdtemp(prefix="vk-drift-"))
+    try:
+        yield directory
+        leftovers = belonging_to(directory)
+        assert not leftovers, f"the drift probe left processes running: {leftovers}"
+    finally:
+        kill_all_of(directory)
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 @pytest.fixture
-def driver(short_dir: Path) -> Iterator[Driver]:
+def driver(module_dir: Path) -> Iterator[Driver]:
+    base = Path(tempfile.mkdtemp(prefix="t", dir=module_dir))
     with PageServer({"/": PAGE}) as pages:
         host, port = pages.address
-        tool = Driver(short_dir, f"http://{host}:{port}/")
+        tool = Driver(base, f"http://{host}:{port}/")
         try:
             assert tool.launch()["success"] is True
             yield tool
@@ -264,3 +305,25 @@ def test_option_words_in_arguments_are_still_read_as_options(
         + (" after `--`" if separator else "")
         + "; the guard in sessions.call_command may be relaxed, at least for text"
     )
+
+
+def test_the_finalizer_stops_what_close_leaves_behind(
+    module_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A test that fails partway, or a ``close`` that fails, must not leak a browser or a daemon."""
+    base = Path(tempfile.mkdtemp(prefix="t", dir=module_dir))
+    with PageServer({"/": PAGE}) as pages:
+        host, port = pages.address
+        tool = Driver(base, f"http://{host}:{port}/")
+        try:
+            assert tool.launch()["success"] is True
+            assert belonging_to(base), "no process was found for the running session"
+
+            def broken_close(*_verb: str, **_options: object) -> dict[str, Any]:
+                message = "close failed"
+                raise OSError(message)
+
+            monkeypatch.setattr(tool, "run", broken_close)
+        finally:
+            tool.stop()
+    assert belonging_to(base) == []
