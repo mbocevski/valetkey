@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
 
 type Finish = Callable[[list[SeenHost], Path], Awaitable[None]]
+PDF_BYTES = b"%PDF-1.7\n1 0 obj"
 NOW = datetime(2026, 10, 27, 12, 0, 0, tzinfo=UTC)
 
 
@@ -202,6 +203,10 @@ class FakeSession:
         self.close_error: Exception | None = None
         self.texts: list[str] = []
         self.on_click: Callable[[], None] | None = None
+        self.on_open: Callable[[], None] | None = None
+        self.abort_with: Path | None = None
+        self.attached = 0
+        self.attach_error: Exception | None = None
         self.active = 0
         self.most_active = 0
         self._lock = threading.Lock()
@@ -221,7 +226,13 @@ class FakeSession:
 
     def open(self, url: str) -> sessions.Page:
         self._use("open", url)
+        if self.abort_with is not None:  # the URL turned out to be an attachment
+            self.abort_with.write_bytes(b"attached")
+            msg = "Navigation failed: net::ERR_ABORTED"
+            raise sessions.AgentBrowserError(msg)
         self.url = url
+        if self.on_open is not None:
+            self.on_open()
         return sessions.Page(url, f"Title of {url}")
 
     def snapshot(self) -> sessions.Snapshot:
@@ -241,6 +252,14 @@ class FakeSession:
 
     def press_enter(self) -> None:
         self._use("press_enter")
+
+    def clear_requests(self) -> None:
+        self.calls.append(("clear_requests",))
+
+    def attachments(self) -> int:
+        if self.attach_error is not None:
+            raise self.attach_error
+        return self.attached
 
     def fill(self, ref: str, text: str) -> None:
         self._use("fill", ref, text)
@@ -368,6 +387,7 @@ async def serving(roots: sites.Roots, **options: Any) -> AsyncGenerator[Rig]:  #
         "session_factory": factory,
         "login_starter": logins,
         "now": lambda: NOW,
+        "download_settle": 0,
     } | options
     server = daemon.Daemon(roots, **settings)
     await server.start()
@@ -444,7 +464,7 @@ def test_a_session_from_open_to_close(roots: sites.Roots) -> None:
             assert status["state"] == "session"
             assert status["url"] == "https://sitex.test/two"
             assert "_value" not in status
-            assert [call[0] for call in session.calls] == [
+            assert [call[0] for call in session.calls if call[0] != "clear_requests"] == [
                 "snapshot", "open", "snapshot", "click", "fill", "screenshot", "screenshot",
             ]  # fmt: skip
             assert ("fill", "e2", "hello") in session.calls
@@ -1620,6 +1640,293 @@ def test_type_can_press_enter(roots: sites.Roots) -> None:
             assert [call[0] for call in session.calls] == ["fill", "fill", "press_enter"]
             with pytest.raises(DaemonError) as info:
                 await c.call("type", site="sitex", ref="e1", text="c", submit="yes")
+            assert info.value.code == "bad_request"
+
+    run(scenario())
+
+
+def put(path: Path, data: bytes) -> None:
+    path.write_bytes(data)
+
+
+def downloads_dir(roots: sites.Roots, site: str = "sitex") -> Path:
+    path = sites.downloads_path(roots, site)
+    daemon.make_private_dirs(path)
+    sessions.session_paths(roots, site).incoming_dir.mkdir(exist_ok=True)
+    return path
+
+
+def incoming_dir(roots: sites.Roots, site: str = "sitex") -> Path:
+    return sessions.session_paths(roots, site).incoming_dir
+
+
+def test_a_click_reports_the_files_it_downloaded(roots: sites.Roots) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+    (folder / "old.txt").write_text("old", encoding="utf-8")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            await c.call("snapshot", site="sitex")
+            session.on_click = lambda: put(incoming_dir(roots) / "invoice.pdf", b"%PDF-1.7 body")
+            first = await c.call("click", site="sitex", ref="e1")
+            assert first["downloads"] == {
+                "new": [
+                    {
+                        "path": {"untrusted": True, "text": str(folder / "invoice.pdf")},
+                        "size": 13,
+                        "mime": "application/pdf",
+                    }
+                ],
+                "in_progress": [],
+                "unsaved": 0,
+            }
+            assert (folder / "invoice.pdf").read_bytes() == b"%PDF-1.7 body"
+            # Told once.
+            session.on_click = None
+            second = await c.call("click", site="sitex", ref="e1")
+            assert second["downloads"] == {"new": [], "in_progress": [], "unsaved": 0}
+
+    run(scenario())
+
+
+def test_a_navigation_reports_downloads_and_late_files_show_up_on_the_next_call(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.on_open = lambda: put(folder / "export.csv", b"a,b\n")
+            nav = await c.call("navigate", site="sitex", url="https://sitex.test/export")
+            assert [e["mime"] for e in nav["downloads"]["new"]] == ["text/plain"]
+            session.on_open = None
+            # A download that finished between calls is reported by the next one.
+            (folder / "slow.bin").write_bytes(b"\x00\x01 binary")
+            later = await c.call("navigate", site="sitex", url="https://sitex.test/other")
+            assert [e["mime"] for e in later["downloads"]["new"]] == ["application/octet-stream"]
+
+    run(scenario())
+
+
+def test_a_navigation_that_became_a_download_is_reported_as_one(roots: sites.Roots) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.abort_with = folder / "report.bin"
+            result = await c.call("navigate", site="sitex", url="https://sitex.test/export")
+            assert result["download_only"] is True
+            assert result["page"] == {"title": {"untrusted": True, "text": ""}}
+            assert [e["path"]["text"] for e in result["downloads"]["new"]] == [
+                str(folder / "report.bin")
+            ]
+            assert result["site"] == "sitex"
+            assert result["refused"] == []
+
+    run(scenario())
+
+
+def test_an_aborted_navigation_without_a_download_is_still_an_error(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.fail = sessions.AgentBrowserError("Navigation failed: net::ERR_ABORTED")
+            with pytest.raises(DaemonError) as info:
+                await c.call("navigate", site="sitex", url="https://sitex.test/x")
+            assert "ERR_ABORTED" in info.value.message
+            session.fail = sessions.AgentBrowserError("Navigation failed: net::ERR_TIMED_OUT")
+            with pytest.raises(DaemonError) as info:
+                await c.call("navigate", site="sitex", url="https://sitex.test/x")
+            assert "ERR_TIMED_OUT" in info.value.message
+            await c.call("close", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("navigate", site="sitex", url="https://sitex.test/x")
+            assert info.value.code == "no_session"
+
+    run(scenario())
+
+
+def test_a_download_that_started_but_saved_nothing_is_reported_as_unsaved(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    downloads_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            await c.call("snapshot", site="sitex")
+            session.attached = 1  # a response said "attachment", and no file arrived
+            result = await c.call("click", site="sitex", ref="e1")
+            assert result["downloads"] == {"new": [], "in_progress": [], "unsaved": 1}
+            nav = await c.call("navigate", site="sitex", url="https://sitex.test/x")
+            assert nav["downloads"]["unsaved"] == 1
+            session.attached = 0
+            quiet = await c.call("click", site="sitex", ref="e1")
+            assert quiet["downloads"]["unsaved"] == 0
+
+    run(scenario())
+
+
+def test_counting_attachments_never_fails_the_call(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            state = rig.daemon._sites["sitex"]  # noqa: SLF001
+            session = rig.factory.made[0]
+            assert await rig.daemon._attachments(state) == 0  # noqa: SLF001
+            session.attached = 3
+            assert await rig.daemon._attachments(state) == 3  # noqa: SLF001
+
+            session.attach_error = sessions.AgentBrowserError("gone")
+            assert await rig.daemon._attachments(state) == 0  # noqa: SLF001
+            await c.call("close", site="sitex")
+            assert await rig.daemon._attachments(state) == 0  # noqa: SLF001
+
+    run(scenario())
+
+
+def test_a_navigation_that_aborted_with_an_unsaved_download_says_so(roots: sites.Roots) -> None:
+    add_site(roots)
+    downloads_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.fail = sessions.AgentBrowserError("Navigation failed: net::ERR_ABORTED")
+            session.attached = 1
+            result = await c.call("navigate", site="sitex", url="https://sitex.test/long-name")
+            assert result["download_only"] is True
+            assert result["downloads"] == {"new": [], "in_progress": [], "unsaved": 1}
+
+    run(scenario())
+
+
+def test_downloads_finished_in_the_incoming_folder_are_filed_and_never_overwrite(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+    incoming = incoming_dir(roots)
+    (folder / "report.txt").write_text("the first one", encoding="utf-8")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            await c.call("snapshot", site="sitex")
+            session.on_click = lambda: put(incoming / "report.txt", b"the second one")
+            result = await c.call("click", site="sitex", ref="e1")
+            assert [Path(e["path"]["text"]).name for e in result["downloads"]["new"]] == [
+                "report (2).txt"
+            ]
+            assert (folder / "report.txt").read_text(encoding="utf-8") == "the first one"
+            assert (folder / "report (2).txt").read_bytes() == b"the second one"
+            assert list(incoming.iterdir()) == []
+
+    run(scenario())
+
+
+def test_closing_a_site_keeps_what_finished_after_the_last_call(roots: sites.Roots) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+    incoming = incoming_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            put(incoming / "late.bin", b"\x00\x01 finished after the last call")
+            put(incoming / "half.bin.crdownload", b"partial")
+            await c.call("close", site="sitex")
+            assert (folder / "late.bin").exists()
+            assert not (folder / "half.bin").exists()
+
+    run(scenario())
+
+
+def test_running_downloads_are_reported_as_in_progress(roots: sites.Roots) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots, download_wait=0.1) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            await c.call("snapshot", site="sitex")
+            rig.factory.made[0].on_click = lambda: put(
+                incoming_dir(roots) / "big.bin.crdownload", b"x" * 5
+            )
+            result = await c.call("click", site="sitex", ref="e1")
+            assert result["downloads"]["new"] == []
+            (progress,) = result["downloads"]["in_progress"]
+            assert progress["path"]["text"] == str(folder / "big.bin")
+            assert progress["size"] == 5
+            listing = await c.call("downloads", site="sitex")
+            assert listing["files"] == []
+            assert len(listing["in_progress"]) == 1
+
+    run(scenario())
+
+
+def test_the_downloads_op_lists_the_folder_and_marks_what_is_new_to_this_client(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+    (folder / "before.txt").write_text("before", encoding="utf-8")
+    outside = folder.parent / "secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    (folder / "link.txt").symlink_to(outside)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as one, await rig.connect() as two:
+            first = await one.call("downloads", site="sitex")
+            assert [(f["path"]["text"], f["new"]) for f in first["files"]] == [
+                (str(folder / "before.txt"), False)
+            ]
+            (folder / "after.txt").write_bytes(PDF_BYTES)
+            second = await one.call("downloads", site="sitex")
+            assert [
+                (Path(f["path"]["text"]).name, f["new"], f["mime"]) for f in second["files"]
+            ] == [
+                ("after.txt", True, "application/pdf"),
+                ("before.txt", False, "text/plain"),
+            ]
+            again = await one.call("downloads", site="sitex")
+            assert not any(f["new"] for f in again["files"])
+            # Another client starts from what is there when it first asks.
+            other = await two.call("downloads", site="sitex")
+            assert not any(f["new"] for f in other["files"])
+            assert "secret" not in str(second)
+
+    run(scenario())
+
+
+def test_the_downloads_op_on_a_site_with_no_folder(roots: sites.Roots) -> None:
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            assert await c.call("downloads", site="never") == {
+                "site": "never",
+                "files": [],
+                "in_progress": [],
+            }
+            with pytest.raises(DaemonError) as info:
+                await c.call("downloads", site="../x")
             assert info.value.code == "bad_request"
 
     run(scenario())

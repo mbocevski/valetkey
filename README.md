@@ -185,10 +185,11 @@ never has to start it. Without the socket, `valetkey mcp` starts `valetkey daemo
 daemon keeps running so several clients can share it.
 
 The tools are `browser_sites`, `browser_login`, `browser_open`, `browser_snapshot`,
-`browser_click`, `browser_type`, `browser_navigate`, `browser_screenshot` and `browser_close`.
-`browser_click` finds its element again when it clicks and can check an `expect`ed outcome. There
-is no way to run scripts, change launch options or edit a site's hosts. When a page needs a host
-that is not allowed, the client is told, and you decide with `valetkey allow SITE HOST`.
+`browser_click`, `browser_type`, `browser_navigate`, `browser_downloads`, `browser_screenshot` and
+`browser_close`. `browser_click` finds its element again when it clicks and can check an `expect`ed
+outcome. Downloads never replace an older file. Nothing runs scripts, changes launch options or edits a
+site's hosts. When a page needs a host that is not
+allowed, you decide with `valetkey allow SITE HOST`.
 
 <!-- begin: valetkey mcp --help -->
 ```text

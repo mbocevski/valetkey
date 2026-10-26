@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -149,6 +150,8 @@ def test_every_path_belongs_to_one_site(tmp_path: Path) -> None:
     )
     assert one.profile_dir == sites.profile_path(roots, "one")
     assert one.downloads_dir == sites.downloads_path(roots, "one")
+    assert one.incoming_dir == one.downloads_dir / ".incoming"
+    assert one.screenshots_dir == one.downloads_dir / ".screenshots"
     for field in ("directory", "proxy_socket", "log_file", "config_file", "driver_dir"):
         assert getattr(one, field) != getattr(two, field)
         assert not getattr(one, field).is_relative_to(getattr(two, "directory"))  # noqa: B009  # name is data
@@ -196,6 +199,8 @@ def test_launch_command_carries_every_launch_option_once(tmp_path: Path) -> None
         argv[i]: argv[i + 1] for i, a in enumerate(argv) if a.startswith("--") and i + 1 < len(argv)
     }
     assert option["--profile"] == str(paths.profile_dir)
+    assert option["--download-path"] == str(paths.incoming_dir)
+    assert paths.incoming_dir == paths.downloads_dir / ".incoming"
     assert option["--proxy"] == "http://127.0.0.1:3128"
     assert "Chrome/156.0.0.0" in option["--user-agent"]
     assert option["--executable-path"] == "/usr/bin/chromium"
@@ -333,6 +338,69 @@ def test_no_session_method_lets_a_leading_dash_reach_the_arguments(
     ]
 
 
+def test_attachments_counts_only_successful_attachment_responses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logged = [
+        {"status": 200, "responseHeaders": {"Content-Disposition": 'attachment; filename="a.pdf"'}},
+        {"status": 200, "responseHeaders": {"content-disposition": " Attachment"}},
+        {"status": 200, "responseHeaders": {"Content-Disposition": 'inline; filename="b.pdf"'}},
+        {"status": 404, "responseHeaders": {"Content-Disposition": "attachment"}},
+        {"status": 302, "responseHeaders": {"Content-Disposition": "attachment"}},
+        {"status": 200, "responseHeaders": {"Content-Type": "text/html"}},
+        {"status": None, "responseHeaders": None},
+        {},
+    ]
+    run = FakeRun(answer({"requests": logged}))
+    monkeypatch.setattr(sessions.subprocess, "run", run)
+    session = make_session(tmp_path)
+    assert session.attachments() == 2
+    session.clear_requests()
+    assert [argv[2:] for argv, _ in run.calls] == [
+        ["network", "requests"],
+        ["network", "requests", "--clear"],
+    ]
+    monkeypatch.setattr(sessions.subprocess, "run", FakeRun(answer({})))
+    assert session.attachments() == 0
+
+
+def test_start_leaves_a_fresh_private_incoming_folder(tmp_path: Path) -> None:
+    roots = make_roots(tmp_path)
+    paths = sessions.session_paths(roots, "demo")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    sites.ensure_downloads(roots, "demo")
+    paths.incoming_dir.mkdir()
+    (paths.incoming_dir / "stale.crdownload").write_text("stale", encoding="utf-8")
+    (paths.incoming_dir / "link").symlink_to(outside)
+    (paths.incoming_dir / "linked.txt").symlink_to(outside / "keep.txt")
+    (paths.incoming_dir / "sub").mkdir()
+    (paths.incoming_dir / "sub" / "deep").symlink_to(outside)
+    sessions._prepare(roots, paths)  # noqa: SLF001
+    assert list(paths.incoming_dir.iterdir()) == []
+    assert stat.S_IMODE(paths.incoming_dir.stat().st_mode) == 0o700
+    assert [p.name for p in outside.iterdir()] == ["keep.txt"]  # nothing was followed
+    assert paths.screenshots_dir.is_dir()
+
+
+@pytest.mark.parametrize("kind", ["file", "link", "missing"])
+def test_an_incoming_path_that_is_not_a_directory_is_replaced(tmp_path: Path, kind: str) -> None:
+    roots = make_roots(tmp_path)
+    paths = sessions.session_paths(roots, "demo")
+    sites.ensure_downloads(roots, "demo")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if kind == "file":
+        paths.incoming_dir.write_text("in the way", encoding="utf-8")
+    elif kind == "link":
+        paths.incoming_dir.symlink_to(outside)
+    sessions._prepare(roots, paths)  # noqa: SLF001
+    assert paths.incoming_dir.is_dir()
+    assert not paths.incoming_dir.is_symlink()
+    assert list(outside.iterdir()) == []
+
+
 def test_every_verb_goes_through_call_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -359,7 +427,7 @@ def test_every_verb_goes_through_call_command(
         ["press", "Enter"],
         ["snapshot"],
         ["get", "url"],
-        ["screenshot", str(session.paths.downloads_dir / "x.png")],
+        ["screenshot", str(session.paths.screenshots_dir / "x.png")],
     ]
     for argv, env in run.calls:
         assert set(env) == CALL_ENV
@@ -456,7 +524,7 @@ def test_the_session_has_no_eval_or_passthrough() -> None:
     public = {n for n in dir(sessions.Session) if not n.startswith("_")}
     assert public == {
         "start", "is_alive", "close", "open", "snapshot", "outline", "click", "fill", "press_enter",
-        "current_url", "screenshot",
+        "current_url", "screenshot", "clear_requests", "attachments",
     }  # fmt: skip
 
 
@@ -733,7 +801,7 @@ def test_a_real_session_from_start_to_close(short_dir: Path) -> None:
         assert session.open("http://site.test/two").title == "Two"
         assert session.current_url() == "http://site.test/two"
         shot = session.screenshot("two.png")
-        assert shot.parent == paths.downloads_dir
+        assert shot.parent == paths.screenshots_dir
         assert shot.read_bytes().startswith(b"\x89PNG")
 
         # The browser's daemon lives in another network namespace than this process.

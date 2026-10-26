@@ -199,6 +199,65 @@ def _expectation_sentence(expect: dict[str, Any], outcome: str) -> str:
     }.get(outcome, f"the text {text} is still there")
 
 
+def _download_line(item: dict[str, Any], extra: str) -> str:
+    path = json.dumps(untrusted_text(item["path"]), ensure_ascii=False)
+    return f"{path} ({extra})"
+
+
+def downloads_text(found: dict[str, Any] | None) -> str:
+    """Describe the files a call brought in, or return ``""`` when there are none.
+
+    Paths are host paths. They contain a name the page chose, so they are fenced as untrusted
+    content, one JSON string per line so that a name cannot add lines of its own.
+    """
+    if not found:
+        return ""
+    parts = []
+    if unsaved := found.get("unsaved"):
+        noun = "download" if unsaved == 1 else "downloads"
+        parts.append(
+            f"{unsaved} {noun} started but no file was saved. The browser writes nothing when "
+            "the file name is too long or it cannot write the file; the page is the only place "
+            "to see what it wanted."
+        )
+    if found["new"]:
+        lines = "\n".join(
+            _download_line(item, f"{item['mime']}, {item['size']} bytes") for item in found["new"]
+        )
+        parts += [
+            "New downloads, saved on this machine and not opened:",
+            page_content(lines),
+        ]
+    if found["in_progress"]:
+        lines = "\n".join(
+            _download_line(item, f"{item['size']} bytes so far") for item in found["in_progress"]
+        )
+        parts += [
+            "Still downloading. Call browser_downloads later to see when it is done:",
+            page_content(lines),
+        ]
+    return "\n".join(parts)
+
+
+def listing_text(site: str, result: dict[str, Any]) -> str:
+    """Describe the whole downloads folder of ``site``."""
+    if not result["files"] and not result["in_progress"]:
+        return f"The {site} downloads folder is empty."
+    parts = [f"Files in the {site} downloads folder (saved on this machine, never opened):"]
+    lines = [
+        _download_line(
+            item, f"{item['mime']}, {item['size']} bytes" + (", new" if item["new"] else "")
+        )
+        for item in result["files"]
+    ]
+    lines += [
+        _download_line(item, f"still downloading, {item['size']} bytes so far")
+        for item in result["in_progress"]
+    ]
+    parts.append(page_content("\n".join(lines)))
+    return "\n".join(parts)
+
+
 def click_text(result: dict[str, Any]) -> str:
     """Describe a verified click: what was clicked, and whether the expectation held.
 
@@ -221,14 +280,15 @@ def click_text(result: dict[str, Any]) -> str:
         )
     else:
         verdict = f"Expectation NOT met: {_expectation_sentence(expect, outcome)}.{twice}"
-    return "\n".join(
-        [
-            envelope_text(result),
-            f"Clicked: a {clicked['role']}, named:",
-            page_content(untrusted_text(clicked["name"])),
-            verdict,
-        ]
-    )
+    lines = [
+        envelope_text(result),
+        f"Clicked: a {clicked['role']}, named:",
+        page_content(untrusted_text(clicked["name"])),
+        verdict,
+    ]
+    if downloaded := downloads_text(result.get("downloads")):
+        lines.append(downloaded)
+    return "\n".join(lines)
 
 
 def error_text(error: DaemonError) -> str:
@@ -409,7 +469,7 @@ DESCRIPTIONS = {
         "name matches nothing or several elements, nothing is clicked. Say what should follow "
         "in expect (text_appears, text_gone or url_changes) and the result says whether it "
         "happened. Only a click with an expect is ever repeated, and only if the first changed "
-        "nothing."
+        "nothing. If the click starts a download, the new files are listed."
     ),
     "browser_type": (
         "Replace the contents of a field, by its reference from the latest browser_snapshot. "
@@ -417,7 +477,15 @@ DESCRIPTIONS = {
     ),
     "browser_navigate": (
         "Go to a URL in the site's browser. Only hosts the site allows will load; a refused "
-        "host is for the person to decide, never something to work around."
+        "host is for the person to decide, never something to work around. If the URL starts "
+        "a download, the new files are listed."
+    ),
+    "browser_downloads": (
+        "List the files this site's browser has downloaded, with their size and a type guessed "
+        "from the content, and downloads still running. Clicks and navigation already report "
+        "new files; use this to see whether a slow download has finished. A new file never "
+        "replaces an older one of the same name: it gets a number, as in `report (2).pdf`. "
+        "Files are saved on this machine and are never opened. File names come from the website."
     ),
     "browser_screenshot": "Take a screenshot of the page and return it as an image.",
     "browser_close": (
@@ -509,7 +577,16 @@ class _Tools:
     ) -> str:
         result = await self._ask("navigate", site=site, url=url)
         title = untrusted_text(result["page"]["title"])
-        return "\n".join([envelope_text(result), page_content(title)])
+        lines = [envelope_text(result)]
+        if result.get("download_only"):
+            lines.append("The URL started a download instead of loading a page.")
+        lines.append(page_content(title))
+        if downloaded := downloads_text(result.get("downloads")):
+            lines.append(downloaded)
+        return "\n".join(lines)
+
+    async def browser_downloads(self, site: SITE) -> str:
+        return listing_text(site, await self._ask("downloads", site=site))
 
     async def browser_screenshot(self, site: SITE) -> list[str | Image]:
         result = await self._ask("screenshot", site=site)

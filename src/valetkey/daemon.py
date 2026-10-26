@@ -22,6 +22,11 @@ profile.
   ``{"text_appears": s}``, ``{"text_gone": s}`` or ``{"url_changes": true}``. The answer adds
   ``clicked`` (``role`` and the page's ``name``, untrusted), ``attempts``, ``expect`` and
   ``outcome`` (``met``, ``not_met``, ``already_true`` or ``unchecked``).
+* ``downloads`` ``{site}``: the files in the site's downloads directory (``files``, each with a
+  ``path`` that is untrusted because the page chose the name, a ``size``, a ``mime`` guessed from
+  the content, and ``new`` if this client has not been told of it) and those still being
+  downloaded (``in_progress``). A ``click`` or ``navigate`` answer carries the same under
+  ``downloads``: the files that arrived since this client last looked.
 * ``close`` ``{site}``: end the site's session or login. ``{site, closed}``.
 * ``reload_policy`` ``{site}``: read the policy file again and give it to the live proxy.
 * ``login`` ``{target}``: ``target`` is a known site name or a host or URL. Opens a login
@@ -74,7 +79,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 
-from valetkey import clicks, client, learn, login, sandbox, sessions, sites
+from valetkey import clicks, client, downloads, learn, login, sandbox, sessions, sites
 from valetkey.client import MAX_LINE_BYTES, DaemonError
 from valetkey.proxy import Mode, Proxy
 
@@ -124,6 +129,12 @@ class BrowserSession(Protocol):
 
     def click(self, ref: str) -> None:
         """Click ``ref``."""
+
+    def clear_requests(self) -> None:
+        """Forget the logged network requests."""
+
+    def attachments(self) -> int:
+        """Count the logged responses that the browser turns into downloads."""
 
     def press_enter(self) -> None:
         """Press Enter in the focused element."""
@@ -317,6 +328,21 @@ def refused_entry(refusal: Any) -> dict[str, Any]:  # noqa: ANN401 - a proxy.Ref
     return {"host": refusal.host, "port": refusal.port, "reason": refusal.reason}
 
 
+def _watching(call: Callable[[BrowserSession], Any]) -> Callable[[BrowserSession], Any]:
+    """Wrap ``call`` so the network log starts empty, to count the attachments it causes."""
+
+    def run(session: BrowserSession) -> Any:  # noqa: ANN401 - whatever the call returns
+        session.clear_requests()
+        return call(session)
+
+    return run
+
+
+def _download_entry(item: downloads.Download) -> dict[str, Any]:
+    """Describe a download for a client. The page chose the name in the path, so it is untrusted."""
+    return {"path": untrusted(str(item.path)), "size": item.size, "mime": item.mime}
+
+
 def make_private_dirs(path: Path) -> None:
     """Create ``path`` and its missing parents with mode ``0700``."""
     missing = [path, *path.parents]
@@ -355,6 +381,8 @@ class _Connection:
     refs: dict[str, tuple[int, dict[str, tuple[str, str]]]] = field(default_factory=dict)
     """For each site, the session generation and the ``{ref: (role, name)}`` of the snapshot
     this client last received. A click by reference means the element it was in that snapshot."""
+    seen_downloads: dict[str, dict[str, downloads.Signature]] = field(default_factory=dict)
+    """For each site, the finished downloads this client has already been told about."""
 
 
 class Daemon:
@@ -364,7 +392,9 @@ class Daemon:
     tests: ``session_factory`` starts a session for a site,
     ``login_starter`` is :func:`valetkey.login.start_login`, ``proxy_options`` are extra
     keyword arguments for each session's :class:`valetkey.proxy.Proxy`, ``startup_grace`` is
-    :data:`STARTUP_GRACE`, and ``peer_uid`` reads a connection's user id.
+    :data:`STARTUP_GRACE`, and ``peer_uid`` reads a connection's user id. ``download_settle`` is
+    how long to look for a download that a click has only just started, and ``download_wait`` is
+    the longest to wait for downloads that are running.
     """
 
     def __init__(  # noqa: PLR0913 - each is a seam the tests replace
@@ -377,6 +407,8 @@ class Daemon:
         startup_grace: float = STARTUP_GRACE,
         peer_uid: PeerUid = peer_uid,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        download_settle: float = downloads.SETTLE_SECONDS,
+        download_wait: float = downloads.FINISH_SECONDS,
     ) -> None:
         """Create a daemon for the directories in ``roots``. Nothing listens until :func:`run`."""
         self.roots = roots
@@ -386,6 +418,8 @@ class Daemon:
         self._startup_grace = startup_grace
         self._peer_uid = peer_uid
         self._now = now
+        self._download_settle = download_settle
+        self._download_wait = download_wait
         self._uid = os.getuid()
         self._sites: dict[str, _Site] = {}
         self._connections: set[asyncio.Task[None]] = set()
@@ -404,6 +438,7 @@ class Daemon:
             "close": self._op_close,
             "reload_policy": self._op_reload_policy,
             "login": self._op_login,
+            "downloads": self._op_downloads,
         }
 
     # -- serving --
@@ -726,6 +761,9 @@ class Daemon:
                     await asyncio.to_thread(session.close)
                 except Exception:
                     logger.exception("closing the %s session failed", state.name)
+                paths = sessions.session_paths(self.roots, state.name)
+                # The browser is gone, so what is left in its folder is finished: keep it.
+                await asyncio.to_thread(downloads.sweep, paths.incoming_dir, paths.downloads_dir)
             if proxy is not None:
                 await proxy.close()
             if session is not None or proxy is not None:
@@ -770,14 +808,18 @@ class Daemon:
         generation, known = connection.refs.get(state.name, (-1, {}))
         target = clicks.build_target(args, known if generation == state.generation else {})
         expect = clicks.parse_expectation(args.get("expect"))
+        seen = await self._seen_downloads(connection, state.name)
         result = await self._session_op(
-            connection, state, lambda session: clicks.verified_click(session, target, expect)
+            connection,
+            state,
+            _watching(lambda session: clicks.verified_click(session, target, expect)),
         )
         done: clicks.ClickResult = result.pop("_value")
         result["clicked"] = {"role": done.role, "name": untrusted(done.name)}
         result["attempts"] = done.attempts
         result["expect"] = done.expect.to_json() if done.expect else None
         result["outcome"] = done.outcome
+        result["downloads"] = await self._new_downloads(connection, state, seen)
         return result
 
     async def _op_type(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
@@ -801,11 +843,113 @@ class Daemon:
     async def _op_navigate(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         state = self._state(_site_arg(args))
         url = _string_arg(args, "url")
-        result = await self._session_op(connection, state, lambda session: session.open(url))
+        seen = await self._seen_downloads(connection, state.name)
+        try:
+            result = await self._session_op(
+                connection, state, _watching(lambda session: session.open(url))
+            )
+        except DaemonError as error:
+            return await self._navigation_that_downloaded(connection, state, seen, error)
         page: sessions.Page = result.pop("_value")
         result["url"] = page.url
         result["page"] = {"title": untrusted(page.title)}
+        result["downloads"] = await self._new_downloads(connection, state, seen)
         return result
+
+    async def _navigation_that_downloaded(
+        self,
+        connection: _Connection,
+        state: _Site,
+        seen: dict[str, downloads.Signature],
+        error: DaemonError,
+    ) -> dict[str, Any]:
+        """Turn the failure of a navigation that became a download into an answer.
+
+        A URL that answers with an attachment is not a page: the browser aborts the navigation
+        and starts a download. If a download did start, say so instead of reporting a failure;
+        otherwise the failure stands.
+        """
+        if error.code != "browser_error" or "ERR_ABORTED" not in error.message:
+            raise error
+        found = await self._new_downloads(connection, state, seen, self._download_settle * 4)
+        if not (found["new"] or found["in_progress"] or found["unsaved"]):
+            raise error
+        envelope = {k: error.details[k] for k in ("site", "contained", "url", "refused")}
+        return envelope | {
+            "page": {"title": untrusted("")},
+            "downloads": found,
+            "download_only": True,
+        }
+
+    async def _seen_downloads(
+        self, connection: _Connection, site: str
+    ) -> dict[str, downloads.Signature]:
+        """Return the downloads this client already knows of, starting from what is there now."""
+        directory = sites.downloads_path(self.roots, site)
+        if site not in connection.seen_downloads:
+            connection.seen_downloads[site] = await asyncio.to_thread(downloads.snapshot, directory)
+        return connection.seen_downloads[site]
+
+    async def _new_downloads(
+        self,
+        connection: _Connection,
+        state: _Site,
+        seen: dict[str, downloads.Signature],
+        settle: float | None = None,
+    ) -> dict[str, Any]:
+        """Report the files that arrived since ``seen``, waiting a little for running ones.
+
+        Responses logged since the call began that said ``attachment`` are the downloads the
+        browser started. Any beyond the files that arrived and the ones still running are
+        counted as ``unsaved``: the browser started a download and nothing was written, as it
+        does when the file name is too long.
+        """
+        site = state.name
+        paths = sessions.session_paths(self.roots, site)
+        found = await asyncio.to_thread(
+            downloads.collect,
+            paths.downloads_dir,
+            seen,
+            incoming=paths.incoming_dir,
+            settle=self._download_settle if settle is None else settle,
+            finish=self._download_wait,
+        )
+        connection.seen_downloads[site] = found.seen
+        started = await self._attachments(state)
+        return {
+            "new": [_download_entry(item) for item in found.new],
+            "in_progress": [_download_entry(item) for item in found.in_progress],
+            "unsaved": max(0, started - len(found.new) - len(found.in_progress)),
+        }
+
+    async def _attachments(self, state: _Site) -> int:
+        """Count the responses logged since the call began that the browser turns into downloads."""
+        session = state.session
+        if session is None:
+            return 0
+        with contextlib.suppress(sessions.AgentBrowserError, sessions.SessionError):
+            return await asyncio.to_thread(session.attachments)
+        return 0
+
+    async def _op_downloads(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
+        site = _site_arg(args)
+        seen = await self._seen_downloads(connection, site)
+        paths = sessions.session_paths(self.roots, site)
+        found = await asyncio.to_thread(
+            downloads.collect,
+            paths.downloads_dir,
+            seen,
+            incoming=paths.incoming_dir,
+            finish=self._download_wait,
+        )
+        connection.seen_downloads[site] = found.seen
+        fresh = {item.name for item in found.new}
+        files = [_download_entry(item) | {"new": item.name in fresh} for item in found.everything]
+        return {
+            "site": site,
+            "files": files,
+            "in_progress": [_download_entry(item) for item in found.in_progress],
+        }
 
     async def _op_screenshot(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         state = self._state(_site_arg(args))

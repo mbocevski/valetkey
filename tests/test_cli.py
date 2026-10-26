@@ -333,6 +333,22 @@ def test_forget_with_yes_deletes_everything_of_that_site_only(
     assert all(path.exists() for path in kept)
 
 
+def test_forget_deletes_the_hidden_download_folders_too_and_follows_no_link(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    seed(roots, "sitex")
+    folder = sites.downloads_path(roots, "sitex")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+    for hidden in (".incoming", ".screenshots"):
+        (folder / hidden).mkdir()
+        (folder / hidden / "file.bin").write_text("x", encoding="utf-8")
+        (folder / hidden / "link").symlink_to(outside)
+    assert run(capsys, "forget", "sitex", "--yes")[0] == 0
+    assert not folder.exists()
+    assert outside.read_text(encoding="utf-8") == "keep"
+
+
 def test_forget_works_with_only_a_profile_left(
     roots: sites.Roots, capsys: pytest.CaptureFixture[str]
 ) -> None:

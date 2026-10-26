@@ -94,11 +94,21 @@ class ProxyStub:
 
 
 class PageServer:
-    """A local web server for fixed pages and redirects, on a free loopback port."""
+    """A local web server for fixed pages, redirects and files, on a free loopback port.
 
-    def __init__(self, pages: dict[str, str], redirects: dict[str, str] | None = None) -> None:
+    ``files`` maps a path to the headers and body to answer with, byte for byte, so a test can
+    send any ``Content-Disposition`` or ``Content-Type`` it likes.
+    """
+
+    def __init__(
+        self,
+        pages: dict[str, str],
+        redirects: dict[str, str] | None = None,
+        files: dict[str, tuple[dict[str, str], bytes]] | None = None,
+    ) -> None:
         encoded = {path: html.encode() for path, html in pages.items()}
         moved = redirects or {}
+        served = files or {}
         self.hits: list[str] = []
         """The path of every request the server received."""
         hits = self.hits
@@ -111,6 +121,15 @@ class PageServer:
                     self.send_header("Location", moved[self.path])
                     self.send_header("Content-Length", "0")
                     self.end_headers()
+                    return
+                if self.path.split("?", 1)[0] in served:
+                    headers, content = served[self.path.split("?", 1)[0]]
+                    self.send_response(200)
+                    for name, value in headers.items():
+                        self.send_header(name, value)
+                    self.send_header("Content-Length", str(len(content)))
+                    self.end_headers()
+                    self.wfile.write(content)
                     return
                 body = encoded.get(self.path)
                 self.send_response(200 if body is not None else 404)

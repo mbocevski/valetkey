@@ -30,10 +30,12 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, replace
+from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import urlsplit
@@ -179,6 +181,12 @@ class SessionPaths:
     ready_file: Path
     profile_dir: Path
     downloads_dir: Path
+    """Where finished downloads end up, and the only part of the downloads that people see."""
+    incoming_dir: Path
+    """Inside ``downloads_dir``, hidden. The browser downloads into it, and the daemon moves each
+    finished file out under a name that is free (see :mod:`valetkey.downloads`)."""
+    screenshots_dir: Path
+    """Inside ``downloads_dir``, hidden, so a screenshot is not mistaken for a download."""
 
 
 def session_paths(roots: sites.Roots, site: str) -> SessionPaths:
@@ -202,6 +210,8 @@ def session_paths(roots: sites.Roots, site: str) -> SessionPaths:
         ready_file=driver_dir / READY_FILE,
         profile_dir=sites.profile_path(roots, site),
         downloads_dir=sites.downloads_path(roots, site),
+        incoming_dir=sites.downloads_path(roots, site) / ".incoming",
+        screenshots_dir=sites.downloads_path(roots, site) / ".screenshots",
     )
 
 
@@ -238,6 +248,8 @@ def launch_command(
         "--json",
         "--profile",
         str(paths.profile_dir),
+        "--download-path",
+        str(paths.incoming_dir),
         "--proxy",
         f"http://{sandbox.PROXY_ADDRESS}",
         "--user-agent",
@@ -287,8 +299,9 @@ def holder_script(paths: SessionPaths, binary: str, open_command: list[str], run
     )
 
 
-OWN_FLAGS = frozenset({"-i"})
-"""The only option-like arguments valetkey itself passes after a verb (``snapshot -i``)."""
+OWN_FLAGS = frozenset({"-i", "--clear"})
+"""The only option-like arguments valetkey itself passes after a verb (``snapshot -i``,
+``network requests --clear``)."""
 
 
 def call_command(
@@ -619,6 +632,30 @@ class Session:
         self._call("press", "Control+Home")
         self._call("press", "Delete")
 
+    def clear_requests(self) -> None:
+        """Forget the network requests logged so far, so the next count starts from here."""
+        self._call("network", "requests", "--clear")
+
+    def attachments(self) -> int:
+        """Count the successful responses logged since the last clear that said ``attachment``.
+
+        A response with ``Content-Disposition: attachment`` is one the browser turns into a
+        download, whether or not a file then arrives. Only the headers are looked at.
+        """
+        logged = self._call("network", "requests").get("requests") or []
+        count = 0
+        for request in logged:
+            headers = {
+                str(k).lower(): str(v) for k, v in (request.get("responseHeaders") or {}).items()
+            }
+            disposition = headers.get("content-disposition", "").lstrip().lower()
+            if (
+                disposition.startswith("attachment")
+                and HTTPStatus.OK <= int(request.get("status") or 0) < HTTPStatus.MULTIPLE_CHOICES
+            ):
+                count += 1
+        return count
+
     def press_enter(self) -> None:
         """Press Enter in the focused element, for example to submit the field just filled."""
         self._call("press", "Enter")
@@ -628,11 +665,11 @@ class Session:
         return str(self._call("get", "url").get("url", ""))
 
     def screenshot(self, name: str = "screenshot.png") -> Path:
-        """Save a PNG named ``name`` in the downloads directory and return its path."""
+        """Save a PNG named ``name`` in the hidden screenshots directory and return its path."""
         if not _FILE_NAME.fullmatch(name):
             message = f"not a plain .png file name: {name!r}"
             raise ValueError(message)
-        path = self.paths.downloads_dir / name
+        path = self.paths.screenshots_dir / name
         self._call("screenshot", str(path))
         return path
 
@@ -661,6 +698,27 @@ def _prepare(roots: sites.Roots, paths: SessionPaths) -> None:
     sites.ensure_runtime(roots)
     sites.ensure_profile(roots, paths.site)
     sites.ensure_downloads(roots, paths.site)
+    _fresh_private_dir(paths.incoming_dir)
+    paths.screenshots_dir.mkdir(mode=0o700, exist_ok=True)
     for directory in (paths.directory, paths.proxy_socket.parent, paths.driver_dir):
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     paths.config_file.write_text("{}\n")
+
+
+def _fresh_private_dir(path: Path) -> None:
+    """Make ``path`` an empty directory, mode ``0700``, without following any link.
+
+    What an earlier session left is removed: a directory with its contents (links inside it are
+    removed, not followed), or a file or link in its place.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISDIR(info.st_mode):
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    path.mkdir(mode=0o700)
+    path.chmod(0o700)

@@ -17,6 +17,7 @@ Changes that affect users of valetkey. The format follows
 - The `valetkey mcp` command, an MCP server that gives a client browser tools for the sites you have logged in to.
 - The `browser_click` tool can name an element by its text, finds it again when it clicks, and checks the outcome you expect.
 - The `browser_type` tool can press Enter after typing.
+- Files a site downloads are saved in its downloads folder, never replacing an older file, and `browser_click` and `browser_navigate` list the new ones; `browser_downloads` lists the folder.
 - The `valetkey daemon` command, which runs the background process that owns your sessions and logins.
 - Chrome no longer contacts `www.google.com` on its own, so a page that needs it shows as a refused host on any load.
 - The browser tools now say when a page's background requests were refused, such as Chrome's own update requests, in a separate quiet line.
