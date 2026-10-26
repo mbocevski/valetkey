@@ -185,10 +185,12 @@ Check that this machine can run valetkey.
 Each check prints one line: ok, FAIL, warn or info. Required checks are
 bubblewrap and user namespaces, Chromium, agent-browser 0.39 or newer, and
 XDG_RUNTIME_DIR. A missing Wayland display is a warning, because only logging in
-needs one, and so is an agent-browser newer than 0.39.2, the version valetkey
-was tested with. The state of the systemd units is shown for information. The
-exit status is 1 when a required check fails. With --json, each check is an
-object with the keys check, status (ok, fail, warn or info) and detail.
+needs one, and so is a compositor without security-context support, where the
+login window is not restricted, and an agent-browser newer than 0.39.2, the
+version valetkey was tested with. The state of the systemd units is shown for
+information. The exit status is 1 when a required check fails. With --json, each
+check is an object with the keys check, status (ok, fail, warn or info) and
+detail.
 
 Parameters:
   --json: Print a JSON array instead of lines. [default: False]

@@ -2,6 +2,9 @@
 import asyncio
 import contextlib
 import json
+import logging
+import os
+import select
 import shlex
 import signal
 import socket
@@ -15,9 +18,11 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from environment import unusable_reason
 from sway import Sway
+from test_wayland import Compositor, Peer, accepting
 
-from valetkey import login, sandbox, sites
+from valetkey import login, sandbox, sites, wayland
 from valetkey.proxy import SeenHost
+from valetkey.wayland import decode_string
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -355,6 +360,7 @@ def start(
         "chrome_major": 156,
         "launcher": fake,
         "proxy_options": upstream.proxy_options(),
+        "restrict": lambda *_: None,  # never reach a real compositor from a unit test
     } | options
     return login.start_login("sitex", "sitex.com", roots, finish, **settings)
 
@@ -691,6 +697,174 @@ def test_bad_arguments_fail_before_anything_is_created(roots: sites.Roots) -> No
     assert not sites.profile_path(roots, "sitex").exists()
 
 
+# -- the restricted display ----------------------------------------------------------------
+
+
+class Restriction:
+    """Stands in for ``restrict_display``: makes a context that records how it was closed."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, Path, str]] = []
+        self.context: wayland.SecurityContext | None = None
+        self.watch = -1
+
+    def __call__(self, compositor: Path, directory: Path, site: str) -> wayland.SecurityContext:
+        self.calls.append((compositor, directory, site))
+        path = directory / login.DISPLAY_NAME
+        path.touch()
+        self.watch, write_end = os.pipe()
+        self.context = wayland.SecurityContext(path, write_end)
+        return self.context
+
+    def hung_up(self) -> bool:
+        """Whether the descriptor the compositor watches has hung up."""
+        poller = select.poll()
+        poller.register(self.watch, select.POLLIN)
+        return bool(poller.poll(0))
+
+    def finish(self) -> None:
+        os.close(self.watch)
+
+
+def test_the_window_gets_the_restricted_display_until_the_login_ends(roots: sites.Roots) -> None:
+    restriction = Restriction()
+    fake = FakeSandbox(["true"])
+    seen: dict[str, Any] = {}
+
+    class Watching(FakeSandbox):
+        def __call__(self, box: sandbox.Sandbox, command: list[str]) -> subprocess.Popen[bytes]:
+            seen["socket"] = box.wayland_socket
+            seen["quiet"] = not restriction.hung_up()
+            seen["exists"] = box.wayland_socket is not None and box.wayland_socket.exists()
+            return super().__call__(box, command)
+
+    fake = Watching(["true"])
+
+    async def scenario() -> None:
+        async with Upstream().serving() as upstream:
+            handle = await start(roots, fake, lambda *_: None, upstream, restrict=restriction)
+            await handle.wait()
+
+    try:
+        run(scenario())
+        compositor = Path("/run/user/1000/wayland-0")
+        assert restriction.calls == [(compositor, login_dir(roots), "sitex")]
+        assert seen["socket"] == login_dir(roots) / login.DISPLAY_NAME
+        assert seen["socket"] != compositor
+        assert seen["quiet"] is True  # the compositor keeps serving it while the window runs
+        assert seen["exists"] is True
+        assert restriction.hung_up()  # and is told to stop when the login is over
+        assert not login_dir(roots).exists()
+    finally:
+        restriction.finish()
+
+
+def test_cancelling_a_login_ends_the_restricted_display(roots: sites.Roots) -> None:
+    restriction = Restriction()
+    fake = FakeSandbox()
+
+    async def scenario() -> None:
+        async with Upstream().serving() as upstream:
+            handle = await start(roots, fake, lambda *_: None, upstream, restrict=restriction)
+            assert not restriction.hung_up()
+            await handle.cancel()
+
+    try:
+        run(scenario())
+        assert restriction.hung_up()
+        assert not login_dir(roots).exists()
+    finally:
+        restriction.finish()
+
+
+def test_a_login_that_fails_to_start_closes_its_restricted_display(roots: sites.Roots) -> None:
+    restriction = Restriction()
+
+    def broken(_box: sandbox.Sandbox, _command: list[str]) -> subprocess.Popen[bytes]:
+        message = "bwrap is missing"
+        raise OSError(message)
+
+    async def scenario() -> None:
+        async with Upstream().serving() as upstream:
+            with pytest.raises(OSError, match="bwrap is missing"):
+                await start(
+                    roots,
+                    FakeSandbox(),
+                    lambda *_: None,
+                    upstream,
+                    restrict=restriction,
+                    launcher=broken,
+                )
+
+    try:
+        run(scenario())
+        assert restriction.hung_up()
+        assert not login_dir(roots).exists()
+    finally:
+        restriction.finish()
+
+
+def test_without_a_restricted_display_the_window_gets_the_compositors(roots: sites.Roots) -> None:
+    fake = FakeSandbox(["true"])
+
+    async def scenario() -> None:
+        async with Upstream().serving() as upstream:
+            handle = await start(roots, fake, lambda *_: None, upstream)
+            await handle.wait()
+
+    run(scenario())
+    assert fake.boxes[0].wayland_socket == Path("/run/user/1000/wayland-0")
+
+
+def test_restrict_display_registers_the_site_as_the_instance(short_dir: Path) -> None:
+    compositor = short_dir / "wayland-0"
+    directory = short_dir / "login"
+    directory.mkdir(mode=0o700)
+    seen: dict[str, Any] = {}
+
+    def script(peer: Peer) -> None:
+        seen.update(accepting(peer))
+
+    with Compositor(compositor, script):
+        context = login.restrict_display(compositor, directory, "sitex")
+        assert context is not None
+        assert context.path == directory / "wayland-login"
+        assert context.path.is_socket()
+        context.close()
+    names = [decode_string(r.payload, 0)[0] for r in seen["strings"]]
+    assert names == ["valetkey", "valetkey-login", "sitex"]
+
+
+def test_a_compositor_without_the_manager_is_warned_about_once_and_the_login_goes_on(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(login, "_warned", set())
+    directory = short_dir / "login"
+    directory.mkdir(mode=0o700)
+    for round_ in range(2):
+        compositor = short_dir / f"wayland-{round_}"
+        with (
+            Compositor(compositor, lambda peer: peer.handshake({"wl_compositor": 6})),
+            caplog.at_level(logging.WARNING, logger="valetkey.login"),
+        ):
+            assert login.restrict_display(compositor, directory, "sitex") is None
+    warnings = [r.message for r in caplog.records if "no security-context support" in r.message]
+    assert warnings == [login.UNRESTRICTED]  # one, for two logins
+    assert list(directory.iterdir()) == []
+
+
+def test_any_other_trouble_with_the_compositor_is_warned_about_each_time(
+    short_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    directory = short_dir / "login"
+    directory.mkdir(mode=0o700)
+    with caplog.at_level(logging.WARNING, logger="valetkey.login"):
+        for _ in range(2):
+            assert login.restrict_display(short_dir / "nothing-here", directory, "sitex") is None
+    assert len([r for r in caplog.records if "could not restrict" in r.message]) == 2
+    assert "cannot connect" in caplog.text
+
+
 # -- integration: a real window in a private sway -----------------------------------------
 
 
@@ -750,6 +924,12 @@ def test_a_login_window_opens_records_the_host_and_ends_when_closed(
                 await asyncio.sleep(0.2)
             assert upstream.requests[0].startswith("GET / HTTP/1.1\r\nHost: login.test\r\n")
             assert handle.running
+            # The compositor knows the window as a sandboxed client of this site's login.
+            (node,) = windows
+            assert node["sandbox_engine"] == "valetkey"
+            assert node["sandbox_app_id"] == "valetkey-login"
+            assert node["sandbox_instance_id"] == "sitex"
+            await asyncio.to_thread(assert_display_is_restricted, sway, login_dir(roots))
             await sway.msg("[app_id=chromium]", "kill")
             result = await asyncio.wait_for(handle.wait(), 30)
             assert result.cancelled is False
@@ -764,6 +944,32 @@ def test_a_login_window_opens_records_the_host_and_ends_when_closed(
     assert leftover_sandboxes(profile) == []
     # The profile Chrome wrote stays: it holds the login.
     assert any(profile.iterdir())
+
+
+def assert_display_is_restricted(desktop: Sway, directory: Path) -> None:
+    """Capture and virtual typing fail through the login's socket, and work through sway's."""
+    restricted = directory / login.DISPLAY_NAME
+    assert restricted.is_socket()
+
+    def tool(argv: list[str], display: Path) -> subprocess.CompletedProcess[str]:
+        env = {
+            "PATH": os.environ["PATH"],
+            "XDG_RUNTIME_DIR": str(desktop.runtime),
+            "WAYLAND_DISPLAY": str(display),
+        }
+        return subprocess.run(  # noqa: S603  # fixed argument list
+            argv, env=env, capture_output=True, text=True, check=False, timeout=30
+        )
+
+    shot = directory.parent / "shot.png"
+    for argv in (["grim", str(shot)], ["wtype", "x"]):
+        refused = tool(argv, restricted)
+        assert refused.returncode != 0, argv
+        assert "support" in refused.stderr, refused.stderr
+    assert not shot.exists()
+    # The same tools work on the compositor's own socket, so it is the socket that refuses.
+    assert tool(["grim", str(shot)], desktop.display).returncode == 0
+    shot.unlink()
 
 
 def sway_log(roots: sites.Roots) -> str:

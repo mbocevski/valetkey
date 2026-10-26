@@ -20,6 +20,7 @@ work and subprocess calls run in worker threads.
 import asyncio
 import contextlib
 import inspect
+import logging
 import os
 import shlex
 import shutil
@@ -31,11 +32,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
-from valetkey import sandbox, sites
+from valetkey import sandbox, sites, wayland
 from valetkey.proxy import PRIVATE_ADDRESS, Mode, Proxy, SeenHost
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
+
+logger = logging.getLogger(__name__)
 
 NO_SESSION = "no desktop session here — log in on a machine with one, or enable remote logins"
 X11_ONLY = (
@@ -49,6 +52,7 @@ BRIDGE_WAIT_SECONDS = 15
 STOP_GRACE_SECONDS = 5.0
 
 type Finish = Callable[[list[SeenHost], Path], Awaitable[None] | None]
+type Restrict = Callable[[Path, Path, str], wayland.SecurityContext | None]
 type Launcher = Callable[[sandbox.Sandbox, list[str]], subprocess.Popen[bytes]]
 
 _WAIT_FOR_BRIDGE = f"""
@@ -161,6 +165,48 @@ def find_wayland_socket(
     return path
 
 
+# -- the display the window gets -----------------------------------------------------------
+
+DISPLAY_NAME = "wayland-login"
+"""The name of the restricted socket, which is also what ``WAYLAND_DISPLAY`` is inside."""
+APP_ID = "valetkey-login"
+UNRESTRICTED_SHORT = (
+    "the Wayland compositor has no security-context support; the login window is not restricted"
+)
+UNRESTRICTED = (
+    "the Wayland compositor has no security-context support, so login windows are not "
+    "restricted: they can use screen capture, virtual input and clipboard managers"
+)
+_warned: set[str] = set()
+
+
+def restrict_display(
+    compositor: Path, login_dir: Path, site: str
+) -> wayland.SecurityContext | None:
+    """Ask the compositor for a restricted socket for ``site``'s login window.
+
+    The socket is made in ``login_dir`` and is the only display the window gets. A client that
+    connects through it is refused screen capture, virtual keyboards and pointers, and clipboard
+    managers, but pastes, copies and types as usual. Returns ``None`` when the compositor cannot
+    do this, and the caller falls back to the compositor's own socket. A login is never refused
+    for lack of it: the missing support is logged once per process, and any other failure each
+    time it happens.
+    """
+    try:
+        return wayland.create_security_context(
+            compositor, login_dir / DISPLAY_NAME, app_id=APP_ID, instance_id=site
+        )
+    except wayland.SecurityContextUnavailableError:
+        if "unavailable" not in _warned:
+            _warned.add("unavailable")
+            logger.warning(UNRESTRICTED)
+    except wayland.WaylandError as error:
+        logger.warning(
+            "could not restrict the login window's display (%s); using the plain one", error
+        )
+    return None
+
+
 # -- the browser command -------------------------------------------------------------------
 
 
@@ -242,20 +288,25 @@ class LoginResult:
 class LoginHandle:
     """A running login. Get one from :func:`start_login`."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0917 - the handle owns each of these for the login's life
         self,
         process: subprocess.Popen[bytes],
         exited: asyncio.Future[int],
         proxy: Proxy,
         directories: tuple[Path, Path],
         finish: Finish,
+        context: wayland.SecurityContext | None = None,
     ) -> None:
-        """Start watching ``process``. Use :func:`start_login` instead of calling this."""
+        """Start watching ``process``. Use :func:`start_login` instead of calling this.
+
+        ``context`` is the window's restricted display, closed when the login ends.
+        """
         self._process = process
         self._exited = exited
         self._proxy = proxy
         self._login_dir, self._profile_dir = directories
         self._finish = finish
+        self._context = context
         self._cancelled = False
         self._task = asyncio.ensure_future(self._supervise())
 
@@ -296,6 +347,8 @@ class LoginHandle:
         finally:
             seen = self._proxy.seen_hosts()
             refused = self._proxy.refused_since(0)[0]
+            if self._context is not None:
+                await asyncio.to_thread(self._context.close)
             await self._proxy.close()
             await asyncio.to_thread(shutil.rmtree, self._login_dir, ignore_errors=True)
         private = tuple(
@@ -361,6 +414,7 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     launcher: Launcher = sandbox.start,
     proxy_options: Mapping[str, Any] | None = None,
     private_networks: Sequence[str] = (),
+    restrict: Restrict = restrict_display,
 ) -> LoginHandle:
     """Open a login window for ``site`` and return once it has been started.
 
@@ -378,7 +432,9 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     :class:`valetkey.proxy.Proxy`, such as ``resolver``; ``quiet_hosts`` defaults to the
     browser's background hosts. ``private_networks`` are the site's listed private address
     ranges (see :func:`valetkey.sites.private_network`); the proxy lets a host resolve into them,
-    and into nothing else that is private.
+    and into nothing else that is private. ``restrict`` makes the window's restricted display
+    (default: :func:`restrict_display`); when it returns ``None`` the window gets
+    ``wayland_socket``.
 
     The proxy runs in record mode, which lets every host through, so its policy only has to be
     valid: it allows the start host and lists the ranges. The hosts the browser used are in the
@@ -400,8 +456,10 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     options: dict[str, Any] = {"quiet_hosts": sandbox.BACKGROUND_HOSTS} | dict(proxy_options or {})
     proxy = Proxy(placeholder, Mode.RECORD, **options)
     proxy_socket = login_dir / "proxy.sock"
+    context: wayland.SecurityContext | None = None
     try:
         await proxy.start(proxy_socket)
+        context = await asyncio.to_thread(restrict, socket_path, login_dir, site)
         policy_dir = await asyncio.to_thread(
             sandbox.write_chrome_policy, login_dir / "chrome-policy"
         )
@@ -411,7 +469,7 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
             proxy_socket=proxy_socket,
             log_file=runtime / "logins" / f"{site}.log",
             runtime_dir=cast("Path", roots.runtime),
-            wayland_socket=socket_path,
+            wayland_socket=context.path if context is not None else socket_path,
             policy_dir=policy_dir,
         )
         await asyncio.to_thread(box.log_file.unlink, missing_ok=True)
@@ -434,10 +492,12 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
         # Starting may still finish in its thread (when this task was cancelled): end whatever
         # it starts, because nothing would watch it.
         started.add_done_callback(_terminate_when_started)
+        if context is not None:
+            await asyncio.to_thread(context.close)
         await proxy.close()
         await asyncio.to_thread(shutil.rmtree, login_dir, ignore_errors=True)
         raise
-    return LoginHandle(process, exited, proxy, (login_dir, profile_dir), finish)
+    return LoginHandle(process, exited, proxy, (login_dir, profile_dir), finish, context)
 
 
 def _prepare(roots: sites.Roots, site: str, runtime: Path) -> tuple[Path, Path, Path]:

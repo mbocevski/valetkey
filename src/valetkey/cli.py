@@ -27,6 +27,7 @@ from valetkey import (
     sessions,
     sites,
 )
+from valetkey.wayland import MANAGER, WaylandError, compositor_globals
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -766,6 +767,8 @@ class System:
     run: Callable[[Sequence[str]], tuple[int, str]] = _run
     environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
     wayland: Callable[[], Path] = login.find_wayland_socket
+    offered: Callable[[Path], Mapping[str, int]] = compositor_globals
+    """The interfaces the compositor at a socket offers."""
     unit_dirs: tuple[Path, ...] = field(
         default_factory=lambda: (unit_directory(sites.roots_from_env()), *SYSTEM_UNIT_DIRS)
     )
@@ -865,6 +868,28 @@ def check_display(system: System) -> Check:
     return Check("display", "ok", f"Wayland display {socket}")
 
 
+def check_security_context(system: System) -> list[Check]:
+    """Say whether the compositor can restrict the login window; nothing if there is no display.
+
+    Without ``wp_security_context_manager_v1`` the login window still opens, on the compositor's
+    own socket, and can use screen capture, virtual input and clipboard managers.
+    """
+    try:
+        socket = system.wayland()
+    except login.DisplayError:
+        return []  # the display check already says so
+    try:
+        interfaces = system.offered(socket)
+    except WaylandError as error:
+        detail = f"could not ask the Wayland compositor: {error}"
+        return [Check("security-context", "warn", detail)]
+    if MANAGER in interfaces:
+        return [
+            Check("security-context", "ok", "the Wayland compositor restricts the login window")
+        ]
+    return [Check("security-context", "warn", login.UNRESTRICTED_SHORT)]
+
+
 def check_units(system: System) -> list[Check]:
     """Report, without judging, whether the units are installed and the socket is active.
 
@@ -896,6 +921,7 @@ def run_checks(system: System) -> list[Check]:
         check_agent_browser(system),
         check_runtime_dir(system),
         check_display(system),
+        *check_security_context(system),
         *check_units(system),
     ]
 
@@ -911,9 +937,10 @@ def doctor(
 
     Each check prints one line: ok, FAIL, warn or info. Required checks are bubblewrap and
     user namespaces, Chromium, agent-browser 0.39 or newer, and XDG_RUNTIME_DIR. A missing
-    Wayland display is a warning, because only logging in needs one, and so is an agent-browser
-    newer than 0.39.2, the version valetkey was tested with. The state of the systemd units is
-    shown for information. The exit status is 1 when a required check fails. With
+    Wayland display is a warning, because only logging in needs one, and so is a compositor
+    without security-context support, where the login window is not restricted, and an
+    agent-browser newer than 0.39.2, the version valetkey was tested with. The state of the
+    systemd units is shown for information. The exit status is 1 when a required check fails. With
     --json, each check is an object with the keys check, status (ok, fail, warn or info) and
     detail.
     """

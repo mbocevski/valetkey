@@ -35,6 +35,9 @@ Changes that affect users of valetkey. The format follows
 - `valetkey allow` and `valetkey deny` now apply to a running session at once, and `valetkey forget` closes a running session before it deletes.
 - The proxy refuses a host when any address it resolves to is private or otherwise not public, not only when all are, because a mixed answer is how DNS rebinding looks.
 
+- The login window now runs in a Wayland security context where the compositor offers one, so it cannot capture the screen, type for you or manage the clipboard.
+- `valetkey doctor` warns when the Wayland compositor cannot restrict the login window.
+
 ### Fixed
 
 - The install instructions name the ways valetkey ships, the Arch package and `uv tool install .` from a checkout, and commands, MCP tools and security have pages in `docs/`.

@@ -91,6 +91,25 @@ matters to you.
 - Chrome makes some requests of its own, such as update checks. They are refused and listed on a
   separate line of the tool results. Allow one only if a page needs it.
 
+## The login window
+
+The window you sign in with is an ordinary Chromium on your Wayland desktop, in the same kind of
+sandbox as the agent's browsers. valetkey asks your compositor for a restricted socket for each
+login and gives the window that one instead of the compositor's own. Through it the window cannot:
+
+- capture the screen or other windows,
+- type or click for you with a virtual keyboard or pointer,
+- read or change the clipboard behind your back with a clipboard manager,
+- list your other windows, lock the session or change your displays.
+
+It still shows pages, takes your typing and does ordinary copy and paste, including from a
+password manager. The compositor lists the window as a sandboxed client of `valetkey`, with the
+site as its instance name. The socket is removed when the window closes.
+
+Not every compositor can do this. When yours cannot, the login still opens on the compositor's own
+socket, the daemon logs a warning, and `valetkey doctor` shows `warn` on the security-context line:
+the window is then not restricted.
+
 ## Page content is untrusted
 
 A page can contain text written to look like instructions. Everything that came from a page, such

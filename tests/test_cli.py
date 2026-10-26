@@ -15,6 +15,7 @@ import pytest
 
 from valetkey import __version__, cli, daemon, mcp_server, sandbox, sessions, sites
 from valetkey.cli import main
+from valetkey.wayland import MANAGER, WaylandError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -851,6 +852,7 @@ class FakeSystem:
         self.probe: tuple[int, str] = (0, "")
         self.environ: dict[str, str] = {"XDG_RUNTIME_DIR": "/run/user/1000"}
         self.display: Path | cli.login.DisplayError = Path("/run/user/1000/wayland-1")
+        self.offered: dict[str, int] | WaylandError = {"wl_compositor": 6, MANAGER: 1}
         self.units = tmp_path / "units"
         self.system_units: tuple[Path, ...] = ()
         self.calls: list[list[str]] = []
@@ -871,12 +873,18 @@ class FakeSystem:
             raise self.display
         return self.display
 
+    def interfaces(self, _socket: Path) -> dict[str, int]:
+        if isinstance(self.offered, Exception):
+            raise self.offered
+        return self.offered
+
     def system(self) -> cli.System:
         return System(
             which=self.which,
             run=self.run,
             environ=self.environ,
             wayland=self.wayland,
+            offered=self.interfaces,
             unit_dirs=(self.units, *self.system_units),
         )
 
@@ -894,6 +902,7 @@ def test_doctor_all_good(tmp_path: Path) -> None:
         "agent-browser": ("ok", "agent-browser 0.39.2"),
         "runtime-dir": ("ok", "XDG_RUNTIME_DIR=/run/user/1000"),
         "display": ("ok", "Wayland display /run/user/1000/wayland-1"),
+        "security-context": ("ok", "the Wayland compositor restricts the login window"),
         "units": ("info", "systemd units not installed; run `valetkey install-units`"),
         "socket": ("info", "valetkeyd.socket is inactive"),
     }
@@ -976,6 +985,20 @@ def test_doctor_needs_a_runtime_dir(tmp_path: Path, environ: dict[str, str]) -> 
         "fail",
         "XDG_RUNTIME_DIR is not set to an absolute path",
     )
+
+
+def test_doctor_warns_when_the_compositor_cannot_restrict_the_login_window(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path, offered={"wl_compositor": 6})
+    assert results(fake)["security-context"] == (
+        "warn",
+        cli.login.UNRESTRICTED_SHORT,
+    )
+
+
+def test_doctor_warns_when_the_compositor_cannot_be_asked(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path, offered=WaylandError("it did not answer"))
+    status, detail = results(fake)["security-context"]
+    assert (status, detail) == ("warn", "could not ask the Wayland compositor: it did not answer")
 
 
 def test_doctor_a_missing_display_is_only_a_warning(tmp_path: Path) -> None:
@@ -1069,6 +1092,7 @@ def test_doctor_json_shape(
         "agent-browser",
         "runtime-dir",
         "display",
+        "security-context",
         "units",
         "socket",
     ]
