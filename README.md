@@ -26,6 +26,8 @@ systemctl --user enable --now valetkeyd.socket
 valetkey doctor
 ```
 
+After a `git pull`, run `makepkg -si` again to build the new code.
+
 On other Linux systems, install from the checkout with uv:
 
 ```sh

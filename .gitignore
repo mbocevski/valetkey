@@ -7,6 +7,11 @@ coverage.xml
 htmlcov/
 dist/
 
+# What makepkg leaves in packaging/arch
+packaging/arch/src/
+packaging/arch/pkg/
+packaging/arch/*.pkg.tar.*
+
 # The pinned noVNC release, fetched by tools/fetch_novnc.py
 src/valetkey/novnc/
 src/valetkey/novnc.new/

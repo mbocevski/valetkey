@@ -8,13 +8,15 @@
 # what the tests run against. prepare() downloads the locked wheels, checking their hashes, and
 # needs the network; build() and package() do not.
 #
-# pkgver() copies the version from pyproject.toml when it is built, so the package, the changelog
-# and the git tag agree; the value below is only what the file held when it was last built.
+# The package version is the version in pyproject.toml, then the number of commits and the commit
+# the checkout is at, as Arch names a package built from git (0.1.0.r95.gabc1234). Every new
+# commit is a new version, so after a `git pull` makepkg builds the new code instead of finding
+# the package of an older commit in this directory and installing that one. Changes that are not
+# committed add `.d` and a hash of them. `makepkg -f` rebuilds the same version.
 # agent-browser is not in the official repositories: the CachyOS repositories ship `agent-browser`
 # and the AUR ships `agent-browser-bin`, which provides it.
 
 pkgname=valetkey
-pkgver=0.1.0
 pkgrel=1
 pkgdesc='A logged-in browser for MCP clients, contained to the sites it is allowed to reach'
 # Some locked dependencies (pydantic-core, cryptography, cffi) are compiled wheels.
@@ -46,9 +48,24 @@ install="$pkgname.install"
 _root="$startdir/../.."
 _prefix=/usr/lib/valetkey
 
-pkgver() {
-  sed -n 's/^version = "\(.*\)"$/\1/p' "$_root/pyproject.toml" | head -n 1
+# Not a pkgver() function: makepkg writes what that returns into this file, which would leave the
+# checkout modified after every build and stop `git pull` from working. The wheel keeps the version
+# of pyproject.toml, so `valetkey --version` still says 0.1.0.
+_version() {
+  local base commits hash changes
+  base=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$_root/pyproject.toml" | head -n 1)
+  if ! hash=$(git -C "$_root" rev-parse --short=7 HEAD 2>/dev/null); then
+    printf '%s\n' "$base" # an unpacked archive, not a checkout
+    return
+  fi
+  commits=$(git -C "$_root" rev-list --count HEAD)
+  changes=$({ git -C "$_root" status --porcelain; git -C "$_root" diff HEAD; })
+  if [ -n "$changes" ]; then
+    changes=".d$(printf '%s' "$changes" | sha1sum | cut -c1-8)"
+  fi
+  printf '%s.r%s.g%s%s\n' "$base" "$commits" "$hash" "$changes"
 }
+pkgver=$(_version)
 
 prepare() {
   export UV_CACHE_DIR="$srcdir/uv-cache" UV_PYTHON_DOWNLOADS=never

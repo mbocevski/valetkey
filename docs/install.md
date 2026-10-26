@@ -12,6 +12,11 @@ cd packaging/arch
 makepkg -si
 ```
 
+The package version is `0.1.0.r` and the number of commits, then `.g` and the commit, such as
+`0.1.0.r95.gabc1234`. So after a `git pull`, run `makepkg -si` again: the new commit is a new
+version, and it builds the new code. Uncommitted changes add `.d` and a hash of them. If you want
+to rebuild the same version, add `-f`.
+
 The package installs valetkey with the exact dependencies in `uv.lock` into `/usr/lib/valetkey`,
 so it does not depend on the Python packages your system has. `/usr/bin/valetkey` points into
 that environment. The build downloads those dependencies and checks their hashes; it needs the

@@ -54,6 +54,7 @@ Changes that affect users of valetkey. The format follows
 ### Fixed
 
 - A site that signs you in only until the browser is closed, with a cookie that has no expiry, now stays signed in for the session. Sign in again once if a login did not carry over.
+- The Arch package's version now includes the commit, so `makepkg -si` after a `git pull` builds the new code and no longer installs the package of an older commit.
 - `browser_allow` and the login link reach a client on the newer MCP protocol instead of ending in `could_not_ask` or sending you to `valetkey status`.
 - Starting valetkey from an MCP client that gives it a reduced environment now works: it uses `/run/user/UID` when `XDG_RUNTIME_DIR` is missing, and the daemon it starts finds your desktop.
 - The login window no longer shows Chromium's "unsupported command-line flag" bar. valetkey no longer passes it the flag that hides automation, which only the headless browsers need.
