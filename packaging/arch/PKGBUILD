@@ -1,0 +1,105 @@
+# Builds valetkey from the checkout this file sits in (packaging/arch/ inside the repository):
+#
+#     cd packaging/arch && makepkg -si
+#
+# valetkey is installed with the exact dependencies in uv.lock, in a private environment at
+# /usr/lib/valetkey that uses the system Python. Arch's own python-mcp is older than the one
+# valetkey needs, and python-cyclopts is only in the AUR, so system packages would not match
+# what the tests run against. prepare() downloads the locked wheels, checking their hashes, and
+# needs the network; build() and package() do not.
+#
+# pkgver() copies the version from pyproject.toml when it is built, so the package, the changelog
+# and the git tag agree; the value below is only what the file held when it was last built.
+# agent-browser is not in the official repositories: the CachyOS repositories ship `agent-browser`
+# and the AUR ships `agent-browser-bin`, which provides it.
+
+pkgname=valetkey
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='A logged-in browser for MCP clients, contained to the sites it is allowed to reach'
+# Some locked dependencies (pydantic-core, cryptography, cffi) are compiled wheels.
+arch=('x86_64')
+license=('Apache-2.0')
+depends=(
+  'agent-browser>=0.39'
+  'bubblewrap'
+  'chromium'
+  'glibc'
+  'libgcc'
+  'python>=3.14'
+  'python<3.15'
+)
+makedepends=(
+  'python-build'
+  'python-installer'
+  'python-uv-build'
+  'uv'
+)
+options=('!debug')
+install="$pkgname.install"
+
+_root="$startdir/../.."
+_prefix=/usr/lib/valetkey
+
+pkgver() {
+  sed -n 's/^version = "\(.*\)"$/\1/p' "$_root/pyproject.toml" | head -n 1
+}
+
+prepare() {
+  export UV_CACHE_DIR="$srcdir/uv-cache" UV_PYTHON_DOWNLOADS=never
+  uv export --quiet --frozen --no-dev --no-emit-project --project "$_root" \
+    --output-file "$srcdir/requirements.txt"
+  uv pip install --quiet --python /usr/bin/python --target "$srcdir/deps" \
+    --require-hashes --only-binary :all: --no-deps --requirement "$srcdir/requirements.txt"
+  # Console scripts of the dependencies are not needed and name the build directory.
+  rm -rf "$srcdir/deps/bin"
+  # uv's lock file, which would be world-writable in the package.
+  rm -f "$srcdir/deps/.lock"
+}
+
+build() {
+  python -m build --wheel --no-isolation --outdir "$srcdir/dist" "$_root"
+}
+
+package() {
+  local lib="$pkgdir$_prefix" version site units
+  version=$(python -c 'import platform; print(platform.python_version())')
+  site="$lib/lib/python${version%.*}/site-packages"
+
+  # A virtual environment that does not depend on where it was built: Python finds pyvenv.cfg
+  # next to the interpreter it was started as, so it works from the final path.
+  install -d "$lib/bin" "$site"
+  for name in python python3 "python${version%.*}"; do
+    ln -s /usr/bin/python "$lib/bin/$name"
+  done
+  printf '%s\n' "home = /usr/bin" "include-system-site-packages = false" "version = $version" \
+    > "$lib/pyvenv.cfg"
+
+  cp -a "$srcdir/deps/." "$site/"
+  python -m installer --destdir="$pkgdir" --prefix="$_prefix" "$srcdir"/dist/*.whl
+  # The installer's console script names the interpreter it ran under, so write one that names
+  # the private interpreter instead.
+  rm "$lib/bin/valetkey"
+  printf '%s\n' "#!$_prefix/bin/python" 'import sys' 'from valetkey.cli import main' \
+    'sys.exit(main())' > "$lib/bin/valetkey"
+  chmod 755 "$lib/bin/valetkey"
+  python -m compileall -q -s "$pkgdir" "$lib/lib"
+
+  install -d "$pkgdir/usr/bin"
+  ln -s "$_prefix/bin/valetkey" "$pkgdir/usr/bin/valetkey"
+
+  # The package ships the units ready to use: the template that `valetkey install-units` fills in
+  # with the program's path, filled in with /usr/bin/valetkey, in the system-wide user unit
+  # directory. `valetkey install-units` still works; its copies in ~/.config take precedence.
+  units="$site/valetkey/units"
+  install -d "$pkgdir/usr/lib/systemd/user"
+  for unit in valetkeyd.socket valetkeyd.service; do
+    sed -e '1s|.*|# Installed by the valetkey package. `valetkey install-units` writes copies that override it.|' \
+        -e 's|@EXECUTABLE@|/usr/bin/valetkey|' \
+        "$units/$unit" > "$pkgdir/usr/lib/systemd/user/$unit"
+    chmod 644 "$pkgdir/usr/lib/systemd/user/$unit"
+  done
+
+  install -Dm644 "$_root/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 "$_root/CHANGELOG.md" "$pkgdir/usr/share/doc/$pkgname/CHANGELOG.md"
+}

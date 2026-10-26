@@ -26,6 +26,11 @@ valetkey doctor
 above without running them. The socket starts the daemon when a client connects. `valetkey doctor`
 checks the rest of the setup and says what to fix.
 
+On Arch Linux, `cd packaging/arch && makepkg -si` builds a package that installs the units for
+you, so skip `valetkey install-units`. It downloads the locked Python dependencies, which it keeps
+in `/usr/lib/valetkey`, and needs `agent-browser` from the CachyOS repositories or the AUR package
+`agent-browser-bin`.
+
 ## Usage
 
 <!-- begin: valetkey --help -->

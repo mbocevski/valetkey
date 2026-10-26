@@ -16,3 +16,4 @@ Changes that affect users of valetkey. The format follows
 - The `valetkey doctor` command, which checks that bubblewrap, Chromium and agent-browser are ready.
 - The `valetkey mcp` command, an MCP server that gives a client browser tools for the sites you have logged in to.
 - The `valetkey daemon` command, which runs the background process that owns your sessions and logins.
+- A `PKGBUILD` in `packaging/arch` that builds an Arch Linux package with the daemon's systemd units.

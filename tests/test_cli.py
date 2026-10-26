@@ -709,6 +709,23 @@ def test_install_units_writes_both_files_and_prints_the_next_steps(
     ]
 
 
+@pytest.mark.usefixtures("units_home")
+def test_install_units_says_when_it_overrides_packaged_units(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    packaged = tmp_path / "packaged"
+    packaged.mkdir()
+    monkeypatch.setattr(cli, "SYSTEM_UNIT_DIRS", (packaged,))
+    assert f"units in {packaged}" not in run(capsys, "install-units")[1]
+    for name in cli.UNIT_NAMES:
+        (packaged / name).write_text("x", encoding="utf-8")
+    out = run(capsys, "install-units")[1]
+    assert f"Note: the units in {packaged} are replaced by these copies." in out
+    assert out.index("Note:") < out.index("To start the daemon")
+
+
 def test_install_units_replaces_its_own_files(
     units_home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -814,6 +831,7 @@ class FakeSystem:
         self.environ: dict[str, str] = {"XDG_RUNTIME_DIR": "/run/user/1000"}
         self.display: Path | cli.login.DisplayError = Path("/run/user/1000/wayland-1")
         self.units = tmp_path / "units"
+        self.system_units: tuple[Path, ...] = ()
         self.calls: list[list[str]] = []
         for key, value in overrides.items():
             setattr(self, key, value)
@@ -838,7 +856,7 @@ class FakeSystem:
             run=self.run,
             environ=self.environ,
             wayland=self.wayland,
-            units=self.units,
+            unit_dirs=(self.units, *self.system_units),
         )
 
 
@@ -937,12 +955,38 @@ def test_doctor_reports_installed_units_and_an_active_socket(tmp_path: Path) -> 
     assert found["socket"] == ("info", "valetkeyd.socket is active")
 
 
+def test_doctor_finds_units_a_package_installed(tmp_path: Path) -> None:
+    packaged = tmp_path / "usr-lib-systemd-user"
+    packaged.mkdir()
+    for name in cli.UNIT_NAMES:
+        (packaged / name).write_text("x", encoding="utf-8")
+    fake = FakeSystem(tmp_path, system_units=(tmp_path / "etc-empty", packaged))
+    assert results(fake)["units"] == ("info", f"systemd units installed in {packaged}")
+    # One file of the two is not an installation.
+    (packaged / "valetkeyd.service").unlink()
+    assert results(fake)["units"][1].startswith("systemd units not installed")
+
+
+def test_doctor_prefers_the_units_in_the_user_directory(tmp_path: Path) -> None:
+    packaged = tmp_path / "packaged"
+    fake = FakeSystem(tmp_path, system_units=(packaged,))
+    for directory in (fake.units, packaged):
+        directory.mkdir()
+        for name in cli.UNIT_NAMES:
+            (directory / name).write_text("x", encoding="utf-8")
+    assert results(fake)["units"][1] == f"systemd units installed in {fake.units}"
+
+
 def test_doctor_when_systemd_cannot_be_reached(tmp_path: Path) -> None:
     fake = FakeSystem(tmp_path)
     fake.outputs["systemctl --user is-active valetkeyd.socket"] = (-1, "no such file")
     assert results(fake)["socket"] == ("info", "systemd user session not reachable")
     fake.outputs["systemctl --user is-active valetkeyd.socket"] = (1, "")
     assert results(fake)["socket"] == ("info", "systemd user session not reachable")
+    fake.outputs["systemctl --user is-active valetkeyd.socket"] = (1, "Failed to connect to bus")
+    assert results(fake)["socket"] == ("info", "systemd user session not reachable")
+    fake.outputs["systemctl --user is-active valetkeyd.socket"] = (4, "inactive\n")
+    assert results(fake)["socket"] == ("info", "valetkeyd.socket is inactive")
 
 
 def test_doctor_command_output_and_exit_status(
@@ -996,7 +1040,8 @@ def test_default_system_asks_the_machine(tmp_path: Path) -> None:
     assert cli._run([str(tmp_path / "missing")])[0] == -1  # noqa: SLF001
     system = cli.System()
     assert system.which("sh") is not None
-    assert system.units.name == "user"
+    assert system.unit_dirs[0].name == "user"
+    assert system.unit_dirs[1:] == cli.SYSTEM_UNIT_DIRS
 
 
 # -- the units under real systemd ----------------------------------------------------------

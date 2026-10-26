@@ -373,6 +373,8 @@ UNIT_MARKER = "# Written by `valetkey install-units`."
 """The first words of every unit file valetkey writes. A file without them is not valetkey's."""
 EXECUTABLE_PLACEHOLDER = "@EXECUTABLE@"
 SOCKET_UNIT = "valetkeyd.socket"
+SYSTEM_UNIT_DIRS = (Path("/etc/systemd/user"), Path("/usr/lib/systemd/user"))
+"""Where a package puts the units. Files in the person's own directory take precedence."""
 NEXT_COMMANDS = (
     "systemctl --user daemon-reload",
     f"systemctl --user enable --now {SOCKET_UNIT}",
@@ -479,6 +481,11 @@ def install_units(
     for name, text in files.items():
         (directory / name).write_text(text, encoding="utf-8")
         _say(f"Wrote {directory / name}")
+    packaged = next(
+        (d for d in SYSTEM_UNIT_DIRS if all((d / name).is_file() for name in UNIT_NAMES)), None
+    )
+    if packaged is not None:
+        _say(f"\nNote: the units in {packaged} are replaced by these copies.")
     _say("\nTo start the daemon, run:\n")
     for command in NEXT_COMMANDS:
         _say(f"    {command}")
@@ -519,7 +526,9 @@ class System:
     run: Callable[[Sequence[str]], tuple[int, str]] = _run
     environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
     wayland: Callable[[], Path] = login.find_wayland_socket
-    units: Path = field(default_factory=lambda: unit_directory(sites.roots_from_env()))
+    unit_dirs: tuple[Path, ...] = field(
+        default_factory=lambda: (unit_directory(sites.roots_from_env()), *SYSTEM_UNIT_DIRS)
+    )
 
 
 def _last_line(text: str) -> str:
@@ -610,16 +619,22 @@ def check_display(system: System) -> Check:
 
 
 def check_units(system: System) -> list[Check]:
-    """Report, without judging, whether the units are installed and the socket is active."""
-    missing = [name for name in UNIT_NAMES if not (system.units / name).is_file()]
-    if missing:
+    """Report, without judging, whether the units are installed and the socket is active.
+
+    ``systemctl is-active`` exits 0 for active, 3 for any other state and 4 for an unknown unit.
+    Any other status means it could not ask the user manager.
+    """
+    found = next(
+        (d for d in system.unit_dirs if all((d / name).is_file() for name in UNIT_NAMES)), None
+    )
+    if found is None:
         installed = Check(
             "units", "info", "systemd units not installed; run `valetkey install-units`"
         )
     else:
-        installed = Check("units", "info", f"systemd units installed in {system.units}")
+        installed = Check("units", "info", f"systemd units installed in {found}")
     status, output = system.run(["systemctl", "--user", "is-active", SOCKET_UNIT])
-    if status == -1 or not output.strip():
+    if status not in (0, 3, 4) or not output.strip():
         detail = "systemd user session not reachable"
     else:
         detail = f"{SOCKET_UNIT} is {_last_line(output)}"
