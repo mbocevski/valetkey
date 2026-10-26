@@ -3104,3 +3104,21 @@ def test_a_session_closed_for_lack_of_use_is_an_answer_not_an_error(short_dir: P
             assert text_of(click) == said
 
     asyncio.run(scenario())
+
+
+def test_a_login_that_failed_after_closing_the_session_tells_the_agent(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _):
+            fake.handlers["login"] = lambda _a: fail(
+                "no_display", "no Wayland display was found", {"closed_session": True}
+            )
+            result = await mcp.call_tool("browser_login", {"site_or_url": "sitex"})
+            assert result.is_error
+            text = text_of(result)
+            assert "no_display: no Wayland display was found" in text
+            assert "The running session was closed to open the login" in text
+            fake.handlers["login"] = lambda _a: fail("no_display", "no Wayland display was found")
+            plain = text_of(await mcp.call_tool("browser_login", {"site_or_url": "sitex"}))
+            assert "running session" not in plain
+
+    asyncio.run(scenario())

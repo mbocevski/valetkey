@@ -576,6 +576,13 @@ def _download_entry(item: downloads.Download) -> dict[str, Any]:
     return {"path": untrusted(str(item.path)), "size": item.size, "mime": item.mime}
 
 
+def _closed_for_login(error: Exception) -> DaemonError:
+    """Return ``error`` as the daemon would answer it, saying the running session was closed."""
+    mapped = map_error(error)
+    mapped.details = mapped.details | {"closed_session": True}
+    return mapped
+
+
 def _idle_message(site: str, minutes: int) -> str:
     noun = "minute" if minutes == 1 else "minutes"
     return (
@@ -686,7 +693,9 @@ class Daemon:
     how often each session's browser is checked. ``display_starter`` makes the private display of
     a login shown in a web browser (:func:`valetkey.display.start_display`). ``idle_limit`` is
     how many seconds a session may go unused, instead of the config file's
-    ``session_idle_minutes``, and ``idle_clock`` tells the time for it.
+    ``session_idle_minutes``, and ``idle_clock`` tells the time for it. ``screen_finder`` looks
+    for the person's screen (:func:`valetkey.login.find_wayland_socket`), to know whether a login
+    window could open before a running session is closed for it.
     """
 
     def __init__(  # noqa: PLR0913 - each is a seam the tests replace
@@ -709,6 +718,7 @@ class Daemon:
         display_starter: DisplayStarter = display.start_display,
         idle_limit: float | None = None,
         idle_clock: Callable[[], float] = time.monotonic,
+        screen_finder: Callable[[], Path] = login.find_wayland_socket,
     ) -> None:
         """Create a daemon for the directories in ``roots``. Nothing listens until :func:`run`."""
         self.roots = roots
@@ -731,6 +741,7 @@ class Daemon:
         )
         self._idle_given = idle_limit is not None
         self._idle_clock = idle_clock
+        self._screen_finder = screen_finder
         self._watchers: set[_Watcher] = set()
         self._bridges: dict[str, _RegisteredBridge] = {}
         self._monitor: asyncio.Task[None] | None = None
@@ -1470,7 +1481,9 @@ class Daemon:
             closed = state.kind == "session"
             if closed:
                 # A login is usually wanted because the saved one expired, with the session
-                # still open, so close it the way ``close`` does.
+                # still open. Close it the way ``close`` does, but only if a window can open:
+                # with no screen to use, the session is left running.
+                await self._require_screen()
                 await self._end(state)
             if state.kind == "login":
                 _fail("login_in_progress", f"a login window for {site} is already open")
@@ -1481,6 +1494,11 @@ class Daemon:
                 state.window, state.shown = await self._open_window(
                     state, site, start, existing.private_networks if existing else ()
                 )
+            except Exception as error:
+                state.kind = "idle"
+                if closed:
+                    raise _closed_for_login(error) from error
+                raise
             except BaseException:
                 state.kind = "idle"
                 raise
@@ -1495,6 +1513,22 @@ class Daemon:
         if state.shown is not None:
             result["remote"] = display.describe(state.shown)
         return result
+
+    async def _require_screen(self) -> None:
+        """Raise the login's own refusal unless some route to a login window is there.
+
+        The routes are the person's screen, a connected bridge when the config allows one, and a
+        web browser when the config allows that (see :meth:`_open_window`).
+
+        Raises:
+            login.DisplayError: when there is none, as opening the window would.
+
+        """
+        try:
+            await asyncio.to_thread(self._screen_finder)
+        except login.DisplayError:
+            if await self._bridge_for_login() is None and not await self._novnc_enabled():
+                raise
 
     async def _open_window(
         self, state: _Site, site: str, start: str, networks: Sequence[str]

@@ -494,6 +494,8 @@ def error_text(error: DaemonError) -> str:
     """Return the text of a tool error: the daemon's code and message, and any refused hosts."""
     own, output = _split_output(error)
     text = f"{error.code}: {own}"
+    if error.details.get("closed_session"):
+        text += "\nThe running session was closed to open the login, and it is not running now."
     if output:
         text += f"\n{program_output(output)}"
     refused = error.details.get("refused")

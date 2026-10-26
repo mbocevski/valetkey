@@ -217,7 +217,7 @@ class FakeSession:
         self.alive = True
         self.closed = 0
         self.calls: list[tuple[Any, ...]] = []
-        self.fail: Exception | None = None
+        self.fail: BaseException | None = None
         self.close_error: Exception | None = None
         self.texts: list[str] = []
         self.on_click: Callable[[], None] | None = None
@@ -340,7 +340,7 @@ class Factory:
     def __init__(self) -> None:
         self.made: list[FakeSession] = []
         self.calls: list[tuple[str, str, Path]] = []
-        self.fail: Exception | None = None
+        self.fail: BaseException | None = None
         self.delay = 0.0
         self.during_start: Callable[[Path], None] | None = None
         self.landing: str | None = None
@@ -394,7 +394,7 @@ class Logins:
 
     def __init__(self) -> None:
         self.windows: list[FakeWindow] = []
-        self.fail: Exception | None = None
+        self.fail: BaseException | None = None
         self.options: list[dict[str, Any]] = []
 
     async def __call__(
@@ -457,6 +457,7 @@ async def serving(roots: sites.Roots, **options: Any) -> AsyncGenerator[Rig]:  #
         "download_settle": 0,
         "poll_interval": 3600,
         "idle_limit": 900.0,
+        "screen_finder": lambda: Path("/run/wayland-test"),
         "user_environment": dict,
         "proxy_options": {"resolver": no_answer},
     } | options
@@ -1057,6 +1058,90 @@ def test_login_targets(roots: sites.Roots) -> None:
             assert (await c.call("login", target="sitex.test"))["site"] == "sitex"
             await c.call("close", site="sitex")
             assert (await c.call("login", target="sitex.org"))["site"] == "sitex-2"
+
+    run(scenario())
+
+
+def write_config(roots: sites.Roots, text: str) -> None:
+    folder = roots.config / "valetkey"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / approvals.CONFIG_NAME).write_text(text, encoding="utf-8")
+
+
+def no_screen() -> Path:
+    message = "no Wayland display was found"
+    raise login.NoDisplayError(message)
+
+
+def test_a_login_with_no_screen_leaves_the_running_session_alone(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots, screen_finder=no_screen) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("login", target="sitex")
+            assert info.value.code == "no_display"
+            assert "closed_session" not in info.value.details
+            assert not rig.factory.made[0].closed
+            assert (await c.call("status", site="sitex"))["state"] == "session"
+            assert rig.logins.windows == []
+
+    run(scenario())
+
+
+def test_a_login_on_a_laptop_or_in_a_browser_closes_the_session_though_there_is_no_screen(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    write_config(roots, '{"remote_logins": {"novnc": true}}')
+
+    async def scenario() -> None:
+        async with serving(roots, screen_finder=no_screen) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            # The routes after the screen are the starter's business; here it just has to try.
+            opened = await c.call("login", target="sitex")
+            assert opened["closed_session"] is True
+
+    run(scenario())
+
+
+def test_a_login_window_that_fails_after_the_session_closed_says_so(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            rig.logins.fail = login.DisplayError("the screen went away")
+            with pytest.raises(DaemonError) as info:
+                await c.call("login", target="sitex")
+            assert info.value.code == "no_display"
+            assert info.value.details["closed_session"] is True
+            assert rig.factory.made[0].closed
+            assert (await c.call("status", site="sitex"))["state"] == "idle"
+            # With no session to close, the error says nothing of one.
+            with pytest.raises(DaemonError) as again:
+                await c.call("login", target="sitex")
+            assert "closed_session" not in again.value.details
+
+    run(scenario())
+
+
+class Stopped(BaseException):
+    pass
+
+
+def test_a_login_that_is_cancelled_while_its_window_opens_leaves_the_site_idle(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            rig.logins.fail = Stopped()
+            with pytest.raises(Stopped):
+                await rig.daemon._op_login(daemon._Connection(), {"target": "sitex"})  # noqa: SLF001
+            assert (await c.call("status", site="sitex"))["state"] == "idle"
 
     run(scenario())
 
@@ -4365,7 +4450,7 @@ class FakeDisplays:
 
     def __init__(self) -> None:
         self.made: list[FakeDisplay] = []
-        self.fail: Exception | None = None
+        self.fail: BaseException | None = None
 
     async def __call__(self, roots: sites.Roots, site: str) -> FakeDisplay:
         if self.fail is not None:
