@@ -74,6 +74,14 @@ _ACCEPT_TURNS = 5
 transport, the protocol's connection_made, then the handler task's first step."""
 _PLAIN_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"})
 _DROPPED_HEADERS = frozenset({b"host", b"connection", b"proxy-connection", b"keep-alive"})
+_ALSO_REFUSED = tuple(
+    ipaddress.ip_network(text)
+    for text in (
+        "192.88.99.0/24",  # 6to4 relay address, deprecated (RFC 7526) and still routed by some
+        "fec0::/10",  # site-local IPv6, deprecated (RFC 3879) but still a private range to some
+    )
+)
+"""Ranges Python's ``ipaddress`` calls global although they are not meant to be reached."""
 PRIVATE_ADDRESS = "resolves to a private address"
 """The reason given for an address the proxy will not connect to."""
 NOT_ALLOWED = "not in the allow list"
@@ -268,6 +276,7 @@ def address_refusal(address: str) -> str | None:
         or ip.is_multicast
         or ip.is_reserved
         or not ip.is_global
+        or any(ip.version == network.version and ip in network for network in _ALSO_REFUSED)
     )
     return PRIVATE_ADDRESS if blocked else None
 

@@ -42,6 +42,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- The proxy refuses site-local IPv6 addresses (`fec0::/10`) and the 6to4 relay range, which it let through before.
 - A page can no longer stall every site by asking for many host names while name lookups are slow. A lookup over 5 seconds counts as a host that does not resolve.
 - A browser session no longer falls back to a browser outside the sandbox when the sandboxed browser driver stops; the call fails and the session ends instead.
 - The install instructions name the ways valetkey ships, the Arch package and `uv tool install .` from a checkout, and commands, MCP tools and security have pages in `docs/`.

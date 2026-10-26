@@ -2,6 +2,7 @@
 import asyncio
 import contextlib
 import gc
+import ipaddress
 import logging
 import socket
 import stat
@@ -1369,3 +1370,109 @@ def test_the_proxy_closes_its_own_resolver_and_leaves_one_it_was_given(sock: Pat
     run(scenario())
     with pytest.raises(RuntimeError, match="shutdown"):
         run(own._resolver("sitex.test", 443))  # noqa: SLF001
+
+
+# -- every special-purpose range ---------------------------------------------------------------
+
+# The IANA special-purpose address registries (RFC 6890 and the documents that update it), less
+# the entries whose "Globally Reachable" column is True. The last two are deprecated ranges the
+# registry no longer lists as reachable.
+SPECIAL_RANGES = (
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.0.0.0/29",
+    "192.0.0.8/32",
+    "192.0.0.170/32",
+    "192.0.0.171/32",
+    "192.0.2.0/24",
+    "192.88.99.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+    "255.255.255.255/32",
+    "::/128",
+    "::1/128",
+    "::ffff:0:0/96",
+    "64:ff9b::/96",
+    "64:ff9b:1::/48",
+    "100::/64",
+    "100:0:0:1::/64",
+    "2001::/23",
+    "2001::/32",
+    "2001:1::3/128",
+    "2001:2::/48",
+    "2001:10::/28",
+    "2001:db8::/32",
+    "2002::/16",
+    "3fff::/20",
+    "5f00::/16",
+    "fc00::/7",
+    "fe80::/10",
+    "fec0::/10",
+    "ff00::/8",
+)
+REACHABLE_RANGES = (
+    "192.0.0.9/32",
+    "192.0.0.10/32",
+    "192.31.196.0/24",
+    "192.52.193.0/24",
+    "192.175.48.0/24",
+    "2001:1::1/128",
+    "2001:1::2/128",
+    "2001:3::/32",
+    "2001:4:112::/48",
+    "2001:20::/28",
+    "2001:30::/28",
+)
+NEVER_LISTABLE = (
+    "0.0.0.0/32",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+    "255.255.255.255/32",
+    "::/128",
+    "::1/128",
+    "fe80::/10",
+    "ff00::/8",
+)
+
+
+@pytest.mark.parametrize("text", SPECIAL_RANGES)
+def test_every_special_purpose_range_is_refused(text: str) -> None:
+    network = ipaddress.ip_network(text)
+    for address in (
+        network[0],
+        network[1] if network.num_addresses > 1 else network[0],
+        network[-1],
+    ):
+        assert address_refusal(str(address)) is not None, address
+
+
+@pytest.mark.parametrize("text", REACHABLE_RANGES)
+def test_a_globally_reachable_special_purpose_range_is_not_refused(text: str) -> None:
+    assert address_refusal(str(ipaddress.ip_network(text)[0])) is None
+
+
+@pytest.mark.parametrize("text", NEVER_LISTABLE)
+def test_a_range_that_is_never_allowed_stays_refused_when_listed(text: str) -> None:
+    network = ipaddress.ip_network(text)
+    assert not proxy_module.private_address_allowed(str(network[-1]), [text])
+    assert not proxy_module.private_address_allowed(str(network[0]), [text])
+
+
+@pytest.mark.parametrize(
+    ("text", "address"),
+    [("10.0.0.0/8", "10.1.2.3"), ("fc00::/7", "fd12::1"), ("100.64.0.0/10", "100.100.1.1")],
+)
+def test_a_private_range_is_allowed_when_listed(text: str, address: str) -> None:
+    assert address_refusal(address) is not None
+    assert proxy_module.private_address_allowed(address, [text])
