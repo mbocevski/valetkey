@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from valetkey import __version__, cli, sites
+from valetkey import __version__, cli, daemon, sites
 from valetkey.cli import main
 
 
@@ -523,3 +523,35 @@ def test_command_help_names_the_options(capsys: pytest.CaptureFixture[str]) -> N
     with pytest.raises(SystemExit) as exit_info:
         main(["allow", "onlyone"])
     assert exit_info.value.code == 2
+
+
+def test_daemon_command_runs_the_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: list[object] = []
+
+    async def fake_run(server: object, socket_path: Path | None) -> int:
+        seen.append((type(server).__name__, socket_path))
+        return 0
+
+    monkeypatch.setattr(daemon, "run", fake_run)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert main(["daemon", "--socket", str(tmp_path / "d.sock")]) == 0
+    assert main(["daemon"]) == 0
+    assert seen == [("Daemon", tmp_path / "d.sock"), ("Daemon", None)]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        daemon.AlreadyRunningError("valetkeyd is already running"),
+        sites.RuntimeDirUnavailableError("no runtime dir"),
+    ],
+)
+def test_daemon_command_reports_why_it_cannot_start(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], error: Exception
+) -> None:
+    async def fake_run(_server: object, _socket_path: Path | None) -> int:
+        raise error
+
+    monkeypatch.setattr(daemon, "run", fake_run)
+    assert main(["daemon"]) == 1
+    assert str(error) in capsys.readouterr().err

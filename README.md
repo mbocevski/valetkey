@@ -22,6 +22,7 @@ A logged-in browser for MCP clients, contained to the sites it may reach.
 
 Commands:
   allow: Allow a host, and its subdomains, for a site.
+  daemon: Run the valetkeyd daemon in the foreground.
   deny: Stop allowing a host for a site.
   forget: Delete a site's policy, login profile and downloads.
   sites: List the sites valetkey knows.

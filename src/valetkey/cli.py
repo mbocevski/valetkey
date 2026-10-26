@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """The ``valetkey`` command."""
 
+import asyncio
 import contextlib
 import json
+import logging
 import os
 import shutil
 import sys
-from pathlib import Path
+from pathlib import Path  # the command-line framework reads the annotation at runtime
 from typing import TYPE_CHECKING, Annotated
 
 from cyclopts import App, Parameter
 
-from valetkey import __version__, sites
+from valetkey import __version__, daemon, sites
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -330,6 +332,25 @@ def forget(site: str, *, yes: Annotated[bool, Parameter(name="--yes", negative="
                 path.unlink()
     _say(f"Forgot {site}.")
     return 0
+
+
+@app.command(name="daemon")
+def run_daemon(
+    *, socket: Annotated[Path | None, Parameter(help="Listen on this socket path.")] = None
+) -> int:
+    """Run the valetkeyd daemon in the foreground.
+
+    It owns every session for the user. It listens on a Unix socket in the runtime directory
+    until it gets SIGTERM or SIGINT.
+    Under systemd socket activation it uses the socket systemd passes in.
+    """
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="valetkeyd: %(message)s")
+    try:
+        server = daemon.Daemon(sites.roots_from_env())
+        return asyncio.run(daemon.run(server, socket))
+    except (daemon.AlreadyRunningError, sites.RuntimeDirUnavailableError) as error:
+        sys.stderr.write(f"valetkeyd: {error}\n")
+        return 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:

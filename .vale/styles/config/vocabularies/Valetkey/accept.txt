@@ -1,4 +1,5 @@
 valetkey
+valetkeyd
 [Aa]llowlist(s|ed|ing)?
 argv
 [Bb]ubblewrap
