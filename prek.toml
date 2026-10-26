@@ -56,6 +56,9 @@ name = "vale"
 language = "system"
 entry = "uv run --frozen vale"
 files = '\.(md|py)$'
+# The first run downloads the vale binary into the virtual environment. Prek splits the files
+# over several processes at once, and two of them would download it together.
+require_serial = true
 
 [[repos.hooks]]
 id = "zizmor"
