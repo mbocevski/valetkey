@@ -34,21 +34,38 @@ import secrets
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 from urllib.parse import urlsplit
 
-from mcp.server.mcpserver import Context, Image, MCPServer
+from mcp.server.mcpserver import (
+    AcceptedElicitation,
+    CancelledElicitation,
+    Context,
+    DeclinedElicitation,
+    Elicit,
+    ElicitationResult,
+    Image,
+    MCPServer,
+    Resolve,
+)
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp_types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from mcp_types import (
+    ElicitRequest,
+    ElicitRequestURLParams,
+    InputRequiredResult,
+    ToolAnnotations,
+)
+from mcp_types.version import is_version_at_least
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from valetkey import approvals, client, login, sites
 from valetkey.client import Client, DaemonError
 from valetkey.proxy import PRIVATE_ADDRESS
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -619,6 +636,10 @@ class Bridge:
 
 # -- the tools -------------------------------------------------------------------------------
 
+MAX_HOSTS = 10
+"""How many hosts one ``browser_allow`` call may ask about."""
+
+
 DESCRIPTIONS = {
     "browser_sites": (
         "List the sites the person has set up: each one's state (no session, login window open "
@@ -684,14 +705,15 @@ DESCRIPTIONS = {
     ),
     "browser_screenshot": "Take a screenshot of the page and return it as an image.",
     "browser_allow": (
-        "Ask the person to let a site's browser reach one more host. Only a host that was "
-        "refused for the site, or left out when they logged in, can be asked about; give one "
-        "exact host name per call, no wildcards or URLs. Nothing is allowed unless the person "
-        "says yes. Results: allowed (the next navigation to the host will load); denied (the "
-        "person said no: never ask again for that host); expired (no answer: you may ask "
-        "again); could_not_ask (nobody could be asked from here: tell the person to run the "
-        "command in the result); not_eligible (it cannot be asked about). Your reason is shown "
-        "to the person as your claim, not as fact."
+        "Ask the person to let a site's browser reach more hosts. Only a host that was refused "
+        "for the site, or left out when they logged in, can be asked about; give up to "
+        f"{MAX_HOSTS} exact host names in one call, no wildcards or URLs, and the person ticks "
+        "the ones they allow. Nothing is allowed unless the person says yes. Each host gets a "
+        "result: allowed (the next navigation to the host will load); denied (the person said "
+        "no: never ask again for that host); expired (no answer: you may ask again); "
+        "could_not_ask (nobody could be asked from here: tell the person to run the command in "
+        "the result); not_eligible (it cannot be asked about). Your reason is shown to the "
+        "person as your claim, not as fact."
     ),
     "browser_close": (
         "End the site's browser. The login stays saved, so browser_open works again later."
@@ -700,10 +722,34 @@ DESCRIPTIONS = {
 """What the model reads about each tool."""
 
 
-class _Confirm(BaseModel):
-    """The one question put to the person."""
+def _choices(hosts: Sequence[str]) -> type[BaseModel]:
+    """Return the form that asks about ``hosts``: one checkbox each, ticked, in the given order.
 
-    allow: bool = Field(default=True, description="Allow this host for this site.")
+    The questions of one call render the same on every round, as the protocol needs.
+    """
+    fields: dict[str, Any] = {
+        f"host_{number}": (
+            bool,
+            Field(default=True, title=host, description="Allow this host for this site."),
+        )
+        for number, host in enumerate(hosts)
+    }
+    return create_model("Choices", **fields)
+
+
+@dataclass(frozen=True, slots=True)
+class _Plan:
+    """What a ``browser_allow`` call has to do: hosts to put to the person, and those settled.
+
+    ``settled`` maps a host to its finished result text (not eligible, already allowed, already
+    refused by the person). ``ask`` pairs each host that is to be asked with "seen during login".
+    """
+
+    site: str
+    reason: str
+    order: tuple[str, ...]
+    settled: dict[str, str]
+    ask: tuple[tuple[str, bool], ...]
 
 
 ELICIT_SECONDS = 300.0
@@ -739,49 +785,89 @@ def can_elicit_url(ctx: Context) -> bool:
     return elicitation is not None and elicitation.url is not None
 
 
-async def show_link(ctx: Context, site: str, remote: dict[str, Any]) -> bool:
-    """Show the person the link of a login in a browser, through the client; ``True`` if it did.
+LINK_KEY = "login-link"
+"""The name of the question that carries the login link, in a result that asks for input."""
+_INPUT_REQUIRED_VERSION = "2026-07-28"
 
-    The link is a credential that gives control of a window where a password is typed, so it
-    goes to the person through URL-mode elicitation, which does not pass through the model, and
-    never into a tool result. ``False`` means the client cannot show it, or failed to.
+
+def uses_input_required(ctx: Context) -> bool:
+    """Tell whether this connection asks the person through a result that asks for input.
+
+    From protocol 2026-07-28 on, a server cannot send a request in the middle of a call; it
+    returns what it needs, and the client asks the person and calls again.
     """
-    if not can_elicit_url(ctx):
-        return False
-    message = (
+    version = ctx.protocol_version
+    return version is not None and is_version_at_least(version, _INPUT_REQUIRED_VERSION)
+
+
+def _link_message(site: str, remote: dict[str, Any]) -> str:
+    return (
         f"Sign in to {site}. This machine has no screen, so the login window is shown in a web "
         f"browser. On the machine you are at, first run: {remote['ssh']}\n"
         "The link works once, for ten minutes."
     )
+
+
+def link_request(site: str, remote: dict[str, Any]) -> ElicitRequest:
+    """Return the request that asks a client to show the person the login link."""
+    return ElicitRequest(
+        params=ElicitRequestURLParams(
+            message=_link_message(site, remote),
+            url=remote["url"],
+            elicitation_id=secrets.token_urlsafe(16),
+        )
+    )
+
+
+def _login_state(ctx: Context) -> str | None:
+    """Return the site named by the state of a login's second round, or ``None`` on the first."""
+    state = ctx.request_state
+    if state is None:
+        return None
+    try:
+        site = json.loads(state)["site"]
+    except ValueError, KeyError, TypeError:
+        return None
+    return site if isinstance(site, str) else None
+
+
+def _remote_login_text(site: str, *, shown: bool) -> str:
+    """Say what happened to a login in a web browser, and what the agent should tell the person."""
+    if shown:
+        how = "The link was shown to the person in their client, not to you. Ask them to open it"
+    else:
+        how = (
+            "The person can open it with `valetkey status` on this machine, which shows the "
+            "link and the command that reaches it. Ask them to run that"
+        )
+    return (
+        f"No screen is available here, so the {site} login window is on a private display that "
+        f"the person opens in a web browser. {how}, sign in and close the browser window when "
+        "they are done. The link works once, for ten minutes. Then call browser_sites to see "
+        "what was learned, and browser_open to start."
+    )
+
+
+async def show_link(ctx: Context, result: dict[str, Any], remote: dict[str, Any]) -> bool:
+    """Show the person the link of a login in a browser, through the client; ``True`` if it did.
+
+    The link is a credential that gives control of a window where a password is typed, so it
+    goes to the person through URL-mode elicitation, which does not pass through the model, and
+    never into a tool result. This is the request in the middle of a call that protocols before
+    2026-07-28 have; later ones use :func:`link_request`. ``False`` means the client cannot show
+    it, or failed to.
+    """
+    if not can_elicit_url(ctx) or uses_input_required(ctx):
+        return False
     try:
         async with asyncio.timeout(ELICIT_SECONDS):
-            await ctx.elicit_url(message, remote["url"], secrets.token_urlsafe(16))
+            await ctx.elicit_url(
+                _link_message(result["site"], remote), remote["url"], secrets.token_urlsafe(16)
+            )
     except Exception:
         logger.warning("the client could not show the login link", exc_info=True)
         return False
     return True
-
-
-async def _elicit(ctx: Context, message: str) -> Literal["yes", "denied", "expired"] | None:
-    """Put ``message`` to the person through the client, or return ``None`` if that can't be done.
-
-    Accepting means yes (unless the one checkbox was cleared), declining means no, and
-    dismissing or not answering in time means the question expired. A client that did not
-    declare the capability, or that fails to show the form, leaves the next channel to try.
-    """
-    if not can_elicit(ctx):
-        return None
-    try:
-        async with asyncio.timeout(ELICIT_SECONDS):
-            answer = await ctx.elicit(message, _Confirm)
-    except TimeoutError:
-        return "expired"
-    except Exception:
-        logger.warning("the client could not show the question", exc_info=True)
-        return None
-    if answer.action == "accept":
-        return "yes" if answer.data.allow else "denied"
-    return "denied" if answer.action == "decline" else "expired"
 
 
 class _Tools:
@@ -790,6 +876,7 @@ class _Tools:
     def __init__(self, bridge: Bridge) -> None:
         self._bridge = bridge
         self._denied: set[tuple[str, str]] = set()
+        self.browser_allow = self._allow_tool()
 
     async def _ask(self, op: str, **args: Any) -> dict[str, Any]:  # noqa: ANN401 - JSON values
         try:
@@ -807,27 +894,19 @@ class _Tools:
         ],
         ctx: Context,
         account: ACCOUNT = None,
-    ) -> str:
+    ) -> str | InputRequiredResult:
         arguments = {"account": account} if account else {}
+        if (site := _login_state(ctx)) is not None:
+            # The second round of a login whose link the client was asked to show.
+            return _remote_login_text(site, shown=LINK_KEY in (ctx.input_responses or {}))
         result = await self._ask("login", target=site_or_url, **arguments)
         if remote := result.get("remote"):
-            if await show_link(ctx, result["site"], remote):
-                how = (
-                    "The link was shown to the person in their client, not to you. Ask them to "
-                    "open it"
+            if can_elicit_url(ctx) and uses_input_required(ctx):
+                return InputRequiredResult(
+                    input_requests={LINK_KEY: link_request(result["site"], remote)},
+                    request_state=json.dumps({"site": result["site"]}),
                 )
-            else:
-                how = (
-                    "The person can open it with `valetkey status` on this machine, which shows "
-                    "the link and the command that reaches it. Ask them to run that"
-                )
-            return (
-                f"No screen is available here, so the {result['site']} login window is on a "
-                f"private display that the person opens in a web browser. {how}, sign in and "
-                "close the browser window when they are done. The link works once, for ten "
-                "minutes. Then call browser_sites to see what was learned, and browser_open to "
-                "start."
-            )
+            return _remote_login_text(result["site"], shown=await show_link(ctx, result, remote))
         where = "laptop" if result.get("route") == "bridge" else "screen"
         return (
             f"A login window for {result['site']} is open on the person's {where}. Ask them to "
@@ -953,39 +1032,131 @@ class _Tools:
             raise ToolError(message) from error
         return [envelope_text(result), Image(data=data, format="png")]
 
-    async def browser_allow(
-        self,
-        site: SITE,
-        host: Annotated[str, Field(description="One exact host name, such as cdn.example.com.")],
-        reason: Annotated[str, Field(description="Why the page needs it, for the person.")],
-        ctx: Context,
-    ) -> str:
-        try:
-            name = approvals.validate_host(host)
-        except ValueError as error:
-            raise ToolError(str(error)) from error
-        checked = await self._ask("allow_check", site=site, host=name)
-        if checked["status"] != "eligible":
-            status = "allowed" if checked["status"] == "already_allowed" else checked["status"]
-            return allow_text(status, name, checked["message"], site)
-        if checked["denied"] or (site, name) in self._denied:
-            return allow_text("denied", name, "The person already said no.", site)
-        message = approvals.prompt_text(
-            site, name, checked["seen_during_login"], approvals.sanitize_reason(reason)
-        )
-        verdict = await _elicit(ctx, message)
-        if verdict == "yes":
-            granted = await self._ask("allow_apply", site=site, host=name, channel="elicitation")
-            return allow_text(granted["result"], name, granted["message"], site)
-        if verdict == "denied":
-            self._denied.add((site, name))
-            return allow_text("denied", name, "The person said no.", site)
-        if verdict == "expired":
-            return allow_text("expired", name, "The question was dismissed.", site)
-        answered = await self._ask("allow_ask", site=site, host=name, reason=reason)
+    def _allow_tool(self) -> Callable[..., Awaitable[str]]:
+        """Build the ``browser_allow`` function and the resolvers it uses.
+
+        The question to the person is a resolver (see the SDK's ``resolve`` module), not a
+        call of ``ctx.elicit``: from protocol 2026-07-28 on a server cannot ask in the middle of
+        a call, and the SDK turns the question of a resolver into the form the negotiated protocol
+        has, a request in the middle of the call before it and a result that asks for input
+        after it. The resolvers run again on every round, so they only read.
+        """
+
+        async def plan(
+            site: SITE,
+            hosts: list[str],
+            reason: str,
+        ) -> _Plan:
+            return await self._plan(site, hosts, reason)
+
+        async def question(
+            planned: Annotated[_Plan, Resolve(plan)], ctx: Context
+        ) -> Elicit[BaseModel] | None:
+            if not planned.ask or not can_elicit(ctx):
+                return None
+            hosts = [host for host, _seen in planned.ask]
+            if len(planned.ask) == 1:
+                message = approvals.prompt_text(
+                    planned.site, hosts[0], planned.ask[0][1], planned.reason
+                )
+            else:
+                message = approvals.prompt_text_many(planned.site, planned.ask, planned.reason)
+            return Elicit(message, _choices(hosts))
+
+        async def browser_allow(
+            site: SITE,
+            hosts: Annotated[
+                list[str],
+                Field(
+                    min_length=1,
+                    max_length=MAX_HOSTS,
+                    description=(
+                        f"Up to {MAX_HOSTS} exact host names, such as cdn.example.com. "
+                        "No wildcards or URLs."
+                    ),
+                ),
+            ],
+            reason: Annotated[str, Field(description="Why the page needs them, for the person.")],
+            planned: Annotated[_Plan, Resolve(plan)],
+            answer: Annotated[ElicitationResult[BaseModel], Resolve(question)],
+        ) -> str:
+            del site, hosts, reason  # the resolvers read them, by name
+            return await self._allow(planned, answer)
+
+        return browser_allow
+
+    async def _plan(self, site: str, hosts: list[str], reason: str) -> _Plan:
+        """Check every host with the daemon: which are settled and which are to be asked."""
+        order: list[str] = []
+        for host in hosts:
+            try:
+                name = approvals.validate_host(host)
+            except ValueError as error:
+                message = f"{host!r}: {error}"
+                raise ToolError(message) from error
+            if name not in order:
+                order.append(name)
+        settled: dict[str, str] = {}
+        ask: list[tuple[str, bool]] = []
+        resolved = site
+        for name in order:
+            checked = await self._ask("allow_check", site=site, host=name)
+            # The daemon names the account the call is about (sitex:work); that is the name the
+            # person is shown and the one a refusal is remembered under.
+            resolved = checked["site"]
+            if checked["status"] != "eligible":
+                status = "allowed" if checked["status"] == "already_allowed" else checked["status"]
+                settled[name] = allow_text(status, name, checked["message"], resolved)
+            elif checked["denied"] or (resolved, name) in self._denied:
+                settled[name] = allow_text("denied", name, "The person already said no.", resolved)
+            else:
+                ask.append((name, checked["seen_during_login"]))
+        reason_text = approvals.sanitize_reason(reason)
+        return _Plan(resolved, reason_text, tuple(order), settled, tuple(ask))
+
+    async def _allow(self, planned: _Plan, answer: ElicitationResult[BaseModel]) -> str:
+        """Carry out what the person answered, host by host, and say how each one ended."""
+        results = dict(planned.settled)
+        names = [host for host, _seen in planned.ask]
+        if isinstance(answer, AcceptedElicitation) and isinstance(answer.data, BaseModel):
+            results |= await self._apply(planned.site, names, answer.data)
+        elif isinstance(answer, DeclinedElicitation):
+            for name in names:
+                self._denied.add((planned.site, name))
+                results[name] = allow_text("denied", name, "The person said no.", planned.site)
+        elif isinstance(answer, CancelledElicitation):
+            for name in names:
+                message = "The question was dismissed."
+                results[name] = allow_text("expired", name, message, planned.site)
+        else:
+            # Nothing was put to the person: the client cannot show a question. Try the approval
+            # command, one host at a time.
+            for name in names:
+                results[name] = await self._command(planned, name)
+        if len(planned.order) == 1:
+            return results[planned.order[0]]
+        return "\n".join(f"{name}: {results[name]}" for name in planned.order)
+
+    async def _apply(self, site: str, names: list[str], boxes: BaseModel) -> dict[str, str]:
+        """Allow the hosts whose box was ticked; the others are refused, and stay refused."""
+        results: dict[str, str] = {}
+        for number, name in enumerate(names):
+            if getattr(boxes, f"host_{number}"):
+                granted = await self._ask(
+                    "allow_apply", site=site, host=name, channel="elicitation"
+                )
+                results[name] = allow_text(granted["result"], name, granted["message"], site)
+            else:
+                self._denied.add((site, name))
+                results[name] = allow_text("denied", name, "The person said no.", site)
+        return results
+
+    async def _command(self, planned: _Plan, name: str) -> str:
+        """Put one host to the approval command, if there is one, and say how it ended."""
+        answered = await self._ask("allow_ask", site=planned.site, host=name, reason=planned.reason)
         if answered["result"] == "denied":
-            self._denied.add((site, name))
-        return allow_text(answered["result"], name, answered["message"], site)
+            self._denied.add((planned.site, name))
+        return allow_text(answered["result"], name, answered["message"], planned.site)
 
     async def browser_close(self, site: SITE) -> str:
         result = await self._ask("close", site=site)

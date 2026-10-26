@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from valetkey import sites
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
     from valetkey.sites import Roots
@@ -132,6 +132,23 @@ def prompt_text(site: str, host: str, seen_during_login: bool, reason: str) -> s
     return (
         f"Allow {site} sessions to reach `{host}`?\n"
         f"Seen during login: {seen}\n"
+        f"The agent says: {claim}"
+    )
+
+
+def prompt_text_many(site: str, hosts: Sequence[tuple[str, bool]], reason: str) -> str:
+    """Return one question about several hosts. ``hosts`` pairs each with "seen during login".
+
+    The person ticks the hosts they allow. As in :func:`prompt_text`, every host is in a code
+    span and the reason is labelled as the agent's claim.
+    """
+    lines = "\n".join(
+        f"- `{host}` (seen during login: {'yes' if seen else 'no'})" for host, seen in hosts
+    )
+    claim = f'"{reason}"' if reason else "(nothing)"
+    return (
+        f"Allow {site} sessions to reach these hosts? Tick the ones you allow.\n"
+        f"{lines}\n"
         f"The agent says: {claim}"
     )
 

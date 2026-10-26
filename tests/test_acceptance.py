@@ -104,7 +104,7 @@ class Person:
 
     async def __call__(self, context: Any, params: Any) -> Any:  # noqa: ANN401, ARG002 - SDK types
         self.asked += 1
-        return ElicitResult(action=self.action, content={"allow": True})
+        return ElicitResult(action=self.action, content={"host_0": True})
 
 
 class Recorder:
@@ -199,9 +199,16 @@ async def run(*command: str, env: dict[str, str], stdin: str | None = None) -> t
 
 @pytest.mark.integration
 @needs_everything
+@pytest.mark.parametrize("mode", ["legacy", "2026-07-28"])
 def test_the_acceptance_checklist_runs_end_to_end(  # noqa: PLR0915 - one story, told in order
-    short_dir: Path, desktop: Sway, monkeypatch: pytest.MonkeyPatch
+    short_dir: Path, desktop: Sway, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
+    """The whole checklist, once on each protocol generation the client may speak.
+
+    The person is asked exactly once about the refused host, in both: a no is final, and a yes
+    in a new session is applied. The newer protocol asks through a result that asks for input,
+    the older through a request in the middle of the call; a break in either shows here.
+    """
     runtime, config, state = short_dir / "rt", short_dir / "cfg", short_dir / "state"
     tools, binaries = short_dir / "tools", short_dir / "bin"
     runtime.mkdir(mode=0o700)
@@ -260,13 +267,13 @@ def test_the_acceptance_checklist_runs_end_to_end(  # noqa: PLR0915 - one story,
         params = StdioServerParameters(command=valetkey, args=["mcp"], env=base_env)
         try:
             no = Person("decline")
-            async with connected(params, results, no) as agent:
+            async with connected(params, results, no, mode) as agent:
                 await part_one(agent, no, site, desktop, roots)
             # The same site, a new MCP server process, and a person who says yes.
             yes = Person("accept")
-            async with connected(params, results, yes) as agent:
+            async with connected(params, results, yes, mode) as agent:
                 await part_two(agent, yes)
-            async with connected(params, results, yes) as agent:
+            async with connected(params, results, yes, mode) as agent:
                 await part_three(agent, roots, valetkey, base_env)
         finally:
             await service.shutdown()
@@ -291,10 +298,10 @@ def test_the_acceptance_checklist_runs_end_to_end(  # noqa: PLR0915 - one story,
 
 @contextlib.asynccontextmanager
 async def connected(
-    params: StdioServerParameters, results: list[str], person: Person
+    params: StdioServerParameters, results: list[str], person: Person, mode: str
 ) -> AsyncGenerator[Recorder]:
-    """Start the installed MCP server and connect the SDK's own client to it."""
-    async with McpClient(params, elicitation_callback=person, mode="legacy") as mcp:
+    """Start the installed MCP server and connect the SDK's own client to it, in ``mode``."""
+    async with McpClient(params, elicitation_callback=person, mode=mode) as mcp:
         yield Recorder(mcp, results)
 
 
@@ -353,13 +360,13 @@ async def part_one(
     refused = await agent.call("browser_navigate", site="site", url=f"http://{OTHER_HOST}/hello")
     assert f"{OTHER_HOST} is not allowed" in refused or f"{OTHER_HOST}:443" in refused, refused
     denied = await agent.call(
-        "browser_allow", site="site", host=OTHER_HOST, reason="I want to see the page"
+        "browser_allow", site="site", hosts=[OTHER_HOST], reason="I want to see the page"
     )
     assert denied.startswith("Result: denied."), denied
-    again = await agent.call("browser_allow", site="site", host=OTHER_HOST, reason="please")
+    again = await agent.call("browser_allow", site="site", hosts=[OTHER_HOST], reason="please")
     assert again.startswith("Result: denied.")
     assert person.asked == 1  # a no is not asked twice
-    never = await agent.call("browser_allow", site="site", host=NEVER_ASKED, reason="a bank")
+    never = await agent.call("browser_allow", site="site", hosts=[NEVER_ASKED], reason="a bank")
     assert never.startswith("Result: not_eligible."), never
     assert person.asked == 1  # and a host nobody was refused is never put to the person
     assert "valetkey" in refused  # the advice names the person's own command
@@ -367,7 +374,7 @@ async def part_one(
 
 async def part_two(agent: Recorder, person: Person) -> None:
     allowed = await agent.call(
-        "browser_allow", site="site", host=OTHER_HOST, reason="I want to see the page"
+        "browser_allow", site="site", hosts=[OTHER_HOST], reason="I want to see the page"
     )
     assert allowed.startswith("Result: allowed."), allowed
     assert person.asked == 1

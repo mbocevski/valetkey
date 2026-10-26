@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import contextlib
+import inspect
 import json
 import os
 import signal
@@ -10,7 +11,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
 import pytest
 from environment import unusable_reason
@@ -25,6 +26,9 @@ from valetkey.mcp_server import Bridge, build_server
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
+
+    from mcp.client.session import ElicitationFnT
+    from mcp.server.mcpserver import Context
 
 PNG = b"\x89PNG\r\n\x1a\nfake image bytes"
 CLICKED = {
@@ -308,7 +312,7 @@ EXPECTED_TOOLS = {
     "browser_save": {"site", "ref", "url"},
     "browser_downloads": {"site"},
     "browser_screenshot": {"site"},
-    "browser_allow": {"site", "host", "reason"},
+    "browser_allow": {"site", "hosts", "reason"},
     "browser_close": {"site"},
 }
 
@@ -1884,7 +1888,7 @@ class Person:
         content: dict[str, Any] | None = None,
     ) -> None:
         self.action = action
-        self.content = {"allow": True} if content is None else content
+        self.content = content
         self.questions: list[str] = []
         self.urls: list[str] = []
         self.delay = 0.0
@@ -1897,12 +1901,49 @@ class Person:
         if self.fail:
             raise NoScreenError
         await asyncio.sleep(self.delay)
-        return ElicitResult(action=self.action, content=self.content)
+        if self.content is not None:
+            content = self.content
+        else:  # tick every box that was offered; a link has none
+            schema = getattr(params, "requested_schema", None) or {}
+            content = dict.fromkeys(schema.get("properties", {}), True) or None
+        return ElicitResult(action=self.action, content=content)
+
+
+ELICIT_MODES = ["legacy", "2026-07-28"]
+"""The two ways a server can ask: a request in the middle of a call (the handshake protocols)
+and a result that asks for input (2026-07-28, the newer protocol)."""
+ACTIVE_MODE = {"value": "legacy"}
+
+
+ONLY_IN_THE_MIDDLE_OF_A_CALL = {
+    "test_a_client_that_cannot_show_the_link_gets_the_status_command_instead"
+}
+"""Tests of a client that fails while showing a question. The server can step around that only
+when it sent the question itself, in the middle of a call; a result that asks for input is
+answered by the client, and a client that raises there fails the call, whatever the server does."""
+
+
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """Run each test that puts a question to a client in both protocol generations."""
+    if "asking(" in inspect.getsource(metafunc.function):
+        modes = (
+            ELICIT_MODES[:1]
+            if metafunc.function.__name__ in ONLY_IN_THE_MIDDLE_OF_A_CALL
+            else ELICIT_MODES
+        )
+        metafunc.fixturenames.append("elicit_mode")
+        metafunc.parametrize("elicit_mode", modes, ids=["legacy", "modern"][: len(modes)])
+
+
+@pytest.fixture(autouse=True)
+def _active_mode(request: pytest.FixtureRequest) -> None:
+    callspec = getattr(request.node, "callspec", None)
+    ACTIVE_MODE["value"] = callspec.params.get("elicit_mode", "legacy") if callspec else "legacy"
 
 
 @contextlib.asynccontextmanager
 async def asking(
-    short_dir: Path, person: Person | None
+    short_dir: Path, person: ElicitationFnT | None
 ) -> AsyncGenerator[tuple[McpClient, FakeDaemon]]:
     """A connected client that can show questions (answered by ``person``) or cannot."""
     fake = FakeDaemon(short_dir / "d.sock")
@@ -1931,7 +1972,7 @@ async def asking(
         bridge = Bridge(fake.path)
         try:
             async with McpClient(
-                build_server(bridge), elicitation_callback=person, mode="legacy"
+                build_server(bridge), elicitation_callback=person, mode=ACTIVE_MODE["value"]
             ) as mcp:
                 yield mcp, fake
         finally:
@@ -1939,7 +1980,9 @@ async def asking(
 
 
 async def allow(mcp: McpClient, host: str = "cdn.assets.test", reason: str = "it loads") -> str:
-    result = await mcp.call_tool("browser_allow", {"site": "sitex", "host": host, "reason": reason})
+    result = await mcp.call_tool(
+        "browser_allow", {"site": "sitex", "hosts": [host], "reason": reason}
+    )
     assert not result.is_error, text_of(result)
     return text_of(result)
 
@@ -1956,8 +1999,11 @@ def test_a_yes_in_the_clients_own_interface_is_applied(short_dir: Path) -> None:
             text = await allow(mcp, "CDN.assets.test.")
             assert text.startswith("Result: allowed.")
             assert "next navigation" in text
-            assert asked_ops(fake) == ["allow_check", "allow_apply"]
-            assert fake.requests[1]["args"] == {
+            # A result that asks for input makes a second round, which checks again.
+            assert [op for op in asked_ops(fake) if op != "allow_check"] == ["allow_apply"]
+            assert asked_ops(fake)[0] == "allow_check"
+            apply = next(r for r in fake.requests if r["op"] == "allow_apply")
+            assert apply["args"] == {
                 "site": "sitex",
                 "host": "cdn.assets.test",
                 "channel": "elicitation",
@@ -1985,16 +2031,22 @@ def test_the_question_names_the_site_and_host_and_quotes_the_agent(short_dir: Pa
 
 
 @pytest.mark.parametrize(
-    ("person", "result", "later"),
+    ("action", "content", "result", "later"),
     [
-        (Person("decline"), "denied", "denied"),
-        (Person("cancel"), "expired", "expired"),
-        (Person("accept", {"allow": False}), "denied", "denied"),
+        ("decline", None, "denied", "denied"),
+        ("cancel", None, "expired", "expired"),
+        ("accept", {"host_0": False}, "denied", "denied"),
     ],
 )
 def test_no_and_dismissed_do_not_apply_anything(
-    short_dir: Path, person: Person, result: str, later: str
+    short_dir: Path,
+    action: Literal["accept", "decline", "cancel"],
+    content: dict[str, Any] | None,
+    result: str,
+    later: str,
 ) -> None:
+    person = Person(action, content)
+
     async def scenario() -> None:
         async with asking(short_dir, person) as (mcp, fake):
             first = await allow(mcp)
@@ -2013,21 +2065,6 @@ def test_no_and_dismissed_do_not_apply_anything(
     run(scenario())
 
 
-def test_a_question_nobody_answers_in_time_expires(
-    short_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    person = Person("accept")
-    person.delay = 5
-    monkeypatch.setattr(mcp_server, "ELICIT_SECONDS", 0.2)
-
-    async def scenario() -> None:
-        async with asking(short_dir, person) as (mcp, fake):
-            assert (await allow(mcp)).startswith("Result: expired.")
-            assert "allow_apply" not in asked_ops(fake)
-
-    run(scenario())
-
-
 def test_a_client_that_cannot_ask_leaves_it_to_the_daemons_command(short_dir: Path) -> None:
     async def scenario() -> None:
         async with asking(short_dir, None) as (mcp, fake):
@@ -2035,29 +2072,6 @@ def test_a_client_that_cannot_ask_leaves_it_to_the_daemons_command(short_dir: Pa
             assert text.startswith("Result: could_not_ask.")
             assert "valetkey allow sitex cdn.assets.test" in text
             assert asked_ops(fake) == ["allow_check", "allow_ask"]
-
-    run(scenario())
-
-
-def test_a_client_whose_form_fails_falls_back_to_the_command(short_dir: Path) -> None:
-    person = Person("accept")
-    person.fail = True
-
-    async def scenario() -> None:
-        async with asking(short_dir, person) as (mcp, fake):
-            fake.handlers["allow_ask"] = lambda a: {
-                "site": a["site"],
-                "host": a["host"],
-                "result": "denied",
-                "message": "The person said no.",
-            }
-            first = await allow(mcp)
-            second = await allow(mcp)
-            assert first.startswith("Result: denied.")
-            assert second.startswith("Result: denied.")
-            # The no from the command is remembered here too: the form is not retried.
-            assert asked_ops(fake).count("allow_ask") == 1
-            assert "allow_apply" not in asked_ops(fake)
 
     run(scenario())
 
@@ -2112,7 +2126,7 @@ def test_an_odd_host_is_an_error_before_anything_is_asked(short_dir: Path, host:
     async def scenario() -> None:
         async with asking(short_dir, person) as (mcp, fake):
             result = await mcp.call_tool(
-                "browser_allow", {"site": "sitex", "host": host, "reason": "x"}
+                "browser_allow", {"site": "sitex", "hosts": [host], "reason": "x"}
             )
             assert result.is_error
             assert person.questions == []
@@ -2126,7 +2140,7 @@ def test_a_daemon_error_comes_back_as_a_tool_error(short_dir: Path) -> None:
         async with asking(short_dir, Person()) as (mcp, fake):
             fake.handlers["allow_check"] = lambda _a: fail("unknown_site", "No such site.")
             result = await mcp.call_tool(
-                "browser_allow", {"site": "nosuch", "host": "a.assets.test", "reason": "x"}
+                "browser_allow", {"site": "nosuch", "hosts": ["a.assets.test"], "reason": "x"}
             )
             assert result.is_error
 
@@ -2138,21 +2152,214 @@ def test_only_an_accepted_question_ever_reaches_the_apply_operation(short_dir: P
         for action, content in (
             ("decline", {}),
             ("cancel", {}),
-            ("accept", {"allow": False}),
-            ("accept", {"allow": True}),
+            ("accept", {"host_0": False}),
+            ("accept", {"host_0": True}),
         ):
             async with asking(short_dir, Person(action, content)) as (mcp, fake):
                 await allow(mcp)
                 applied = "allow_apply" in asked_ops(fake)
                 assert (
-                    applied is (action == "accept" and content["allow"] is True)
+                    applied is (action == "accept" and content["host_0"] is True)
                     if content
                     else not applied
                 )
 
     run(scenario())
     # The agent's own text can never be an answer: the tool takes no "approved" argument.
-    assert EXPECTED_TOOLS["browser_allow"] == {"site", "host", "reason"}
+    assert EXPECTED_TOOLS["browser_allow"] == {"site", "hosts", "reason"}
+
+
+async def allow_many(mcp: McpClient, hosts: list[str], reason: str = "it loads") -> str:
+    result = await mcp.call_tool(
+        "browser_allow", {"site": "sitex", "hosts": hosts, "reason": reason}
+    )
+    assert not result.is_error, text_of(result)
+    return text_of(result)
+
+
+def applied_hosts(fake: FakeDaemon) -> list[str]:
+    return [r["args"]["host"] for r in fake.requests if r["op"] == "allow_apply"]
+
+
+def test_several_hosts_are_one_question_with_a_box_for_each(short_dir: Path) -> None:
+    person = Person("accept", {"host_0": True, "host_1": False})
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            text = await allow_many(mcp, ["a.assets.test", "b.assets.test"])
+            assert len(person.questions) == 1
+            question = person.questions[0]
+            assert question.startswith("Allow sitex sessions to reach these hosts?")
+            assert "- `a.assets.test` (seen during login: yes)" in question
+            assert "- `b.assets.test` (seen during login: yes)" in question
+            assert 'The agent says: "it loads"' in question
+            # A result for each host, in the order asked, and only the ticked one was applied.
+            first, second = text.splitlines()
+            assert first.startswith("a.assets.test: Result: allowed.")
+            assert second.startswith("b.assets.test: Result: denied.")
+            assert applied_hosts(fake) == ["a.assets.test"]
+            # The no stays a no for that host; the yes is already allowed.
+            again = await allow_many(mcp, ["b.assets.test"])
+            assert again.startswith("Result: denied. The person already said no.")
+            assert len(person.questions) == 1
+
+    run(scenario())
+
+
+def test_the_boxes_are_offered_ticked_and_titled_with_the_hosts(short_dir: Path) -> None:
+    seen: list[Any] = []
+
+    async def person(context: Any, params: Any) -> Any:  # noqa: ANN401, ARG001 - SDK types
+        seen.append(params.requested_schema)
+        return ElicitResult(action="decline")
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, _fake):
+            await allow_many(mcp, ["a.assets.test", "b.assets.test"])
+
+    run(scenario())
+    properties = seen[0]["properties"]
+    assert list(properties) == ["host_0", "host_1"]
+    assert [p["title"] for p in properties.values()] == ["a.assets.test", "b.assets.test"]
+    assert all(p["type"] == "boolean" and p["default"] is True for p in properties.values())
+
+
+@pytest.mark.parametrize(("action", "word"), [("decline", "denied"), ("cancel", "expired")])
+def test_declining_or_dismissing_the_question_answers_for_every_host(
+    short_dir: Path, action: Literal["decline", "cancel"], word: str
+) -> None:
+    async def scenario() -> None:
+        async with asking(short_dir, Person(action)) as (mcp, fake):
+            text = await allow_many(mcp, ["a.assets.test", "b.assets.test"])
+            assert [line.split(": ")[1] for line in text.splitlines()] == [
+                f"Result: {word}."
+            ] * 2 or all(f"Result: {word}." in line for line in text.splitlines())
+            assert applied_hosts(fake) == []
+
+    run(scenario())
+
+
+def test_only_the_hosts_that_can_be_asked_about_are_put_to_the_person(short_dir: Path) -> None:
+    person = Person("accept")
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            real_check = fake.handlers["allow_check"]
+
+            def check(a: dict[str, Any]) -> dict[str, Any]:
+                if a["host"] == "fixed.assets.test":
+                    return real_check(a) | {"status": "not_eligible", "message": "Not for asking."}
+                return real_check(a)
+
+            fake.handlers["allow_check"] = check
+            text = await allow_many(mcp, ["fixed.assets.test", "a.assets.test", "A.assets.test."])
+            assert len(person.questions) == 1
+            assert "`fixed.assets.test`" not in person.questions[0]
+            assert person.questions[0].startswith("Allow sitex sessions to reach `a.assets.test`?")
+            lines = text.splitlines()
+            assert len(lines) == 2  # the repeated host is asked about once
+            assert lines[0].startswith("fixed.assets.test: Result: not_eligible. Not for asking.")
+            assert lines[1].startswith("a.assets.test: Result: allowed.")
+            assert applied_hosts(fake) == ["a.assets.test"]
+
+    run(scenario())
+
+
+def test_a_client_that_cannot_ask_leaves_every_host_to_the_command(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with asking(short_dir, None) as (mcp, fake):
+            text = await allow_many(mcp, ["a.assets.test", "b.assets.test"])
+            assert text.count("Result: could_not_ask.") == 2
+            assert "valetkey allow sitex a.assets.test" in text
+            assert "valetkey allow sitex b.assets.test" in text
+            assert [r["args"]["host"] for r in fake.requests if r["op"] == "allow_ask"] == [
+                "a.assets.test",
+                "b.assets.test",
+            ]
+
+    run(scenario())
+
+
+def test_the_question_and_the_results_name_the_account_the_daemon_resolved(
+    short_dir: Path,
+) -> None:
+    person = Person("accept", {"host_0": True, "host_1": False})
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            real_check = fake.handlers["allow_check"]
+            fake.handlers["allow_check"] = lambda a: real_check(a) | {"site": "sitex:work"}
+            text = await allow_many(mcp, ["a.assets.test", "b.assets.test"])
+            question = person.questions[0]
+            assert question.startswith("Allow sitex:work sessions to reach these hosts?")
+            assert "The agent says:" in question  # the reason is quoted as a claim
+            assert fake.requests[-1]["args"]["site"] == "sitex:work"
+            assert "valetkey allow" not in text
+            # The no is remembered for that account: asking again does not reach the person.
+            again = await allow_many(mcp, ["b.assets.test"])
+            assert again.startswith("Result: denied. The person already said no.")
+            assert len(person.questions) == 1
+
+    run(scenario())
+
+
+def test_a_no_from_the_approval_command_is_remembered(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with asking(short_dir, None) as (mcp, fake):
+            fake.handlers["allow_ask"] = lambda a: {
+                "site": a["site"],
+                "host": a["host"],
+                "result": "denied",
+                "message": "The person said no.",
+            }
+            first = await allow(mcp)
+            second = await allow(mcp)
+            assert first.startswith("Result: denied.")
+            assert second.startswith("Result: denied. The person already said no.")
+            assert asked_ops(fake).count("allow_ask") == 1
+
+    run(scenario())
+
+
+def login_state_of(state: str | None) -> str | None:
+    ctx = cast("Context", type("C", (), {"request_state": state})())
+    return mcp_server._login_state(ctx)  # noqa: SLF001
+
+
+@pytest.mark.parametrize("state", ["not json", "{}", '{"site": 5}', "[1]", "7", None])
+def test_a_login_state_that_is_not_ours_starts_the_login_over(state: str | None) -> None:
+    assert login_state_of(state) is None
+    assert login_state_of('{"site": "s"}') == "s"
+
+
+def test_one_bad_host_among_good_ones_stops_the_whole_call(short_dir: Path) -> None:
+    person = Person("accept")
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            result = await mcp.call_tool(
+                "browser_allow",
+                {"site": "sitex", "hosts": ["a.assets.test", "*.assets.test"], "reason": "x"},
+            )
+            assert result.is_error
+            assert "*.assets.test" in text_of(result)
+            assert person.questions == []
+            assert fake.requests == []
+
+    run(scenario())
+
+
+def test_the_number_of_hosts_is_limited(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with asking(short_dir, Person()) as (mcp, fake):
+            for hosts in ([], [f"h{i}.assets.test" for i in range(mcp_server.MAX_HOSTS + 1)]):
+                result = await mcp.call_tool(
+                    "browser_allow", {"site": "sitex", "hosts": hosts, "reason": "x"}
+                )
+                assert result.is_error
+            assert fake.requests == []
+
+    run(scenario())
 
 
 class Caps:

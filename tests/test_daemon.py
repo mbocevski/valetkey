@@ -2682,7 +2682,7 @@ def test_a_refused_host_loads_after_the_person_says_yes(roots: sites.Roots) -> N
             bridge = mcp_server.Bridge(client.socket_path(roots))
             try:
                 async with McpClient(
-                    mcp_server.build_server(bridge), elicitation_callback=reply, mode="legacy"
+                    mcp_server.build_server(bridge), elicitation_callback=reply, mode="2026-07-28"
                 ) as mcp:
                     await mcp.call_tool("browser_open", {"site": "demo"})
                     target = {"site": "demo", "url": "http://other.test/two"}
@@ -2695,7 +2695,7 @@ def test_a_refused_host_loads_after_the_person_says_yes(roots: sites.Roots) -> N
                     )
                     asked = await mcp.call_tool(
                         "browser_allow",
-                        {"site": "demo", "host": "other.test", "reason": "the page is there"},
+                        {"site": "demo", "hosts": ["other.test"], "reason": "the page is there"},
                     )
                     assert "Result: allowed." in "".join(
                         p.text for p in asked.content if p.type == "text"
@@ -3667,7 +3667,7 @@ class Reply:
         self, action: Literal["accept", "decline", "cancel"], content: dict[str, Any] | None = None
     ) -> None:
         self.action = action
-        self.content = {"allow": True} if content is None else content
+        self.content = {"host_0": True} if content is None else content
         self.asked = 0
 
     async def __call__(self, context: Any, params: Any) -> Any:  # noqa: ANN401, ARG002 - SDK types
@@ -3681,10 +3681,11 @@ async def allow_through_mcp(roots: sites.Roots, reply: Reply | None, host: str) 
         bridge = mcp_server.Bridge(rig.path)
         try:
             async with McpClient(
-                mcp_server.build_server(bridge), elicitation_callback=reply, mode="legacy"
+                mcp_server.build_server(bridge), elicitation_callback=reply, mode="2026-07-28"
             ) as mcp:
                 result = await mcp.call_tool(
-                    "browser_allow", {"site": "sitex", "host": host, "reason": "the page needs it"}
+                    "browser_allow",
+                    {"site": "sitex", "hosts": [host], "reason": "the page needs it"},
                 )
                 return "\n".join(p.text for p in result.content if p.type == "text")
         finally:
@@ -3695,7 +3696,7 @@ async def allow_through_mcp(roots: sites.Roots, reply: Reply | None, host: str) 
     ("reply", "expected", "granted"),
     [
         (Reply("accept"), "Result: allowed.", True),
-        (Reply("accept", {"allow": False}), "Result: denied.", False),
+        (Reply("accept", {"host_0": False}), "Result: denied.", False),
         (Reply("decline"), "Result: denied.", False),
         (Reply("cancel"), "Result: expired.", False),
         (None, "Result: could_not_ask.", False),
@@ -3828,7 +3829,7 @@ def test_browser_allow_says_not_eligible_for_a_host_refused_for_its_address(
             bridge = mcp_server.Bridge(rig.path)
             try:
                 async with McpClient(
-                    mcp_server.build_server(bridge), elicitation_callback=reply, mode="legacy"
+                    mcp_server.build_server(bridge), elicitation_callback=reply, mode="2026-07-28"
                 ) as mcp:
                     await mcp.call_tool("browser_open", {"site": "sitex"})
                     await asyncio.to_thread(
@@ -3836,7 +3837,7 @@ def test_browser_allow_says_not_eligible_for_a_host_refused_for_its_address(
                     )
                     result = await mcp.call_tool(
                         "browser_allow",
-                        {"site": "sitex", "host": "app.sitex.test", "reason": "please"},
+                        {"site": "sitex", "hosts": ["app.sitex.test"], "reason": "please"},
                     )
                     return "\n".join(p.text for p in result.content if p.type == "text")
             finally:

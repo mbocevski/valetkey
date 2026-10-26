@@ -39,6 +39,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Changed
 
+- `browser_allow` takes up to ten hosts in one call and asks about them in one question, with a box for each.
 - The browser tools now say, with the standard MCP hints, which ones only read, which can change a page and which reach the web, so a client can ask you only when it matters.
 - A login allows another site only if it showed you a page for two seconds. A host it only passed through by redirect is left out. The summary names both, with `valetkey deny` and `valetkey allow`.
 - The link to a login shown in a web browser is no longer given to the agent. Your client shows it, or `valetkey status` does; it works once, and the page then sets a cookie that the WebSocket needs.
@@ -51,6 +52,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- `browser_allow` and the login link reach a client on the newer MCP protocol instead of ending in `could_not_ask` or sending you to `valetkey status`.
 - Starting valetkey from an MCP client that gives it a reduced environment now works: it uses `/run/user/UID` when `XDG_RUNTIME_DIR` is missing, and the daemon it starts finds your desktop.
 - The login window no longer shows Chromium's "unsupported command-line flag" bar. valetkey no longer passes it the flag that hides automation, which only the headless browsers need.
 - An expired login is now noticed when its sign-in form posts to a redirect, as most single sign-on providers do. A callback is no longer taken for a sign-in page.

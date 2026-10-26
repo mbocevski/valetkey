@@ -42,7 +42,7 @@ Start with `browser_sites`. The others act on one site by its name.
 - `browser_downloads` lists the files the browser has saved. Clicks and navigation also list new
   files.
 - `browser_screenshot` returns an image of the page.
-- `browser_allow` asks you to let the site reach one more host.
+- `browser_allow` asks you to let the site reach more hosts.
 - `browser_close` ends the site's browser. The login stays saved.
 
 There is no script evaluation, no launch option, no upload, no cookie access and no way to delete
@@ -94,13 +94,17 @@ off the page, and the file never leaves the sandbox on its way to the folder.
 ## Asking for a host
 
 When a page needs a host the site does not allow, the browser tools list it as refused. The agent
-may call `browser_allow` with one exact host name and a reason. Only a host that was refused, or
-that is in the site's excluded list (left out at login, or denied), can be asked about. Nothing is
-allowed unless you say yes.
+may call `browser_allow` with up to ten exact host names and a reason. Only a host that was
+refused, or that is in the site's excluded or denied list (left out at login, or denied by you),
+can be asked about. Nothing is allowed unless you say yes.
 
 There are two ways to answer. A client that can show a question to you is asked first, and puts it
-there. Otherwise set `approve_command` in `$XDG_CONFIG_HOME/valetkey/config.json` to a program and
-its arguments. The file may hold no other key:
+there: one question that lists the hosts, each with a box you can tick or clear. A host you clear
+counts as a no. How the client asks depends on the MCP protocol version it speaks. valetkey handles
+both the older request in the middle of a call and the newer result that asks for input.
+
+Otherwise set `approve_command` in `$XDG_CONFIG_HOME/valetkey/config.json` to a program and its
+arguments. The file may hold no other key:
 
 ```json
 {"approve_command": ["/home/me/bin/ask-valetkey"]}
@@ -117,6 +121,8 @@ it can use to show you a question.
 With neither, nobody can be asked, and the agent tells you to run `valetkey allow SITE HOST`.
 
 ## What `browser_allow` returns
+
+Each host gets a result of its own, one line per host when there are several.
 
 - `allowed`: you said yes, or the host was already allowed. The next navigation to it will load.
 - `denied`: you said no. The agent must not ask again for that host, and the daemon refuses to
