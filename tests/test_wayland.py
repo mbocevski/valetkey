@@ -56,7 +56,14 @@ class Peer:
         self.fds: list[int] = []
         self.owned: list[int] = []
 
-    def read(self) -> Request:
+    def read(self, fds: int = 0) -> Request:
+        """Read one request; ``fds`` is how many descriptors it carries.
+
+        The descriptors of a stream socket arrive with the bytes of the request that sent them,
+        but a read may return several requests at once, and nothing says which one the
+        descriptors belong to. The caller knows, so each request takes the number it names from
+        the front of the queue.
+        """
         while len(self.buffer) < 8 or len(self.buffer) < self._size():
             data, ancillary, _flags, _addr = self.sock.recvmsg(4096, socket.CMSG_SPACE(16 * 4))
             if not data:
@@ -70,8 +77,8 @@ class Peer:
         size = self._size()
         object_id, word = struct.unpack("<II", self.buffer[:8])
         payload, self.buffer = self.buffer[8:size], self.buffer[size:]
-        fds, self.fds = self.fds, []
-        return Request(object_id, word & 0xFFFF, payload, fds)
+        taken, self.fds = self.fds[:fds], self.fds[fds:]
+        return Request(object_id, word & 0xFFFF, payload, taken)
 
     def _size(self) -> int:
         return struct.unpack("<II", self.buffer[:8])[1] >> 16 if len(self.buffer) >= 8 else 8
@@ -158,12 +165,17 @@ def create(compositor: Path, listen: Path, **options: Any) -> wayland.SecurityCo
 # -- the happy path --------------------------------------------------------------------------
 
 
-def accepting(peer: Peer) -> dict[str, Any]:
-    """A compositor that offers the manager and accepts a context."""
+def accepting(peer: Peer, settle: float = 0.0) -> dict[str, Any]:
+    """A compositor that offers the manager and accepts a context.
+
+    ``settle`` is how long to wait before reading the client's requests, so that they all arrive
+    first and one read returns several of them.
+    """
     registry = peer.handshake({"wl_compositor": 6, MANAGER: 1})
+    time.sleep(settle)
     seen: dict[str, Any] = {"registry": registry}
     seen["bind"] = peer.read()
-    create_listener = peer.read()
+    create_listener = peer.read(fds=2)
     seen["create"] = create_listener
     seen["strings"] = [peer.read() for _ in range(3)]
     seen["commit"] = peer.read()
@@ -175,6 +187,23 @@ def accepting(peer: Peer) -> dict[str, Any]:
     seen["before_hangup"] = poller.poll(0)
     peer.acknowledge()  # the client waits for this, so it cannot have closed the context yet
     return seen
+
+
+def test_descriptors_stay_with_the_request_that_sent_them_when_requests_arrive_together(
+    paths: tuple[Path, Path],
+) -> None:
+    compositor, listen = paths
+    seen: dict[str, Any] = {}
+
+    def script(peer: Peer) -> None:
+        nonlocal seen
+        seen = accepting(peer, settle=0.4)
+
+    with Compositor(compositor, script):
+        create(compositor, listen).close()
+    assert seen["bind"].fds == []
+    assert len(seen["create"].fds) == 2
+    assert all(request.fds == [] for request in seen["strings"])
 
 
 def test_a_security_context_is_registered_with_the_names_and_two_descriptors(
@@ -228,7 +257,7 @@ def test_closing_the_context_makes_the_close_descriptor_hang_up(paths: tuple[Pat
     def accepting_until_released(peer: Peer) -> dict[str, Any]:
         peer.handshake({MANAGER: 1})
         peer.read()
-        create_listener = peer.read()
+        create_listener = peer.read(fds=2)
         for _ in range(4):
             peer.read()
         peer.acknowledge()
