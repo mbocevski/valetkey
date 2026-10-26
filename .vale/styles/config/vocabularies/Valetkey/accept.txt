@@ -35,3 +35,4 @@ RFB
 [Uu]nix
 setpriv
 copy_hosts_from
+srcset

@@ -30,13 +30,15 @@ Start with `browser_sites`. The others act on one site by its name.
 - `browser_open` starts the signed-in browser for a site, or joins the running one. It says when
   the saved login has expired.
 - `browser_snapshot` reads the page as a text tree, with a reference such as `e3` for each element
-  to click or fill.
+  to click or fill. With `images` set it also lists the biggest pictures and videos.
 - `browser_click` clicks an element by reference, or by visible text and role. It looks the
   element up again at click time, and checks an `expect` of `text_appears`, `text_gone` or
   `url_changes`. Only a click with an `expect` is ever repeated, and only when the first attempt
   changed nothing.
 - `browser_type` replaces the contents of a field, and presses Enter when `submit` is true.
 - `browser_navigate` goes to an HTTP or HTTPS address on an allowed host.
+- `browser_save` saves a picture, a video or a linked file into the downloads folder (see
+  [Downloads](#downloads)).
 - `browser_downloads` lists the files the browser has saved. Clicks and navigation also list new
   files.
 - `browser_screenshot` returns an image of the page.
@@ -45,6 +47,8 @@ Start with `browser_sites`. The others act on one site by its name.
 
 There is no script evaluation, no launch option, no upload, no cookie access and no way to delete
 a site. Text from a page is labelled as untrusted data.
+
+## What a result starts with
 
 Every result starts with the site's name and the page's address. The address line shows only the
 scheme and host, which valetkey reads the way the browser does. The path and query, which the page
@@ -57,7 +61,8 @@ Each tool carries the standard MCP hints, so a client can decide what to ask you
 `browser_sites`, `browser_downloads`, `browser_snapshot` and `browser_screenshot` only read; the
 first two touch nothing but valetkey's own state. `browser_click` and `browser_type` are marked
 destructive, because a click or Enter can submit, send or delete. `browser_open`,
-`browser_navigate`, `browser_allow` and `browser_close` are idempotent. Every tool that touches a
+`browser_navigate`, `browser_allow` and `browser_close` are idempotent. `browser_save` writes a
+file, so it is not read-only; it never overwrites one, so it is not destructive. Every tool that touches a
 page is marked open world. They are hints, not promises.
 
 ## Accounts
@@ -77,6 +82,14 @@ list of hosts. You can start it with the hosts of another account using
 Files a site downloads are saved in its downloads folder, `$XDG_STATE_HOME/valetkey/downloads/SITE`.
 A new file never replaces an older one of the same name; it gets a number, as in `report (2).pdf`.
 valetkey reads the first bytes of a file to report its type and never opens or runs it.
+
+`browser_save` takes a reference from the latest snapshot, which saves a link's target or a media
+element's source, or an address. The picture addresses are listed by `browser_snapshot` with
+`images` set. The result gives the name, size and type, never the file. The browser fetches the
+address in a tab of its own that is closed afterwards, with the site's login and through its proxy. So only hosts the site allows work, and a
+refused host is reported as it is for navigation. The file goes through the same path as any
+download, with the same names and limits, up to 100 MiB. The agent has no other way to get a file
+off the page, and the file never leaves the sandbox on its way to the folder.
 
 ## Asking for a host
 

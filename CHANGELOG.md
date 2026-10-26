@@ -9,6 +9,7 @@ Changes that affect users of valetkey. The format follows
 ### Added
 
 - A login allows the site owner's other domains, such as its CDN, and sorts the hosts it left out; a host you deny with `valetkey deny` stays denied through later logins.
+- The `browser_save` tool, which saves a picture, a video or a linked file from the page into the site's downloads folder, through the site's own proxy; `browser_snapshot` can list the pictures with their addresses.
 - A site can have more than one account, such as `sitex:work`, each with its own login, hosts and downloads; `browser_login` takes an `account`, and a bare site name is refused then.
 - The browser's sandbox refuses 30 system calls a browser has no use for, such as `keyctl`, `bpf` and `mount`, on x86_64; `valetkey doctor` says when it cannot.
 - `browser_login` on a machine with no screen can start a private display and return a link to a noVNC page, with the `ssh -L` command to reach it, when `remote_logins` is on in the config.

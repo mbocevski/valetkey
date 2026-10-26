@@ -13,9 +13,16 @@ profile.
   "summary"}]}`` from the policy files and the live state, one entry per account. ``summary`` is
   what the last login learned, and it is delivered once.
 * ``open`` ``{site}``: start the site's session, or join the running one (``reused: true``).
-* ``snapshot``, ``type`` ``{ref, text, submit?}``, ``navigate`` ``{url}``,
+* ``snapshot`` ``{images?}``, ``type`` ``{ref, text, submit?}``, ``navigate`` ``{url}``,
   ``screenshot`` ``{name?}``, ``status`` ``{site}``: act on the site's session. ``submit``
-  presses Enter after the text is typed.
+  presses Enter after the text is typed. With ``images: true`` a ``snapshot`` answer also has
+  ``images``, the biggest pictures and videos on the page, each ``{kind, alt, url, width,
+  height}`` with ``alt`` and ``url`` untrusted.
+* ``save`` ``{ref | url}``: save what an address serves into the site's downloads directory,
+  by the contained browser and its proxy, so only hosts the site may reach work. ``ref`` is an
+  element of the last snapshot (a link's target, a picture's or video's source or poster); ``url``
+  is an HTTP or HTTPS address. The answer is as for ``navigate``: the envelope, the address that
+  was fetched (``source``, untrusted) and ``downloads`` with the file that arrived, never its bytes.
 * ``click`` ``{ref | text, role?, expect?}``: a verified click (see :mod:`valetkey.clicks`).
   A ``ref`` means the element it was in this client's last snapshot, which is looked up again
   at click time; ``text`` is visible text, optionally with a ``role``. ``expect`` is one of
@@ -115,7 +122,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from valetkey import (
     approvals,
@@ -218,6 +225,15 @@ class BrowserSession(Protocol):
 
     def current_url(self) -> str:
         """Return the page's URL."""
+
+    def resource_url(self, ref: str) -> str:
+        """Return the address that the element ``ref`` stands for."""
+
+    def images(self) -> list[dict[str, Any]]:
+        """List the pictures and videos on the page."""
+
+    def save(self, url: str) -> None:
+        """Save what ``url`` serves into the downloads folder."""
 
     def screenshot(self, name: str = "screenshot.png") -> Path:
         """Save a screenshot and return its path."""
@@ -650,6 +666,7 @@ class Daemon:
             "click": self._op_click,
             "type": self._op_type,
             "navigate": self._op_navigate,
+            "save": self._op_save,
             "screenshot": self._op_screenshot,
             "status": self._op_status,
             "close": self._op_close,
@@ -1545,8 +1562,20 @@ class Daemon:
 
     async def _op_snapshot(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         state = self._state(self._site(args))
-        result = await self._session_op(connection, state, lambda session: session.snapshot())
-        snap: sessions.Snapshot = result.pop("_value")
+        pictures = args.get("images", False)
+        if not isinstance(pictures, bool):
+            _fail("bad_request", '"images" must be true or false')
+
+        def look(session: BrowserSession) -> tuple[sessions.Snapshot, list[dict[str, Any]]]:
+            return session.snapshot(), session.images() if pictures else []
+
+        result = await self._session_op(connection, state, look)
+        snap, found = result.pop("_value")
+        if pictures:
+            result["images"] = [
+                item | {"alt": untrusted(item["alt"]), "url": untrusted(item["url"])}
+                for item in found
+            ]
         result["url"] = snap.url
         result["snapshot"] = untrusted(snap.tree)
         result["refs"] = {ref: element.role for ref, element in snap.refs.items()}
@@ -1573,6 +1602,35 @@ class Daemon:
         result["expect"] = done.expect.to_json() if done.expect else None
         result["outcome"] = done.outcome
         result["downloads"] = await self._new_downloads(connection, state, seen)
+        return result
+
+    async def _op_save(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
+        state = self._state(self._site(args))
+        ref, url = args.get("ref"), args.get("url")
+        if (ref is None) == (url is None):
+            _fail("bad_request", 'give either "ref" or "url", not both and not neither')
+        wanted = _string_arg(args, "ref" if ref is not None else "url")
+        seen = await self._seen_downloads(connection, state.name)
+
+        def fetch(session: BrowserSession) -> str:
+            source = wanted if url is not None else session.resource_url(wanted)
+            target = urljoin(session.current_url(), source)
+            if urlsplit(target).scheme not in {"http", "https"}:
+                code = "bad_request"
+                message = "only http and https addresses can be saved"
+                raise DaemonError(code, message)
+            session.save(target)
+            return target
+
+        result = await self._session_op(connection, state, _watching(fetch))
+        result["source"] = untrusted(result.pop("_value"))
+        found = await self._new_downloads(connection, state, seen)
+        result["downloads"] = found
+        if not (found["new"] or found["in_progress"] or found["unsaved"]):
+            code = "not_saved"
+            message = "nothing was saved: the browser did not write a file"
+            envelope = {k: result[k] for k in ("site", "contained", "url", "refused")}
+            raise DaemonError(code, message, envelope)
         return result
 
     async def _op_type(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:

@@ -66,11 +66,79 @@ STOP_GRACE = 5.0
 DEFAULT_TIMEOUT = 60.0
 """Seconds to wait for the first page, and for each later call."""
 
+SAVE_LIMIT = 100 * 1024 * 1024
+"""The most bytes :meth:`Session.save` takes from one address: 100 MiB."""
+MAX_IMAGES = 30
+"""The most pictures :meth:`Session.images` lists."""
+MAX_ADDRESS = 2000
+"""A picture's address longer than this is left out of the list: it would not be a plain one."""
+
 _BRIDGE_ATTEMPTS = 100
 _REF = re.compile(r"@?(e\d+)")
 _VERSION = re.compile(r"\b(\d+)\.(\d+)\.(\d+)\b")
 _FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.png")
 _LOG_TAIL = 2000
+_SRCSET_CANDIDATE = re.compile(r"\s*(\S+?)(?:\s+(\d+(?:\.\d+)?)[wx]\s*(?:,|$)|\s*(?:,\s|,$|$))")
+
+# Run in a tab that has the address open, as the page there. The address is fetched again from
+# that tab (its own origin, its cookies, the session's proxy) and handed to the browser's download
+# manager, which writes it into the downloads folder like any file the page offers.
+_SAVE_SCRIPT = """(async () => {
+  const limit = LIMIT;
+  const response = await fetch(location.href, {credentials: 'include'});
+  if (!response.ok) throw new Error('the server answered ' + response.status);
+  if (Number(response.headers.get('content-length')) > limit) {
+    throw new Error('the file is larger than ' + limit + ' bytes');
+  }
+  const blob = await response.blob();
+  if (blob.size > limit) throw new Error('the file is larger than ' + limit + ' bytes');
+  let name = '';
+  try { name = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || ''); }
+  catch (error) { name = ''; }
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = name || 'download';
+  (document.body || document.documentElement).append(link);
+  link.click();
+  return 'saved';
+})()"""
+
+# The pictures and videos on the page, the biggest first, as JSON text: the address of the
+# largest candidate of a srcset (or the one the browser chose), HTTP and HTTPS ones only.
+_IMAGES_SCRIPT = r"""(() => {
+  const absolute = (value) => {
+    try {
+      const url = new URL(value, document.baseURI);
+      return (url.protocol === 'http:' || url.protocol === 'https:') ? url.href : '';
+    } catch (error) { return ''; }
+  };
+  const largest = (srcset) => {
+    let best = '', size = -1;
+    for (const part of srcset.split(',')) {
+      const [address, descriptor] = part.trim().split(/\s+/);
+      const value = descriptor ? parseFloat(descriptor) : 0;
+      if (address && value > size) { best = address; size = value; }
+    }
+    return best;
+  };
+  const found = [];
+  for (const img of document.images) {
+    const url = absolute((img.srcset && largest(img.srcset)) || img.currentSrc || img.src);
+    const width = img.naturalWidth, height = img.naturalHeight;
+    if (url && width * height >= 2500) {
+      found.push({kind: 'image', alt: img.alt || img.title || '', url, width, height});
+    }
+  }
+  for (const video of document.querySelectorAll('video')) {
+    const url = absolute(video.currentSrc || video.src || video.poster);
+    if (url) {
+      found.push({kind: 'video', alt: video.title || '', url,
+                  width: video.videoWidth, height: video.videoHeight});
+    }
+  }
+  found.sort((a, b) => b.width * b.height - a.width * a.height);
+  return JSON.stringify(found.slice(0, LIMIT));
+})()"""
 
 
 class SessionError(RuntimeError):
@@ -413,6 +481,22 @@ def _check_url(url: str) -> str:
         message = f"only http and https URLs can be opened, got {url!r}"
         raise ValueError(message)
     return url
+
+
+def largest_candidate(srcset: str) -> str:
+    """Return the address of the largest candidate in an ``srcset`` attribute.
+
+    Each candidate is an address and, optionally, a width (``800w``) or density (``2x``). The
+    biggest number wins, and the first of equals; with no numbers, the first. An address may hold
+    a comma, so candidates end at a comma followed by white space or the end. Returns ``""`` for
+    a value with no address.
+    """
+    best, size = "", -1.0
+    for match in _SRCSET_CANDIDATE.finditer(srcset.strip()):
+        address, number = match.group(1), float(match.group(2) or 0)
+        if address and number > size:
+            best, size = address, number
+    return best.rstrip(",")
 
 
 def _check_ref(ref: str) -> str:
@@ -758,6 +842,111 @@ class Session:
             ):
                 count += 1
         return count
+
+    def resource_url(self, ref: str) -> str:
+        """Return the address that the element ``ref`` stands for, as the page wrote it.
+
+        The first of ``srcset`` (its largest candidate), ``src``, ``href`` and ``poster`` that the
+        element has. A picture's own address, a link's target, a video's source or its poster. It
+        may be relative to the page.
+
+        Raises:
+            SessionError: when the element has none of them.
+
+        """
+        target = _check_ref(ref)
+        for name in ("srcset", "src", "href", "poster"):
+            value = self._call("get", "attr", target, name).get("value")
+            if isinstance(value, str) and value.strip():
+                address = largest_candidate(value) if name == "srcset" else value.strip()
+                if address:
+                    return address
+        message = "that element has no address to save: no srcset, src, href or poster"
+        raise SessionError(message)
+
+    def images(self) -> list[dict[str, Any]]:
+        """List the pictures and videos on the page, the biggest first, with their addresses.
+
+        Each has a kind, an alt text, an address, a width and a height. Pictures under 50 by 50
+        pixels, and addresses that are not HTTP or HTTPS, are left out. Everything in them came
+        from the page, which can say anything in its own script, so the shape is checked here.
+        """
+        raw = self._call("eval", _IMAGES_SCRIPT.replace("LIMIT", str(MAX_IMAGES))).get("result")
+        try:
+            found = json.loads(raw) if isinstance(raw, str) else []
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(found, list):
+            return []
+        listed: list[dict[str, Any]] = []
+        for item in found[:MAX_IMAGES]:
+            if not isinstance(item, dict):
+                continue
+            url, alt = item.get("url"), item.get("alt")
+            if not isinstance(url, str) or not url or len(url) > MAX_ADDRESS:
+                continue
+            numbers = [item.get("width"), item.get("height")]
+            width, height = (
+                n if isinstance(n, int) and not isinstance(n, bool) else 0 for n in numbers
+            )
+            kind = "video" if item.get("kind") == "video" else "image"
+            listed.append(
+                {
+                    "kind": kind,
+                    "alt": alt[:200] if isinstance(alt, str) else "",
+                    "url": url,
+                    "width": max(width, 0),
+                    "height": max(height, 0),
+                }
+            )
+        return listed
+
+    def save(self, url: str) -> None:
+        """Save what an HTTP or HTTPS address serves into the downloads folder.
+
+        The address is opened in a tab of its own, so the page the person or the agent is on does
+        not move, and fetched again from there, so it goes through the session's proxy with the
+        session's cookies, and a host the site may not reach is refused as it is for navigation.
+        The browser then writes it as it writes any download. An address that is an attachment is
+        saved by the browser the moment the tab is opened. The tab is closed in the end, whatever
+        happened, and the first one is active again.
+
+        Raises:
+            AgentBrowserError: when the browser cannot load the address, or the server does not
+                answer 200, or the file is over :data:`SAVE_LIMIT`.
+            ValueError: when ``url`` is not an HTTP or HTTPS address.
+
+        """
+        _check_url(url)
+        known, active = self._tabs()
+        try:
+            try:
+                self._call("tab", "new", url)
+            except AgentBrowserError as error:
+                if "ERR_ABORTED" not in str(error):
+                    raise
+                return  # the address is a download, which the browser has started by itself
+            self._call("eval", _SAVE_SCRIPT.replace("LIMIT", str(SAVE_LIMIT)))
+        finally:
+            self._close_tabs_but(known, active)
+
+    def _tabs(self) -> tuple[set[str], str | None]:
+        """Return the ids of the open tabs and the id of the one in front."""
+        tabs = self._call("tab", "list").get("tabs") or []
+        ids = {str(tab["tabId"]) for tab in tabs if isinstance(tab, dict) and "tabId" in tab}
+        front = next(
+            (str(t["tabId"]) for t in tabs if isinstance(t, dict) and t.get("active")), None
+        )
+        return ids, front
+
+    def _close_tabs_but(self, known: set[str], active: str | None) -> None:
+        """Close every tab that was not in ``known``, and bring ``active`` to the front again."""
+        with contextlib.suppress(AgentBrowserError, SessionError):
+            ids, _ = self._tabs()
+            for tab in sorted(ids - known):
+                self._call("tab", "close", tab)
+            if active is not None:
+                self._call("tab", active)
 
     def press_enter(self) -> None:
         """Press Enter in the focused element, for example to submit the field just filled."""

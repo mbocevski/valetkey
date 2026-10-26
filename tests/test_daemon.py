@@ -200,6 +200,9 @@ def test_socket_path_defaults_to_the_environment(
 # -- fakes ---------------------------------------------------------------------------------
 
 
+PNG = b"\x89PNG\r\n\x1a\nsaved"
+
+
 class FakeSession:
     """A browser session that records calls and checks nobody uses it twice at once."""
 
@@ -218,6 +221,11 @@ class FakeSession:
         self.on_click: Callable[[], None] | None = None
         self.on_open: Callable[[], None] | None = None
         self.abort_with: Path | None = None
+        self.addresses: dict[str, str] = {}
+        """What each reference stands for, as the page wrote it."""
+        self.pictures: list[dict[str, Any]] = []
+        self.save_to: Path | None = None
+        """The file a save writes, as the browser's download would."""
         self.attached = 0
         self.passwords = 0
         self.attach_error: Exception | None = None
@@ -284,6 +292,22 @@ class FakeSession:
 
     def current_url(self) -> str:
         return self.url
+
+    def resource_url(self, ref: str) -> str:
+        self._use("resource_url", ref)
+        if ref not in self.addresses:
+            msg = "that element has no address to save: no srcset, src, href or poster"
+            raise sessions.SessionError(msg)
+        return self.addresses[ref]
+
+    def images(self) -> list[dict[str, Any]]:
+        self._use("images")
+        return self.pictures
+
+    def save(self, url: str) -> None:
+        self._use("save", url)
+        if self.save_to is not None:
+            self.save_to.write_bytes(PNG)
 
     def screenshot(self, name: str = "screenshot.png") -> Path:
         self._use("screenshot", name)
@@ -1176,6 +1200,177 @@ def test_a_login_allows_the_cdn_domains_of_the_site_and_sorts_the_rest(roots: si
             assert "share the site's name: shop.example, shop.invalid." in entry["summary"]
             assert "(CDNs, services): fonts.cdn.test." in entry["summary"]
             assert "Left out 1 ads and tracking host." in entry["summary"]
+
+
+# -- saving a picture or a file ---------------------------------------------------------------
+
+
+def test_save_fetches_an_address_and_reports_the_file_that_arrived(roots: sites.Roots) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.save_to = folder / "photo.png"
+            result = await c.call("save", site="sitex", url="https://sitex.test/img/photo.png")
+            assert ("save", "https://sitex.test/img/photo.png") in session.calls
+            assert result["source"] == {
+                "untrusted": True,
+                "text": "https://sitex.test/img/photo.png",
+            }
+            (item,) = result["downloads"]["new"]
+            assert item["path"]["text"] == str(folder / "photo.png")
+            assert item["mime"] == "image/png"
+            assert item["size"] == len(PNG)
+            assert "content" not in json.dumps(result)  # the answer never carries the bytes
+            assert result["site"] == "sitex"
+            assert result["refused"] == []
+
+    run(scenario())
+
+
+def test_save_by_reference_asks_the_element_and_resolves_a_relative_address(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.url = "https://sitex.test/shop/item"
+            session.addresses = {"e2": "../files/big.png", "e3": "//cdn.sitex.test/a.png"}
+            session.save_to = folder / "big.png"
+            result = await c.call("save", site="sitex", ref="e2")
+            assert ("resource_url", "e2") in session.calls
+            assert ("save", "https://sitex.test/files/big.png") in session.calls
+            assert result["source"]["text"] == "https://sitex.test/files/big.png"
+            session.save_to = folder / "a.png"
+            await c.call("save", site="sitex", ref="e3")
+            assert ("save", "https://cdn.sitex.test/a.png") in session.calls
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"ref": "e1", "url": "https://sitex.test/a.png"}, {"url": ""}, {"ref": 3}, {"url": None}],
+)
+def test_save_needs_exactly_one_of_a_reference_and_an_address(
+    roots: sites.Roots, arguments: dict[str, Any]
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("save", site="sitex", **arguments)
+            assert info.value.code == "bad_request"
+            assert not [call for call in rig.factory.made[0].calls if call[0] == "save"]
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    "address", ["data:image/png;base64,AAAA", "file:///etc/passwd", "javascript:1", "ftp://x/a"]
+)
+def test_save_takes_only_http_and_https_addresses(roots: sites.Roots, address: str) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("save", site="sitex", url=address)
+            assert info.value.code == "bad_request"
+            assert "http and https" in info.value.message
+            assert not [call for call in rig.factory.made[0].calls if call[0] == "save"]
+
+    run(scenario())
+
+
+def test_save_without_a_session_and_an_element_without_an_address_are_errors(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            with pytest.raises(DaemonError) as info:
+                await c.call("save", site="sitex", url="https://sitex.test/a.png")
+            assert info.value.code == "no_session"
+            await c.call("open", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("save", site="sitex", ref="e9")
+            assert "no address to save" in info.value.message
+            del rig
+
+    run(scenario())
+
+
+def test_a_save_that_writes_nothing_is_an_error_with_the_envelope(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("save", site="sitex", url="https://sitex.test/a.png")
+            assert info.value.code == "not_saved"
+            assert info.value.details["site"] == "sitex"
+            assert info.value.details["refused"] == []
+            del rig
+
+    run(scenario())
+
+
+def test_a_save_the_browser_cannot_do_is_the_browsers_error(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            rig.factory.made[0].fail = sessions.AgentBrowserError("the server answered 404")
+            with pytest.raises(DaemonError) as info:
+                await c.call("save", site="sitex", url="https://sitex.test/gone.png")
+            assert info.value.code == "browser_error"
+            assert "404" in info.value.message
+
+    run(scenario())
+
+
+def test_a_snapshot_lists_the_pictures_only_when_asked(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.pictures = [
+                {"kind": "image", "alt": "Red shoe", "url": "https://sitex.test/s.png",
+                 "width": 800, "height": 600},
+                {"kind": "video", "alt": "", "url": "https://sitex.test/v.mp4",
+                 "width": 640, "height": 360},
+            ]  # fmt: skip
+            plain = await c.call("snapshot", site="sitex")
+            assert "images" not in plain
+            assert ("images",) not in session.calls
+            listed = await c.call("snapshot", site="sitex", images=True)
+            assert listed["images"][0] == {
+                "kind": "image",
+                "alt": {"untrusted": True, "text": "Red shoe"},
+                "url": {"untrusted": True, "text": "https://sitex.test/s.png"},
+                "width": 800,
+                "height": 600,
+            }
+            assert [i["kind"] for i in listed["images"]] == ["image", "video"]
+            with pytest.raises(DaemonError) as info:
+                await c.call("snapshot", site="sitex", images="yes")
+            assert info.value.code == "bad_request"
 
     run(scenario())
 
@@ -3412,7 +3607,7 @@ def test_no_operation_widens_a_policy_except_the_ones_that_ask(roots: sites.Root
     add_site(roots, excluded=("cdn.assets.test",))
     write_approver(roots, "exit 1")
     ops = [
-        "sites", "open", "snapshot", "click", "type", "navigate", "screenshot", "status",
+        "sites", "open", "snapshot", "click", "type", "navigate", "save", "screenshot", "status",
         "close", "reload_policy", "downloads", "allow_check", "allow_apply", "allow_ask",
         "bridge_register",
     ]  # fmt: skip
