@@ -1344,7 +1344,7 @@ def test_a_typed_address_has_no_page_it_came_from(tmp_path: Path) -> None:
 
 # -- the site's own other domains and the sorting of what is left out -------------------------
 
-SITEX = "https://www.sitex.se/login"
+OWNED_START = "https://www.sitex.se/login"
 
 
 @pytest.mark.parametrize(
@@ -1389,18 +1389,18 @@ def test_a_login_allows_every_host_it_used_and_groups_the_site_owners_apart() ->
         "ads.vendor.example",
         "10.0.0.1",
     ]
-    result = learn.classify(SITEX, seen, [])
+    result = learn.classify(OWNED_START, seen, [])
     assert result.allow == (
         "10.0.0.1",
         "cdn.sitex.com",
         "cf-images.sitex.eu",
-        "sitex.se",
         "fonts.gstatic.com",
         "images2.sitex.eu",
-        "login.sitex.eu",
         "login.okta.com",
+        "login.sitex.eu",
         "media.sitex.eu",
         "ok9static.oktacdn.com",
+        "sitex.se",
     )
     assert result.owned == (
         "cdn.sitex.com",
@@ -1414,15 +1414,15 @@ def test_a_login_allows_every_host_it_used_and_groups_the_site_owners_apart() ->
 
 
 def test_a_host_that_only_redirected_is_allowed_unless_it_is_a_tracker() -> None:
-    result = learn.classify(SITEX, [], [], ["sso.sitex.eu", "tracker.example"])
+    result = learn.classify(OWNED_START, [], [], ["sso.sitex.eu", "tracker.example"])
     assert result.allow == ("sitex.se", "sso.sitex.eu")
     assert result.excluded == ("tracker.example",)
 
 
 def test_a_host_the_person_denied_stays_denied_even_when_it_is_the_owners() -> None:
-    result = learn.classify(SITEX, ["cdn.sitex.com", "cdn.sitex.eu"], [])
-    before = policy(site="sitex", start=SITEX, allow=("sitex.se",), denied=("sitex.com",))
-    saved = learn.merge(before, result, SITEX, NOW)
+    result = learn.classify(OWNED_START, ["cdn.sitex.com", "cdn.sitex.eu"], [])
+    before = policy(site="sitex", start=OWNED_START, allow=("sitex.se",), denied=("sitex.com",))
+    saved = learn.merge(before, result, OWNED_START, NOW)
     assert saved.allow == ("cdn.sitex.eu", "sitex.se")
     assert saved.denied == ("sitex.com",)
     assert not sites.allows(saved, "cdn.sitex.com")
@@ -1432,9 +1432,9 @@ def test_a_host_the_person_denied_stays_denied_even_when_it_is_the_owners() -> N
 
 
 def test_a_denied_host_under_an_allowed_one_is_a_carve_out_that_stays() -> None:
-    result = learn.classify(SITEX, ["cdn.sitex.com"], [])
-    before = policy(site="sitex", start=SITEX, allow=("sitex.se",), denied=("cdn.sitex.com",))
-    saved = learn.merge(before, result, SITEX, NOW)
+    result = learn.classify(OWNED_START, ["cdn.sitex.com"], [])
+    before = policy(site="sitex", start=OWNED_START, allow=("sitex.se",), denied=("cdn.sitex.com",))
+    saved = learn.merge(before, result, OWNED_START, NOW)
     assert saved.allow == ("sitex.se",)
     assert saved.denied == ("cdn.sitex.com",)
     assert not sites.allows(saved, "cdn.sitex.com")
@@ -1449,8 +1449,8 @@ def test_the_summary_groups_the_hosts_and_counts_the_tracking() -> None:
         "o1.ingest.sentry.io",
         "ads2.vendor.example",
     ]
-    result = learn.classify(SITEX, seen, [])
-    saved = learn.merge(None, result, SITEX, NOW, site="sitex")
+    result = learn.classify(OWNED_START, seen, [])
+    saved = learn.merge(None, result, OWNED_START, NOW, site="sitex")
     text = learn.summary(saved, result)
     assert text == (
         "Saved your sitex login. Sessions will be limited to the hosts it used, apart from "
