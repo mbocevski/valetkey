@@ -145,6 +145,12 @@ def test_envelope_text() -> None:
     assert "URL: https://sitex.test/" in text
     assert text.endswith("Refused hosts: none")
     assert "URL: (none)" in mcp_server.envelope_text({"site": "s", "url": None})
+    bare = mcp_server.envelope_text({"site": "s", "url": None, "refused": []}, loaded=False)
+    assert bare.splitlines() == [
+        "Site: s (contained: it can reach only the hosts this site allows)"
+    ]
+    listed = {"site": "s", "url": None, "refused": [{"host": "a.test", "port": 443, "reason": "r"}]}
+    assert "Refused hosts: a.test:443 (r)" in mcp_server.envelope_text(listed, loaded=False)
 
 
 def test_background_line_is_quiet_and_names_hosts_and_counts() -> None:
@@ -643,6 +649,9 @@ def test_a_url_that_was_only_a_download_says_so(short_dir: Path) -> None:
             )
             assert "The URL started a download instead of loading a page." in text
             assert '"/dl/sitex/export.csv" (text/plain, 40 bytes)' in text
+            # The browser stayed on the page it was on, so there is no title to show or read.
+            for absent in ("Page title", "Call browser_snapshot", "URL: (none)"):
+                assert absent not in text
 
     run(scenario())
 
@@ -1246,9 +1255,15 @@ def test_a_login_that_expired_before_a_browser_started_has_no_page_to_show(
             result = await mcp.call_tool("browser_open", {"site": "sitex"})
             assert not result.is_error
             text = text_of(result)
-            assert text.startswith("The saved login for sitex has expired. Call browser_login")
-            assert "URL: (none)" in text
-            assert "Call browser_snapshot" not in text
+            assert text.splitlines() == [
+                (
+                    "The saved login for sitex has expired. Call browser_login for sitex, "
+                    "without asking first, then call browser_open again."
+                ),
+                "Site: sitex (contained: it can reach only the hosts this site allows)",
+            ]
+            for absent in ("URL:", "Refused hosts", "Page title", "```", "Call browser_snapshot"):
+                assert absent not in text
 
     run(scenario())
 
@@ -3093,7 +3108,8 @@ def test_a_navigation_the_proxy_refused_is_a_result_whose_first_line_names_host_
             assert "Refused hosts: evil.test:443 (not in the allow list)" in lines
             assert "valetkey allow SITE HOST" in text_of(result)
             assert "ERR_TUNNEL" not in text_of(result)
-            assert "Call browser_snapshot" not in text_of(result)  # no page to read
+            for absent in ("Call browser_snapshot", "Page title", "```"):
+                assert absent not in text_of(result)  # no page to read
 
     run(scenario())
 
@@ -3123,7 +3139,9 @@ def test_an_open_whose_start_page_host_was_refused_says_so_and_that_no_session_r
             )
             assert "Refused hosts: sitex.test:443" in text
             assert "No session is running. Open the site again once the host is allowed." in text
-            assert "Call browser_snapshot" not in text
+            assert "URL: https://sitex.test" in text
+            for absent in ("Call browser_snapshot", "Page title", "```"):
+                assert absent not in text
 
     run(scenario())
 

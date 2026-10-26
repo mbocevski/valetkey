@@ -59,6 +59,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- `browser_open` and `browser_navigate` leave out the title block, `URL: (none)` and an empty refused list when no page loaded: an expired login, a refused start page or a URL that only started a download.
 - `valetkey bridge` now stays connected through a real `ssh`: it gave ssh `/dev/null` as input, which ended the remote side at once, so the server never kept the bridge.
 - `browser_snapshot` now includes the page's text, such as paragraphs, lists and tables, cuts a very long page with a note saying so, and takes `interactive` for the short list of elements to act on.
 - `browser_login` no longer closes a running session when there is no screen to open the login on, and when a login window fails after the session was closed, the error says so.

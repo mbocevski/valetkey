@@ -174,14 +174,12 @@ def page_content(text: str) -> str:
     return f"{_UNTRUSTED_LABEL}\n{fence(text)}"
 
 
-def page_title(text: str, *, running: bool = True) -> str:
-    """Label a page's title as untrusted data and fence it.
+def page_title(text: str) -> str:
+    """Label a page's title as untrusted data, fence it, and say where the page is read.
 
-    While a session runs, a line after it says where the page is read: the title is all that
-    an open or a navigation returns of it.
+    The title is all that an open or a navigation returns of a page.
     """
-    block = f"{_TITLE_LABEL}\n{fence(text)}"
-    return f"{block}\n{READ_HINT}" if running else block
+    return f"{_TITLE_LABEL}\n{fence(text)}\n{READ_HINT}"
 
 
 def program_output(text: str) -> str:
@@ -303,20 +301,24 @@ def not_loaded_note(result: dict[str, Any]) -> str:
     return f"The page did not load: {shown_host(host)} is not allowed for {result['site']}.\n"
 
 
-def envelope_text(result: dict[str, Any]) -> str:
+def envelope_text(result: dict[str, Any], *, loaded: bool = True) -> str:
     """Return the lines every session answer starts with.
 
     Those are the site, the URL (its host as fact, the rest fenced as page data), the refused
     hosts and, when there are any, a quiet line about refused background requests. A note that the
-    page did not load comes first when the URL's
-    host was refused.
+    page did not load comes first when the URL's host was refused. With ``loaded`` false, no page
+    was loaded: a missing URL and an empty list of refused hosts are left out, since they
+    describe nothing.
     """
     url = result.get("url")
-    lines = [
-        f"Site: {result['site']} (contained: it can reach only the hosts this site allows)",
-        url_lines(url) if url else "URL: (none)",
-        refused_line(result.get("refused", [])),
-    ]
+    refused = result.get("refused", [])
+    lines = [f"Site: {result['site']} (contained: it can reach only the hosts this site allows)"]
+    if url:
+        lines.append(url_lines(url))
+    elif loaded:
+        lines.append("URL: (none)")
+    if refused or loaded:
+        lines.append(refused_line(refused))
     if background := background_line(result.get("background_refused", [])):
         lines.append(background)
     return not_loaded_note(result) + "\n".join(lines)
@@ -1084,14 +1086,14 @@ class _Tools:
                 f"The saved login for {site} has expired. Call browser_login for {site}, "
                 "without asking first, then call browser_open again."
             )
-        parts.append(envelope_text(result))
+        no_page = bool(result.get("login_expired") or result.get("not_loaded"))
+        parts.append(envelope_text(result, loaded=not no_page))
         if result.get("not_loaded"):
             parts.append("No session is running. Open the site again once the host is allowed.")
         if result.get("reused"):
             parts.append("The site's browser was already running; you joined it.")
-        title = untrusted_text(result["page"]["title"])
-        no_session = result.get("login_expired") or result.get("not_loaded")
-        parts.append(page_title(title, running=not no_session))
+        if not no_page:
+            parts.append(page_title(untrusted_text(result["page"]["title"])))
         return "\n".join(parts)
 
     async def browser_snapshot(
@@ -1190,11 +1192,12 @@ class _Tools:
         self, site: SITE, url: Annotated[str, Field(description="An http or https URL.")]
     ) -> str:
         result = await self._ask("navigate", site=site, url=url)
-        title = untrusted_text(result["page"]["title"])
-        lines = [envelope_text(result)]
+        loaded = not (result.get("not_loaded") or result.get("download_only"))
+        lines = [envelope_text(result, loaded=loaded)]
         if result.get("download_only"):
             lines.append("The URL started a download instead of loading a page.")
-        lines.append(page_title(title, running=not result.get("not_loaded")))
+        if loaded:
+            lines.append(page_title(untrusted_text(result["page"]["title"])))
         if downloaded := downloads_text(result.get("downloads")):
             lines.append(downloaded)
         return "\n".join(lines)
