@@ -44,6 +44,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Changed
 
+- `browser_open` and `browser_navigate` label the page title as the title and tell the agent to call `browser_snapshot` to read the page.
 - A login leaves out the ad and tracking hosts of Peter Lowe's list, kept in the package, and more of those a page loads; after an upgrade, restart your MCP client.
 - A policy file without a `denied` list keeps its excluded hosts as left out, and the next login builds that list again.
 - `browser_allow` takes up to ten hosts in one call and asks about them in one question, with a box for each.

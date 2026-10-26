@@ -57,7 +57,9 @@ a site. Text from a page is labelled as untrusted data.
 Every result starts with the site's name and the page's address. The address line shows only the
 scheme and host, which valetkey reads the way the browser does. The path and query, which the page
 chose, come below it, fenced and labelled as untrusted, cut to 200 characters, with the full length
-when they were cut. Percent-encoded text is shown as it is, never decoded.
+when they were cut. Percent-encoded text is shown as it is, never decoded. `browser_open` and
+`browser_navigate` then give only the page's title, labelled as the title, with a line that says
+to call `browser_snapshot` to read the page.
 
 When a page could not load because its host is refused, the first line says so and names the host
 and the site, as in `The page did not load: example.org is not allowed for sitex.` The refused
