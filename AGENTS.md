@@ -57,19 +57,28 @@ does and why. No filler words, stock phrases, praise words, emoji, references to
 issue numbers, or mentions of the tools used to write the code. Keep sentences under 35 words, use
 at most one em dash per paragraph, and write headings in sentence case.
 
-## README
+## README and docs
 
-`README.md` is for users, and it stays short. A hook caps it at 700 words of prose and 8 sections.
-It also rejects boilerplate sections ("Features", "Overview", "Why valetkey"), list items that
-open with a bold label, lists nested more than one level, horizontal rules and more than 3 badges.
-When something needs more room than that, it belongs in its own page, not the README.
+`README.md` is for users, and it stays short: an overview, the install commands, how to connect an
+MCP client, a walkthrough and a summary of what valetkey contains. A hook caps it at 700 words of
+prose and 8 sections. It also rejects boilerplate sections ("Features", "Overview", "Why
+valetkey"), list items that open with a bold label, lists nested more than one level, horizontal
+rules and more than 3 badges. When something needs more room, it goes on a page in `docs/` and the
+README links to it: `install.md`, `commands.md`, `mcp.md`, `security.md` and `troubleshooting.md`.
 
-Two more hooks keep it current:
+The pages in `docs/` follow the same shape rules, but have no overall budget. Instead, no section
+may have more than 400 words of prose, so a long section is split or turned into a list. Vale
+checks the wording of every Markdown file.
+
+Hooks keep the files current:
 
 - Blocks between `<!-- begin: valetkey ARGS -->` and `<!-- end: valetkey ARGS -->` hold the
-  output of `valetkey ARGS`, and the stated Python version must match `requires-python`. When a
-  block is stale the commit fails; run `uv run python tools/readme_check.py facts --fix` and
-  review the result. To document a new command's help, add a pair of markers for it.
+  output of `valetkey ARGS`. When a block is stale the commit fails; run
+  `uv run python tools/readme_check.py facts --fix` and review the result. A new command needs a
+  block in `docs/commands.md`: the check fails for a command in `valetkey --help` that has none.
+- The README must state the Python version that `requires-python` sets and the agent-browser
+  versions in `valetkey.sessions`. A relative link in the README or a page must point at a file
+  that exists.
 - A `feat` commit or a breaking change (`!`, `BREAKING CHANGE:`) must stage `README.md`. If the
   README is still accurate, add a `Docs: none` trailer to the commit message instead. A hook
   checks each commit, and CI checks every commit in a pull request. A pull request labeled

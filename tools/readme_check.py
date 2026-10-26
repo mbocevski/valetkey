@@ -6,15 +6,18 @@
     python tools/readme_check.py commit-msg MESSAGE_FILE
     python tools/readme_check.py range BASE HEAD [--skip]
 
-``facts`` checks what the README states about the code. A block between
-``<!-- begin: valetkey ARGS -->`` and ``<!-- end: valetkey ARGS -->`` must hold the
-output of ``valetkey ARGS`` in a ``text`` code fence; ``--fix`` rewrites stale blocks.
-The README must also state the Python version that ``requires-python`` sets.
+``facts`` checks what the README and the pages in ``docs/`` state about the code. A block
+between ``<!-- begin: valetkey ARGS -->`` and ``<!-- end: valetkey ARGS -->`` must hold the
+output of ``valetkey ARGS`` in a ``text`` code fence; ``--fix`` rewrites stale blocks. The
+README must also state the Python version that ``requires-python`` sets and the agent-browser
+versions. Every command in ``valetkey --help`` needs a block in ``docs/commands.md``, and a
+relative link in any of the files must point at a file that exists.
 
 ``style`` keeps the README short and plain. It caps the prose at a word budget and
 the number of sections, and rejects the habits that pad a README: boilerplate
 sections, list items that open with a bold label, deeply nested lists, horizontal
-rules and walls of badges. Vale checks the wording; this checks the shape.
+rules and walls of badges. The pages in ``docs/`` get the same shape rules and, instead of the
+budget, a limit on the words in each section. Vale checks the wording; this checks the shape.
 
 ``commit-msg`` checks whether a commit should have changed the README. A ``feat``
 commit or a breaking change alters what users can do, so it must stage README.md,
@@ -40,6 +43,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 README = conventional.ROOT / "README.md"
+DOCS = conventional.ROOT / "docs"
+COMMANDS_PAGE = DOCS / "commands.md"
 PYPROJECT = conventional.ROOT / "pyproject.toml"
 
 BLOCK = re.compile(
@@ -53,10 +58,17 @@ HELP_WIDTH = "80"
 MAX_WORDS = 700
 MAX_SECTIONS = 8
 MAX_BADGES = 3
+MAX_SECTION_WORDS = 400
+"""The most words of prose a section of a page in ``docs/`` may have. A longer one wants to be
+two sections or a list."""
 FENCE = re.compile(r"^```.*?^```[^\n]*$", re.MULTILINE | re.DOTALL)
 COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9'\u2019-]*")
 SECTION = re.compile(r"^## ", re.MULTILINE)
+HEADING = re.compile(r"^#{1,6}[ \t]+(?P<title>.+?)[ \t]*$", re.MULTILINE)
+LINK = re.compile(r"\[[^\]]*\]\((?P<target>[^)\s]+)\)")
+EXTERNAL = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|#)", re.IGNORECASE)
+COMMAND_LINE = re.compile(r"^  (?P<name>[a-z][a-z0-9-]*): ", re.MULTILINE)
 BOILERPLATE = re.compile(
     r"^#{1,6}\s+(?:(?:key\s+)?features|overview|introduction|why\s+valetkey\b.*|conclusion"
     r"|summary|table\s+of\s+contents)\s*\??$",
@@ -142,29 +154,104 @@ def check_agent_browser(readme: str) -> list[Problem]:
     return [Problem(f"the requirements must say that agent-browser is '{wanted}'")]
 
 
+def shown(path: Path) -> str:
+    """Return ``path`` relative to the repository, for a message."""
+    try:
+        return str(path.relative_to(conventional.ROOT))
+    except ValueError:
+        return str(path)
+
+
+def documents() -> list[Path]:
+    """Return the README and every page in ``docs/``, the files the facts are checked in."""
+    return [README, *sorted(DOCS.glob("**/*.md"))]
+
+
+def listed_commands(help_text: str) -> list[str]:
+    """Return the command names in the output of ``valetkey --help``."""
+    return COMMAND_LINE.findall(help_text)
+
+
+def check_commands(page: str, commands: list[str]) -> list[Problem]:
+    """Return a problem for each command that has no generated help block in ``page``."""
+    documented = {
+        match["args"].split()[0] for match in BLOCK.finditer(page) if match["args"].split()
+    }
+    return [
+        Problem(f"`valetkey {name}` has no help block; add <!-- begin: valetkey {name} --help -->")
+        for name in commands
+        if name not in documented
+    ]
+
+
+def check_links(text: str, directory: Path) -> list[Problem]:
+    """Return a problem for each relative link whose target does not exist under ``directory``."""
+    problems = []
+    for match in LINK.finditer(text):
+        target = match["target"]
+        if EXTERNAL.match(target) or inside_code(text, match.start()):
+            continue
+        if not (directory / target.partition("#")[0]).exists():
+            problems.append(Problem(f"line {line_of(text, match.start())}: no file at {target}"))
+    return problems
+
+
+def inside_code(text: str, index: int) -> bool:
+    """Tell whether ``index`` falls in a code fence, a generated block or a comment."""
+    return any(
+        m.start() <= index < m.end()
+        for pattern in (BLOCK, FENCE, COMMENT)
+        for m in pattern.finditer(text)
+    )
+
+
 def facts(*, fix: bool) -> int:
-    """Check the README's statements about the code, rewriting stale blocks if ``fix``."""
-    readme = README.read_text()
-    refreshed, problems = check_blocks(readme)
-    problems += check_python(refreshed, PYPROJECT.read_text())
-    problems += check_agent_browser(refreshed)
-    if fix and refreshed != readme:
-        README.write_text(refreshed)
-    for problem in problems:
-        print(f"README.md: {problem.message}", file=sys.stderr)
-    if problems:
+    """Check what the README and docs state about the code; ``fix`` rewrites stale blocks."""
+    found: list[tuple[Path, Problem]] = []
+    for path in documents():
+        text = path.read_text()
+        refreshed, problems = check_blocks(text)
+        problems += check_links(refreshed, path.parent)
+        if path == README:
+            problems += check_python(refreshed, PYPROJECT.read_text())
+            problems += check_agent_browser(refreshed)
+        if path == COMMANDS_PAGE:
+            problems += check_commands(refreshed, listed_commands(run_valetkey(["--help"])))
+        if fix and refreshed != text:
+            path.write_text(refreshed)
+        found += [(path, problem) for problem in problems]
+    for path, problem in found:
+        print(f"{shown(path)}: {problem.message}", file=sys.stderr)
+    if found:
         hint = (
-            "rewrote the generated blocks; review and stage README.md"
+            "rewrote the generated blocks; review and stage the files"
             if fix
             else ("run `uv run python tools/readme_check.py facts --fix` for generated blocks")
         )
         print(hint, file=sys.stderr)
-    return 1 if problems else 0
+    return 1 if found else 0
 
 
 def line_of(text: str, index: int) -> int:
     """Return the 1-based line number of ``index`` in ``text``."""
     return text.count("\n", 0, index) + 1
+
+
+def shape_problems(text: str) -> list[Problem]:
+    """Return the padding habits in ``text``: boilerplate headings, bold-label items and so on."""
+    rules = (
+        (BOILERPLATE, "boilerplate section; put the content where a reader looks for it"),
+        (BOLD_LABEL_ITEM, "list item opens with a bold label; write the sentence plainly"),
+        (DEEP_ITEM, "list nested more than one level; flatten it or use prose"),
+        (RULE, "horizontal rule; headings already separate sections"),
+    )
+    # Line numbers refer to the file as written, so match against it, skipping code.
+    return [
+        Problem(f"line {line_of(text, match.start())}: {message}")
+        for pattern, message in rules
+        for match in pattern.finditer(text)
+        if not inside_code(text, match.start())
+    ]
 
 
 def check_style(readme: str) -> list[Problem]:
@@ -181,34 +268,36 @@ def check_style(readme: str) -> list[Problem]:
     badges = len(BADGE.findall(prose))
     if badges > MAX_BADGES:
         problems.append(Problem(f"{badges} badges; at most {MAX_BADGES}"))
+    return problems + shape_problems(readme)
 
-    rules = (
-        (BOILERPLATE, "boilerplate section; put the content where a reader looks for it"),
-        (BOLD_LABEL_ITEM, "list item opens with a bold label; write the sentence plainly"),
-        (DEEP_ITEM, "list nested more than one level; flatten it or use prose"),
-        (RULE, "horizontal rule; headings already separate sections"),
-    )
-    # Line numbers refer to the README as written, so match against it, skipping code.
-    hidden = [
-        (m.start(), m.end())
-        for pattern in (BLOCK, FENCE, COMMENT)
-        for m in pattern.finditer(readme)
-    ]
-    problems.extend(
-        Problem(f"line {line_of(readme, match.start())}: {message}")
-        for pattern, message in rules
-        for match in pattern.finditer(readme)
-        if not any(start <= match.start() < end for start, end in hidden)
-    )
-    return problems
+
+def check_docs_style(page: str) -> list[Problem]:
+    """Return what makes a page in ``docs/`` noisy, and each section that has grown too long."""
+    prose = COMMENT.sub("", FENCE.sub("", BLOCK.sub("", page)))
+    headings = list(HEADING.finditer(prose))
+    problems: list[Problem] = []
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(prose)
+        words = len(WORD.findall(prose[heading.end() : end]))
+        if words > MAX_SECTION_WORDS:
+            problems.append(
+                Problem(
+                    f"section '{heading['title']}' has {words} words; "
+                    f"the limit is {MAX_SECTION_WORDS}"
+                )
+            )
+    return shape_problems(page) + problems
 
 
 def style() -> int:
-    """Check that the README stays short and plain."""
-    problems = check_style(README.read_text())
-    for problem in problems:
-        print(f"README.md: {problem.message}", file=sys.stderr)
-    return 1 if problems else 0
+    """Check that the README stays short and plain, and that the pages in ``docs/`` do too."""
+    found = [(README, problem) for problem in check_style(README.read_text())]
+    for path in documents():
+        if path != README:
+            found += [(path, problem) for problem in check_docs_style(path.read_text())]
+    for path, problem in found:
+        print(f"{shown(path)}: {problem.message}", file=sys.stderr)
+    return 1 if found else 0
 
 
 def needs_readme(message: str) -> bool:

@@ -36,4 +36,5 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- The install instructions name the ways valetkey ships, the Arch package and `uv tool install .` from a checkout, and commands, MCP tools and security have pages in `docs/`.
 - `valetkey allow` and `valetkey deny` no longer forget a site's login pages.

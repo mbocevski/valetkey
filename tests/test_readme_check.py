@@ -146,6 +146,8 @@ def test_facts_fix_rewrites_a_stale_block(
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(PYPROJECT)
     monkeypatch.setattr(readme_check, "README", readme)
+    monkeypatch.setattr(readme_check, "DOCS", tmp_path / "docs")
+    monkeypatch.setattr(readme_check, "COMMANDS_PAGE", tmp_path / "docs" / "commands.md")
     monkeypatch.setattr(readme_check, "PYPROJECT", pyproject)
     assert readme_check.facts(fix=True) == 1
     assert "rewrote the generated blocks" in capsys.readouterr().err
@@ -274,6 +276,7 @@ def test_style_reports_problems(
     readme = tmp_path / "README.md"
     readme.write_text("## Overview\n")
     monkeypatch.setattr(readme_check, "README", readme)
+    monkeypatch.setattr(readme_check, "DOCS", tmp_path / "docs")
     assert readme_check.style() == 1
     assert "README.md: line 1: boilerplate section" in capsys.readouterr().err
 
@@ -289,3 +292,171 @@ def test_agent_browser_requirement_states_the_minimum_and_the_tested_version() -
     ):
         (problem,) = readme_check.check_agent_browser(bad)
         assert wanted in problem.message
+
+
+# -- the pages in docs/ ------------------------------------------------------------------------
+
+HELP = """Usage: valetkey COMMAND
+
+Commands:
+  allow: Allow a host.
+  sites: List the sites.
+  --help, -h: Display this message and exit.
+  --version: Display application version.
+"""
+
+
+@pytest.fixture
+def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A README, a docs folder and a project file the checks read instead of the real ones."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "pyproject.toml").write_text(PYPROJECT)
+    (tmp_path / "README.md").write_text(
+        f"Python 3.14 or newer\n- [agent-browser](https://example.org) {REQUIREMENT}\n"
+    )
+    monkeypatch.setattr(readme_check, "README", tmp_path / "README.md")
+    monkeypatch.setattr(readme_check, "DOCS", tmp_path / "docs")
+    monkeypatch.setattr(readme_check, "COMMANDS_PAGE", tmp_path / "docs" / "commands.md")
+    monkeypatch.setattr(readme_check, "PYPROJECT", tmp_path / "pyproject.toml")
+    monkeypatch.setattr(readme_check, "run_valetkey", fake_run)
+    return tmp_path
+
+
+def test_documents_are_the_readme_and_every_page(workspace: Path) -> None:
+    (workspace / "docs" / "b.md").write_text("b\n")
+    (workspace / "docs" / "a.md").write_text("a\n")
+    (workspace / "docs" / "notes.txt").write_text("not a page\n")
+    assert [p.name for p in readme_check.documents()] == ["README.md", "a.md", "b.md"]
+
+
+def test_the_commands_come_from_the_help() -> None:
+    assert readme_check.listed_commands(HELP) == ["allow", "sites"]
+
+
+def test_every_command_needs_a_block_in_the_commands_page() -> None:
+    page = block("allow --help", "x\n") + block("sites --help", "y\n") + block("--help", "z\n")
+    assert readme_check.check_commands(page, ["allow", "sites"]) == []
+    (problem,) = readme_check.check_commands(block("allow --help", "x\n"), ["allow", "sites"])
+    assert "`valetkey sites` has no help block" in problem.message
+    assert "begin: valetkey sites --help" in problem.message
+    assert len(readme_check.check_commands("", ["allow", "sites"])) == 2
+
+
+def test_facts_checks_the_blocks_of_every_page(
+    workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    page = workspace / "docs" / "install.md"
+    page.write_text(block("--version", "```text\nold\n```\n") + "\n")
+    assert readme_check.facts(fix=False) == 1
+    assert "install.md: the output of `valetkey --version` has changed" in capsys.readouterr().err
+    assert readme_check.facts(fix=True) == 1
+    assert "valetkey " in page.read_text()
+    assert "old" not in page.read_text()
+    assert readme_check.facts(fix=False) == 0
+
+
+def test_facts_wants_every_command_in_the_commands_page(
+    workspace: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(readme_check, "run_valetkey", lambda _args: HELP)
+    page = workspace / "docs" / "commands.md"
+    page.write_text(block("allow --help", "```text\nold\n```\n") + "\n")
+    assert readme_check.facts(fix=True) == 1
+    err = capsys.readouterr().err
+    assert "commands.md: `valetkey sites` has no help block" in err
+    page.write_text(page.read_text() + block("sites --help", "```text\nold\n```\n") + "\n")
+    readme_check.facts(fix=True)  # settles the block just added
+    assert readme_check.facts(fix=False) == 0
+
+
+@pytest.mark.usefixtures("workspace")
+def test_facts_without_a_commands_page_does_not_ask_for_one() -> None:
+    assert readme_check.facts(fix=False) == 0
+
+
+def test_a_relative_link_must_point_at_a_file(tmp_path: Path) -> None:
+    (tmp_path / "other.md").write_text("x\n")
+    text = (
+        "[ok](other.md) [fragment](other.md#part) [site](https://example.org/x) "
+        "[mail](mailto:a@b.c) [here](#top) [gone](missing.md) [gone too](missing.md#part)\n"
+    )
+    problems = [p.message for p in readme_check.check_links(text, tmp_path)]
+    assert problems == ["line 1: no file at missing.md", "line 1: no file at missing.md#part"]
+
+
+def test_links_in_code_and_generated_blocks_are_not_checked(tmp_path: Path) -> None:
+    text = "```md\n[x](missing.md)\n```\n" + block("--help", "```text\n[y](gone.md)\n```\n")
+    assert readme_check.check_links(text, tmp_path) == []
+
+
+def test_facts_reports_a_broken_link_in_a_page(
+    workspace: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (workspace / "docs" / "a.md").write_text("see [b](b.md)\n")
+    assert readme_check.facts(fix=False) == 1
+    assert "a.md: line 1: no file at b.md" in capsys.readouterr().err
+    (workspace / "docs" / "b.md").write_text("b\n")
+    assert readme_check.facts(fix=False) == 0
+
+
+def docs_messages(page: str) -> list[str]:
+    return [p.message for p in readme_check.check_docs_style(page)]
+
+
+def test_a_page_with_short_sections_passes() -> None:
+    assert docs_messages("# Page\n\nSome words.\n\n## Part\n\nMore words.\n") == []
+
+
+def test_a_long_section_is_reported_by_name() -> None:
+    long = " ".join(["word"] * (readme_check.MAX_SECTION_WORDS + 1))
+    page = f"# Page\n\nShort.\n\n## The long one\n\n{long}\n\n## After\n\nShort.\n"
+    limit = readme_check.MAX_SECTION_WORDS
+    assert docs_messages(page) == [
+        f"section 'The long one' has {limit + 1} words; the limit is {limit}"
+    ]
+
+
+def test_a_section_at_the_limit_passes_and_the_last_section_counts() -> None:
+    at_limit = " ".join(["word"] * readme_check.MAX_SECTION_WORDS)
+    assert docs_messages(f"## One\n\n{at_limit}\n") == []
+    assert len(docs_messages(f"## One\n\n{at_limit} more\n")) == 1
+
+
+def test_generated_blocks_and_code_do_not_count_toward_a_section() -> None:
+    filler = "\n".join(["output line"] * 500)
+    page = f"## One\n\n```text\n{filler}\n```\n\n" + block("--help", f"```text\n{filler}\n```\n")
+    assert docs_messages(page) == []
+
+
+def test_pages_have_no_word_budget_or_section_count() -> None:
+    sections = "".join(
+        f"## Part {n}\n\nWords here.\n\n" for n in range(readme_check.MAX_SECTIONS + 4)
+    )
+    assert docs_messages(sections) == []
+
+
+def test_pages_get_the_shape_rules() -> None:
+    page = "## Overview\n\n- **Bold:** x\n\n---\n"
+    found = docs_messages(page)
+    assert any("boilerplate section" in m for m in found)
+    assert any("bold label" in m for m in found)
+    assert any("horizontal rule" in m for m in found)
+
+
+def test_style_checks_the_pages_too(workspace: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert readme_check.style() == 0
+    (workspace / "docs" / "a.md").write_text("## Summary\n")
+    assert readme_check.style() == 1
+    assert "a.md: line 1: boilerplate section" in capsys.readouterr().err
+
+
+def test_a_path_outside_the_repository_is_shown_whole(tmp_path: Path) -> None:
+    assert readme_check.shown(tmp_path / "x.md") == str(tmp_path / "x.md")
+    assert readme_check.shown(conventional.ROOT / "docs" / "x.md") == "docs/x.md"
+
+
+def test_the_commands_page_exists_and_documents_every_command() -> None:
+    assert readme_check.COMMANDS_PAGE.is_file()
+    page = readme_check.COMMANDS_PAGE.read_text()
+    help_text = readme_check.run_valetkey(["--help"])
+    assert readme_check.check_commands(page, readme_check.listed_commands(help_text)) == []
