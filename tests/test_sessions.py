@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import contextlib
 import json
 import logging
@@ -682,7 +683,7 @@ def test_the_session_has_no_eval_or_passthrough() -> None:
     assert public == {
         "start", "is_alive", "close", "open", "snapshot", "outline", "click", "fill", "press_enter",
         "current_url", "screenshot", "clear_requests", "attachments", "password_fields",
-        "resource_url", "images", "save",
+        "resource_url", "images", "fetch",
     }  # fmt: skip
 
 
@@ -700,6 +701,13 @@ def test_the_session_has_no_eval_or_passthrough() -> None:
         ("/a.png 1.5x,/b.png 2x", "/b.png"),
         ("/a,b.png 1x, /c.png 2x", "/c.png"),
         ("data:image/png;base64,AAAA,BBB 1x, /big.png 2x", "/big.png"),
+        (
+            (
+                "/cdn-cgi/image/fit=contain,width=640/a.jpg 640w, "
+                "/cdn-cgi/image/fit=contain,width=1280/a.jpg 1280w"
+            ),
+            "/cdn-cgi/image/fit=contain,width=1280/a.jpg",
+        ),
         ("", ""),
         ("   ", ""),
     ],
@@ -708,8 +716,33 @@ def test_the_largest_srcset_candidate_is_the_one_saved(srcset: str, expected: st
     assert sessions.largest_candidate(srcset) == expected
 
 
+PICTURE = b"\x89PNG\r\n\x1a\nthe picture"
+
+
+def har_of(
+    url: str,
+    *,
+    status: int = 200,
+    body: bytes | str = PICTURE,
+    mime: str = "image/png",
+    **extra: object,
+) -> dict[str, Any]:
+    """What agent-browser writes for one document request, in the part this code reads."""
+    content: dict[str, Any] = {"mimeType": mime, "size": len(body)}
+    if isinstance(body, bytes):
+        content |= {"text": base64.b64encode(body).decode(), "encoding": "base64"}
+    else:
+        content["text"] = body
+    entry = {
+        "_resourceType": "Document",
+        "request": {"method": "GET", "url": url},
+        "response": {"status": status, "content": content},
+    } | extra
+    return {"log": {"entries": [entry]}}
+
+
 class Tabs:
-    """Stands in for ``Session._call``: answers the calls a save makes, and records them."""
+    """Stands in for ``Session._call``: answers the calls a fetch makes, and records them."""
 
     def __init__(self, answers: dict[tuple[str, ...], Any] | None = None) -> None:
         self.calls: list[tuple[str, ...]] = []
@@ -717,8 +750,12 @@ class Tabs:
         self.errors: dict[tuple[str, ...], Exception] = {}
         self.open_tabs = ["t1"]
         self.front = "t1"
+        self.tab_url = "https://shop.test/a.png"
+        self.record: Any = har_of("https://shop.test/a.png")
+        """What the browser writes when the recording stops: JSON, or raw bytes for a bad file."""
+        self.recorded_at: Path | None = None
 
-    def __call__(self, *verb: str, timeout: float | None = None) -> dict[str, Any]:  # noqa: ARG002
+    def __call__(self, *verb: str, timeout: float | None = None) -> dict[str, Any]:  # noqa: ARG002, C901, PLR0911 - a fake answering each verb in turn
         self.calls.append(verb)
         for prefix, error in self.errors.items():
             if verb[: len(prefix)] == prefix:
@@ -736,6 +773,16 @@ class Tabs:
             self.open_tabs.remove(verb[2])
             self.front = self.open_tabs[0]
             return {"closed": True}
+        if verb[:3] == ("network", "har", "stop"):
+            self.recorded_at = Path(verb[3])
+            self.recorded_at.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(self.record, bytes):
+                self.recorded_at.write_bytes(self.record)
+            else:
+                self.recorded_at.write_text(json.dumps(self.record), encoding="utf-8")
+            return {"path": verb[3]}
+        if verb == ("get", "url"):
+            return {"url": self.tab_url}
         if verb[0] == "tab":
             self.front = verb[1]
             return {}
@@ -748,51 +795,238 @@ def saving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tabs: Tabs) -> sessi
     return session
 
 
-def test_save_opens_the_address_in_a_tab_of_its_own_and_leaves_no_tab_behind(
+def test_fetch_opens_the_address_in_a_tab_of_its_own_and_reads_the_browsers_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tabs = Tabs()
-    saving(tmp_path, monkeypatch, tabs).save("https://shop.test/a.png")
-    verbs = [call[:2] if call[0] == "tab" else (call[0],) for call in tabs.calls]
-    assert verbs == [
+    session = saving(tmp_path, monkeypatch, tabs)
+    body = session.fetch("https://shop.test/a.png")
+    assert body == sessions.Body("https://shop.test/a.png", "image/png", PICTURE)
+    steps = [call[:3] if call[:2] == ("network", "har") else call[:2] for call in tabs.calls]
+    assert steps == [
         ("tab", "list"),
+        ("network", "har", "start"),
         ("tab", "new"),
-        ("eval",),
+        ("get", "url"),
+        ("network", "har", "stop"),
         ("tab", "list"),
         ("tab", "close"),
         ("tab", "t1"),
     ]
-    assert tabs.calls[1] == ("tab", "new", "https://shop.test/a.png")
-    assert tabs.calls[4] == ("tab", "close", "t2")
+    assert tabs.calls[1] == ("network", "har", "start", "--content", "all")
+    assert tabs.calls[2] == ("tab", "new", "https://shop.test/a.png")
+    assert tabs.calls[6] == ("tab", "close", "t2")
     assert (tabs.open_tabs, tabs.front) == (["t1"], "t1")
+    # The record went where the sandbox can write and the daemon can read, and is gone again.
+    assert tabs.recorded_at is not None
+    assert tabs.recorded_at.parent == session.paths.screenshots_dir
+    assert not tabs.recorded_at.exists()
 
 
-def test_the_save_script_fetches_the_tab_address_and_hands_it_to_the_download_manager(
+def test_nothing_runs_in_the_page_of_the_address(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tabs = Tabs()
-    saving(tmp_path, monkeypatch, tabs).save("https://shop.test/a.png")
-    script = next(call[1] for call in tabs.calls if call[0] == "eval")
-    assert "fetch(location.href, {credentials: 'include'})" in script
-    assert "!response.ok" in script  # a refusal or an error page is not a file
-    assert f"const limit = {sessions.SAVE_LIMIT};" in script
-    assert "LIMIT" not in script
-    assert "link.download = name || 'download'" in script
-    assert not script.startswith("-")
-    argv, _ = sessions.call_command(
-        "/x/agent-browser", make_session(tmp_path).paths, tmp_path, "eval", script
-    )
-    assert argv[-1] == script  # the guard on arguments that look like options lets it through
+    saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
+    assert "eval" not in {call[0] for call in tabs.calls}
 
 
-def test_a_save_that_fails_still_closes_its_tab_and_says_why(
+def test_the_argument_guard_lets_the_recording_start_and_refuses_other_options(
+    tmp_path: Path,
+) -> None:
+    paths = make_session(tmp_path).paths
+    argv, _ = sessions.call_command("/x/agent-browser", paths, tmp_path, *HAR_START)
+    assert argv[-5:] == ["network", "har", "start", "--content", "all"]
+    with pytest.raises(ValueError, match="looks like an option"):
+        sessions.call_command("/x/agent-browser", paths, tmp_path, "network", "har", "--headed")
+
+
+HAR_START = ("network", "har", "start", "--content", "all")
+
+
+def test_the_document_request_for_the_tab_address_is_the_one_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = har_of("https://shop.test/old", status=302)["log"]["entries"][0]
+    other = har_of("https://shop.test/other.png", body=b"other")["log"]["entries"][0]
+    script = har_of("https://shop.test/a.png", body=b"not a document")["log"]["entries"][0]
+    script["_resourceType"] = "Script"
+    last = har_of("https://shop.test/a.png", mime="image/avif")["log"]["entries"][0]
+    tabs = Tabs()
+    tabs.record = {"log": {"entries": [first, other, script, last]}}
+    tabs.tab_url = "https://shop.test/a.png#fragment"
+    body = saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/old")
+    assert body == sessions.Body("https://shop.test/a.png", "image/avif", PICTURE)
+
+
+def test_when_the_browser_puts_its_own_viewer_in_the_tab_the_file_is_what_the_server_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf = har_of("https://shop.test/a.png", body=b"PNGDATA", mime="image/png")
+    viewer = har_of("chrome-extension://abc/index.html", body="<viewer/>", mime="text/html")
+    tabs = Tabs()
+    tabs.record = {"log": {"entries": [*pdf["log"]["entries"], *viewer["log"]["entries"]]}}
+    tabs.tab_url = "chrome-extension://abc/index.html"
+    body = saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
+    assert body == sessions.Body("https://shop.test/a.png", "image/png", b"PNGDATA")
+    tabs.record = viewer
+    with pytest.raises(sessions.AgentBrowserError, match="kept no record"):
+        saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
+
+
+def test_a_pdf_is_saved_by_the_browser_from_the_tab_because_the_record_holds_its_viewer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tabs = Tabs()
-    tabs.errors[("eval",)] = sessions.AgentBrowserError("the server answered 403")
-    with pytest.raises(sessions.AgentBrowserError, match="403"):
-        saving(tmp_path, monkeypatch, tabs).save("https://shop.test/a.png")
+    again = har_of("https://shop.test/a.pdf", body="", mime="text/html")["log"]["entries"]
+    first = har_of("https://shop.test/a.pdf", body="", mime="application/pdf")["log"]["entries"]
+    tabs.record = {"log": {"entries": [*first, *again]}}  # the viewer asks for it a second time
+    tabs.tab_url = "https://shop.test/a.pdf"
+    assert saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.pdf") is None
+    steps = [call[0] for call in tabs.calls]
+    assert steps.index("eval") > steps.index("get")  # in the tab, before it is closed
+    assert steps.index("eval") < len(steps) - steps[::-1].index("tab") - 1
+    assert "fetch(location.href" in tabs.calls[steps.index("eval")][1]
+
+
+def test_a_text_body_is_taken_as_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tabs = Tabs()
+    tabs.record = har_of("https://shop.test/a.png", body="<svg/>é", mime="image/svg+xml")
+    body = saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
+    assert body == sessions.Body("https://shop.test/a.png", "image/svg+xml", "<svg/>é".encode())
+
+
+def test_a_record_with_no_type_says_it_is_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tabs = Tabs()
+    tabs.record = har_of("https://shop.test/a.png", mime="")
+    body = saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
+    assert body is not None
+    assert body.mime == "application/octet-stream"
+
+
+@pytest.mark.parametrize(
+    ("record", "message"),
+    [
+        (har_of("https://shop.test/a.png", status=404), "the server answered 404"),
+        (har_of("https://shop.test/a.png", status=302), "the server answered 302"),
+        (har_of("https://shop.test/a.png", status=204, body=""), "sent nothing to save"),
+        (har_of("https://shop.test/other.png"), "kept no record of that address"),
+        ({"log": {"entries": []}}, "kept no record of that address"),
+        (har_of("https://shop.test/a.png", body=""), "sent nothing to save"),
+        (
+            {
+                "log": {
+                    "entries": [
+                        {"_resourceType": "Document", "request": {"url": "https://shop.test/a.png"}}
+                    ]
+                }
+            },
+            "could not be read",
+        ),
+        ({"log": {"entries": "x"}}, "could not be read"),
+        ({"log": 5}, "could not be read"),
+        ([], "could not be read"),
+        (b"not json", "could not be read"),
+        (b"[" * 100_000, "could not be read"),
+    ],
+)
+def test_a_record_that_is_not_a_file_gives_a_plain_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    record: object,
+    message: str,
+) -> None:
+    tabs = Tabs()
+    tabs.record = record
+    with pytest.raises(sessions.AgentBrowserError, match=message):
+        saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
     assert (tabs.open_tabs, tabs.front) == (["t1"], "t1")
+    assert tabs.recorded_at is not None
+    assert not tabs.recorded_at.exists()
+
+
+def test_a_body_that_is_not_base64_is_an_unreadable_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tabs = Tabs()
+    tabs.record = har_of("https://shop.test/a.png")
+    tabs.record["log"]["entries"][0]["response"]["content"]["text"] = "not base64 at all!"
+    with pytest.raises(sessions.AgentBrowserError, match="could not be read"):
+        saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
+
+
+def test_a_body_over_the_limit_is_refused_and_so_is_a_record_over_its_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sessions, "SAVE_LIMIT", 900)
+    monkeypatch.setattr(sessions, "_TOO_BIG", "the file is larger than 900 bytes")
+    tabs = Tabs()
+    tabs.record = har_of("https://shop.test/a.png", body=b"x" * 1000)
+    with pytest.raises(sessions.AgentBrowserError, match="larger than 900 bytes"):
+        saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
+    monkeypatch.setattr(sessions, "SAVE_LIMIT", 100)
+    tabs = Tabs()
+    tabs.record = har_of("https://shop.test/a.png", body=b"x" * (2 << 20))
+    with pytest.raises(sessions.AgentBrowserError, match="larger than"):
+        saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
+
+
+def test_a_record_that_is_a_link_is_not_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps(har_of("https://shop.test/a.png")), encoding="utf-8")
+    tabs = Tabs()
+    session = saving(tmp_path, monkeypatch, tabs)
+    original = tabs.__call__
+
+    def planted(*verb: str, timeout: float | None = None) -> dict[str, Any]:
+        if verb[:3] == ("network", "har", "stop"):
+            Path(verb[3]).parent.mkdir(parents=True, exist_ok=True)
+            Path(verb[3]).symlink_to(outside)  # the sandbox put a link where the record goes
+            return {}
+        return original(*verb, timeout=timeout)
+
+    monkeypatch.setattr(session, "_call", planted)
+    with pytest.raises(sessions.AgentBrowserError, match="could not be read"):
+        session.fetch("https://shop.test/a.png")
+    assert outside.exists()  # the link was removed, not what it pointed at
+
+
+def test_a_record_that_is_a_directory_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tabs = Tabs()
+    session = saving(tmp_path, monkeypatch, tabs)
+    original = tabs.__call__
+
+    def planted(*verb: str, timeout: float | None = None) -> dict[str, Any]:
+        if verb[:3] == ("network", "har", "stop"):
+            Path(verb[3]).mkdir(parents=True)
+            return {}
+        return original(*verb, timeout=timeout)
+
+    monkeypatch.setattr(session, "_call", planted)
+    with pytest.raises(sessions.AgentBrowserError, match="could not be read"):
+        session.fetch("https://shop.test/a.png")
+
+
+def test_a_fetch_that_fails_still_stops_the_recording_and_closes_its_tab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tabs = Tabs()
+    tabs.errors[("tab", "new")] = sessions.AgentBrowserError("Navigation failed: net::ERR_X")
+    with pytest.raises(sessions.AgentBrowserError, match="ERR_X"):
+        saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
+    assert [call[:3] for call in tabs.calls if call[:2] == ("network", "har")] == [
+        ("network", "har", "start"),
+        ("network", "har", "stop"),
+    ]
+    assert (tabs.open_tabs, tabs.front) == (["t1"], "t1")
+    assert tabs.recorded_at is not None
+    assert not tabs.recorded_at.exists()
 
 
 def test_an_address_that_is_an_attachment_is_saved_by_the_browser_itself(
@@ -800,19 +1034,34 @@ def test_an_address_that_is_an_attachment_is_saved_by_the_browser_itself(
 ) -> None:
     tabs = Tabs()
     tabs.errors[("tab", "new")] = sessions.AgentBrowserError("Navigation failed: net::ERR_ABORTED")
-    saving(tmp_path, monkeypatch, tabs).save("https://shop.test/invoice")
-    assert not [call for call in tabs.calls if call[0] == "eval"]
+    assert saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/invoice") is None
+    assert ("get", "url") not in tabs.calls
+    assert [call[:3] for call in tabs.calls if call[:2] == ("network", "har")][-1] == (
+        "network",
+        "har",
+        "stop",
+    )
     assert (tabs.open_tabs, tabs.front) == (["t1"], "t1")
 
 
-def test_any_other_failure_to_open_the_tab_is_raised_and_the_tab_closed(
+def test_trouble_stopping_the_recording_or_with_the_tabs_does_not_hide_the_first_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tabs = Tabs()
     tabs.errors[("tab", "new")] = sessions.AgentBrowserError("Navigation failed: net::ERR_X")
+    tabs.errors[("network", "har", "stop")] = sessions.AgentBrowserError("no daemon")
     with pytest.raises(sessions.AgentBrowserError, match="ERR_X"):
-        saving(tmp_path, monkeypatch, tabs).save("https://shop.test/a.png")
-    assert (tabs.open_tabs, tabs.front) == (["t1"], "t1")
+        saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
+
+
+def test_when_no_tab_was_in_front_afterwards_the_fetch_does_not_switch_to_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tabs = Tabs()
+    tabs.front = ""  # the browser did not say which tab is in front
+    saving(tmp_path, monkeypatch, tabs).fetch("https://shop.test/a.png")
+    assert not [call for call in tabs.calls if call[0] == "tab" and call[1:2] == ("t1",)]
+    assert tabs.open_tabs == ["t1"]
 
 
 def test_trouble_with_the_tabs_afterwards_does_not_hide_the_result(
@@ -821,30 +1070,30 @@ def test_trouble_with_the_tabs_afterwards_does_not_hide_the_result(
     tabs = Tabs()
     session = saving(tmp_path, monkeypatch, tabs)
     original = tabs.__call__
-    calls = {"lists": 0}
+    lists = {"seen": 0}
 
     def flaky(*verb: str, timeout: float | None = None) -> dict[str, Any]:
         if verb == ("tab", "list"):
-            calls["lists"] += 1
-            if calls["lists"] == 2:
+            lists["seen"] += 1
+            if lists["seen"] == 2:
                 msg = "no daemon"
                 raise sessions.AgentBrowserError(msg)
         return original(*verb, timeout=timeout)
 
     monkeypatch.setattr(session, "_call", flaky)
-    session.save("https://shop.test/a.png")  # does not raise
+    assert session.fetch("https://shop.test/a.png") is not None  # does not raise
 
 
 @pytest.mark.parametrize(
     "url",
     ["file:///etc/passwd", "data:text/html,x", "javascript:1", "/relative", "ftp://x/y", "-x"],
 )
-def test_save_takes_only_http_and_https_and_calls_nothing_otherwise(
+def test_fetch_takes_only_http_and_https_and_calls_nothing_otherwise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, url: str
 ) -> None:
     tabs = Tabs()
     with pytest.raises(ValueError, match="only http and https"):
-        saving(tmp_path, monkeypatch, tabs).save(url)
+        saving(tmp_path, monkeypatch, tabs).fetch(url)
     assert tabs.calls == []
 
 
@@ -884,22 +1133,11 @@ def test_an_srcset_without_an_address_falls_through_to_the_next_attribute(
     assert saving(tmp_path, monkeypatch, tabs).resource_url("e2") == "/x.png"
 
 
-def test_when_no_tab_was_in_front_afterwards_the_save_does_not_switch_to_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    tabs = Tabs()
-    tabs.front = ""  # the browser did not say which tab is in front
-    saving(tmp_path, monkeypatch, tabs).save("https://shop.test/a.png")
-    assert not [call for call in tabs.calls if call[0] == "tab" and call[1:2] == ("t1",)]
-    assert tabs.open_tabs == ["t1"]
-
-
 def test_an_element_with_no_address_and_a_bad_reference_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    empty = Tabs(
-        {("get", "attr", "@e1", n): {"value": None} for n in ("srcset", "src", "href", "poster")}
-    )
+    names = ("srcset", "src", "href", "poster")
+    empty = Tabs({("get", "attr", "@e1", n): {"value": None} for n in names})
     with pytest.raises(sessions.SessionError, match="no address to save"):
         saving(tmp_path, monkeypatch, empty).resource_url("e1")
     with pytest.raises(ValueError, match="not a reference"):
@@ -910,47 +1148,97 @@ def pictures_answer(value: object) -> Tabs:
     return Tabs({("eval",): {"result": value}})
 
 
-def test_the_pictures_on_the_page_come_back_checked(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    good = {
+def listing(base: str, *found: object) -> str:
+    return json.dumps({"base": base, "found": list(found)})
+
+
+def picture(**changes: Any) -> dict[str, Any]:  # noqa: ANN401 - JSON values
+    return {
         "kind": "image",
         "alt": "Red shoe",
-        "url": "https://shop.test/s.png",
+        "src": "https://shop.test/s.png",
+        "srcset": "",
         "width": 800,
         "height": 600,
-    }
-    video = {
-        "kind": "video",
-        "alt": 5,
-        "url": "https://shop.test/v.mp4",
-        "width": True,
-        "height": -4,
-    }
-    odd = [
-        good,
-        video,
-        "not a dict",
-        {"url": ""},
-        {"url": 5},
-        {"url": "https://shop.test/" + "x" * 3000},
-        {"kind": "other", "alt": "x" * 500, "url": "https://shop.test/o.png", "width": "wide"},
+    } | changes
+
+
+def test_the_pictures_on_the_page_come_back_with_whole_addresses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = [
+        picture(),
+        picture(src="/rel/p.png", alt="Relative"),
+        picture(src="p2.png", alt="Beside the page"),
+        picture(kind="video", src="https://shop.test/v.mp4", alt=5, width=True, height=-4),
     ]
-    session = saving(tmp_path, monkeypatch, pictures_answer(json.dumps(odd)))
+    session = saving(
+        tmp_path, monkeypatch, pictures_answer(listing("https://shop.test/a/b/", *found))
+    )
+    assert [(p["kind"], p["alt"], p["url"]) for p in session.images()] == [
+        ("image", "Red shoe", "https://shop.test/s.png"),
+        ("image", "Relative", "https://shop.test/rel/p.png"),
+        ("image", "Beside the page", "https://shop.test/a/b/p2.png"),
+        ("video", "", "https://shop.test/v.mp4"),
+    ]
+
+
+def test_an_address_with_commas_in_a_srcset_is_listed_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = "https://cf.test/cdn-cgi/image"
+    srcset = (
+        f"{base}/fit=contain,format=auto,width=640/image/a.jpg 640w, "
+        f"{base}/fit=contain,format=auto,width=1280/image/a.jpg 1280w"
+    )
+    found = picture(src=f"{base}/fit=contain,format=auto,width=640/image/a.jpg", srcset=srcset)
+    session = saving(tmp_path, monkeypatch, pictures_answer(listing("https://shop.test/", found)))
+    (one,) = session.images()
+    assert one["url"] == f"{base}/fit=contain,format=auto,width=1280/image/a.jpg"
+
+
+def test_pictures_that_cannot_be_fetched_or_are_not_plain_are_left_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = [
+        picture(src="data:image/png;base64,AAAA"),
+        picture(src="blob:https://shop.test/1234"),
+        picture(src="javascript:1"),
+        picture(src="https://shop.test/" + "x" * 3000),
+        picture(src="https://shop.test/a b.png"),
+        picture(src="https://shop.test/a\nb.png"),
+        picture(src=""),
+        picture(src=5),
+        picture(src="http://[bad/x.png"),
+        "not a dict",
+        picture(alt="x" * 500, src="https://shop.test/long-alt.png", width="wide"),
+    ]
+    session = saving(tmp_path, monkeypatch, pictures_answer(listing("https://shop.test/", *found)))
     assert session.images() == [
-        good,
-        {"kind": "video", "alt": "", "url": "https://shop.test/v.mp4", "width": 0, "height": 0},
         {
             "kind": "image",
             "alt": "x" * 200,
-            "url": "https://shop.test/o.png",
+            "url": "https://shop.test/long-alt.png",
             "width": 0,
-            "height": 0,
-        },
+            "height": 600,
+        }
     ]
 
 
-@pytest.mark.parametrize("value", [None, 5, "not json", "{}", '"text"', "[]"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        5,
+        "not json",
+        "{}",
+        '"text"',
+        "[]",
+        '{"base": 5, "found": []}',
+        '{"base": "https://x.test/", "found": 5}',
+        '{"found": []}',
+    ],
+)
 def test_a_page_that_garbles_the_picture_list_gives_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: object
 ) -> None:
@@ -960,11 +1248,8 @@ def test_a_page_that_garbles_the_picture_list_gives_none(
 def test_the_picture_list_is_cut_at_the_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    many = [
-        {"kind": "image", "alt": "", "url": f"https://shop.test/{n}.png", "width": 90, "height": 90}
-        for n in range(50)
-    ]
-    session = saving(tmp_path, monkeypatch, pictures_answer(json.dumps(many)))
+    many = [picture(src=f"https://shop.test/{n}.png") for n in range(50)]
+    session = saving(tmp_path, monkeypatch, pictures_answer(listing("https://shop.test/", *many)))
     assert len(session.images()) == sessions.MAX_IMAGES
 
 

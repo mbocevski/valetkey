@@ -22,6 +22,11 @@ browser's side:
   or from what the page claimed. A file is only read (its first bytes), never opened by anything,
   run, or given permissions.
 
+A file that valetkey itself fetched for the agent (``browser_save``) is written into the folder
+by :func:`put`, by the same rule: a name is taken only if it was free at that instant, an earlier
+file is never replaced, and no link is followed. Its name comes from the address, through
+:func:`file_name`, which leaves no path, no control character and no leading dot.
+
 Files are compared by signature (inode, size and modification time). :func:`collect` waits a
 bounded time for downloads that are running and for files that are still changing, and reports
 what is still running as in progress.
@@ -31,6 +36,7 @@ import contextlib
 import itertools
 import json
 import logging
+import mimetypes
 import os
 import shutil
 import stat
@@ -39,6 +45,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
+from urllib.parse import unquote, urlsplit
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -273,6 +280,68 @@ def _numbered(name: str, number: int) -> str:
     tag = f" ({number})"
     room = _MAX_NAME_BYTES - len((tag + extension).encode())
     return stem.encode()[:room].decode(errors="ignore") + tag + extension
+
+
+_NAME_BYTES = 200
+"""The most bytes of a name :func:`file_name` makes, so a number can still be added to it."""
+_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/avif": ".avif",
+    "image/svg+xml": ".svg",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+    "application/pdf": ".pdf",
+    "application/json": ".json",
+    "text/html": ".html",
+    "text/plain": ".txt",
+}
+
+
+_KNOWN = frozenset(_EXTENSIONS.values())
+
+
+def file_name(url: str, mime: str) -> str:
+    """Return a plain file name for what ``url`` serves, whose type is ``mime``.
+
+    The last part of the address's path, decoded, with every path separator, control character
+    and leading dot or space removed, cut to a safe length. Without an extension it gets the one
+    that the type calls for. An address with no usable part gives ``download``.
+    """
+    segment = unquote(urlsplit(url).path).rstrip("/").rsplit("/", 1)[-1]
+    name = "".join(c for c in segment if c.isprintable() and c not in "/\\").strip(" .")
+    name = name.encode()[:_NAME_BYTES].decode(errors="ignore").strip(" .") or "download"
+    kind = mime.split(";", maxsplit=1)[0].strip().lower()
+    generic = kind in {"", "application/octet-stream"}  # says nothing about the file
+    wanted = "" if generic else _EXTENSIONS.get(kind) or mimetypes.guess_extension(kind) or ""
+    stem, dot, extension = name.rpartition(".")
+    if not dot or not stem:
+        return name + wanted
+    given = {".jpeg": ".jpg"}.get(f".{extension.lower()}", f".{extension.lower()}")
+    # An address says .jpg and the server sends AVIF, as a picture service that picks the format
+    # does: the name follows what the file is, when the extension is one of the known ones.
+    if wanted and given != wanted and given in _KNOWN:
+        return stem + wanted
+    return name
+
+
+def put(directory: Path, name: str, data: bytes) -> Path:
+    """Write ``data`` into ``directory`` as ``name``, or the first numbered name that is free.
+
+    The bytes go to a private file beside ``directory`` (in its parent, which the browser cannot
+    write) and are hard-linked into place, as in :func:`move_in`, so a name is only taken when it
+    was free, an earlier file is never replaced and nothing is followed.
+    """
+    claim = directory.parent / f"{CLAIM_PREFIX}{uuid.uuid4().hex}"
+    descriptor = os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(data)
+        return _link_free(claim, directory, name)
+    finally:
+        claim.unlink(missing_ok=True)
 
 
 def move_in(source: Path, directory: Path) -> Path | None:

@@ -983,3 +983,80 @@ def test_a_link_planted_in_the_incoming_folder_mid_session_is_not_followed(
     assert secret.read_text(encoding="utf-8") == "original"
     assert "evil.pdf" not in _listing(folder)
     assert "evil-dir" not in _listing(folder)
+
+
+# -- naming and writing a file valetkey fetched ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "mime", "name"),
+    [
+        ("https://x.test/img/photo.png", "image/png", "photo.png"),
+        ("https://x.test/img/photo", "image/png", "photo.png"),
+        ("https://x.test/img/photo.jpg", "image/avif", "photo.avif"),
+        ("https://x.test/img/photo.jpeg", "image/jpeg", "photo.jpeg"),
+        ("https://x.test/img/photo.jpg", "image/jpeg; charset=x", "photo.jpg"),
+        ("https://x.test/a/my%20file.PDF", "application/pdf", "my file.PDF"),
+        ("https://x.test/a/data.bin", "image/png", "data.bin"),
+        ("https://x.test/a/readme.txt", "application/octet-stream", "readme.txt"),
+        ("https://x.test/a/unknown", "application/octet-stream", "unknown"),
+        ("https://x.test/a/v", "application/x-odd-type", "v"),
+        ("https://x.test/a/doc.v2", "text/html", "doc.v2"),
+        ("https://x.test/", "image/png", "download.png"),
+        ("https://x.test", "", "download"),
+        ("https://x.test/a/.hidden", "text/plain", "hidden.txt"),
+        ("https://x.test/a/.png", "image/png", "png.png"),
+        ("https://x.test/a/..%2F..%2Fetc%2Fpasswd", "text/plain", "passwd.txt"),
+        ("https://x.test/a/x%5Cy%00z%0A.png", "image/png", "xyz.png"),
+        ("https://x.test/a/%20%20.%20", "image/png", "download.png"),
+        ("https://x.test/a/dir/", "image/png", "dir.png"),
+        ("https://x.test/a/fit=contain,width=640/pic.jpg", "image/avif", "pic.avif"),
+    ],
+)
+def test_a_fetched_file_is_named_from_its_address_and_type(url: str, mime: str, name: str) -> None:
+    assert downloads.file_name(url, mime) == name
+
+
+def test_a_very_long_name_is_cut_with_room_for_a_number() -> None:
+    name = downloads.file_name("https://x.test/" + "é" * 500 + ".png", "image/png")
+    assert len(name.encode()) <= downloads._NAME_BYTES + len(".png")  # noqa: SLF001
+    assert name.endswith(".png")
+    name.encode()  # whole characters only
+
+
+def test_put_writes_a_file_and_leaves_no_claim_behind(tmp_path: Path) -> None:
+    folder = tmp_path / "downloads"
+    folder.mkdir()
+    path = downloads.put(folder, "a.png", PDF)
+    assert path == folder / "a.png"
+    assert path.read_bytes() == PDF
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert [p.name for p in tmp_path.iterdir()] == ["downloads"]
+
+
+def test_put_numbers_a_name_that_is_taken_and_never_replaces_a_file(tmp_path: Path) -> None:
+    folder = tmp_path / "downloads"
+    folder.mkdir()
+    (folder / "a.png").write_bytes(b"first")
+    second = downloads.put(folder, "a.png", b"second")
+    third = downloads.put(folder, "a.png", b"third")
+    assert [p.name for p in (second, third)] == ["a (2).png", "a (3).png"]
+    assert (folder / "a.png").read_bytes() == b"first"
+    assert second.read_bytes() == b"second"
+
+
+def test_put_does_not_follow_a_link_the_browser_left_in_the_folder(tmp_path: Path) -> None:
+    folder = tmp_path / "downloads"
+    folder.mkdir()
+    target = tmp_path / "secret"
+    target.write_bytes(b"keep")
+    (folder / "a.png").symlink_to(target)
+    path = downloads.put(folder, "a.png", b"new")
+    assert path.name == "a (2).png"
+    assert target.read_bytes() == b"keep"
+
+
+def test_put_cleans_up_when_the_name_cannot_be_taken(tmp_path: Path) -> None:
+    with pytest.raises(OSError):  # noqa: PT011 - the folder does not exist
+        downloads.put(tmp_path / "missing", "a.png", b"x")
+    assert list(tmp_path.iterdir()) == []

@@ -47,9 +47,22 @@ JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"j" * 200
 SHOP = """<title>Shop</title><h1>Shop</h1>
 <img src="/small.png" srcset="/small.png 1x, /big.png 2x" width="64" height="64" alt="Red shoe">
 <img src="/tiny.png" alt="a dot">
+<img src="/cdn-cgi/image/fit=contain,width=640/p.png" width="64" height="64" alt="By size"
+ srcset="/cdn-cgi/image/fit=contain,width=640/p.png 640w,
+ /cdn-cgi/image/fit=contain,width=1280/p.png 1280w">
 <a href="/brochure.pdf">Brochure</a>
 <a href="/invoice">Invoice</a>"""
+GUARDED = {
+    "Content-Type": "image/png",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "X-Content-Type-Options": "nosniff",
+}
+"""What a picture service sends that a script in the page cannot read: no CSP exception, no CORS."""
 FILES = {
+    "/guarded.png": (GUARDED, BIG),
+    "/cdn-cgi/image/fit=contain,width=640/p.png": (GUARDED, SMALL),
+    "/cdn-cgi/image/fit=contain,width=1280/p.png": (GUARDED, BIG),
     "/small.png": ({"Content-Type": "image/png"}, SMALL),
     "/big.png": ({"Content-Type": "image/png"}, BIG),
     "/tiny.png": ({"Content-Type": "image/png"}, TINY),
@@ -68,7 +81,9 @@ def world(short_dir: Path) -> Iterator[tuple[sites.Roots, PageServer]]:
     runtime.mkdir(mode=0o700)
     roots = sites.Roots(short_dir / "cfg", short_dir / "state", runtime)
     sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
-    with PageServer({"/": SHOP}, files=FILES) as pages:
+    with PageServer(
+        {"/": SHOP}, redirects={"/moved": "/guarded.png", "/moved-twice": "/moved"}, files=FILES
+    ) as pages:
         yield roots, pages
 
 
@@ -164,11 +179,18 @@ def test_the_snapshot_lists_the_pictures_with_the_largest_srcset_address(
             plain = await c.call("snapshot", site="demo")
             assert "images" not in plain
             listed = await c.call("snapshot", site="demo", images=True)
-            (shoe,) = listed["images"]  # the 8 by 8 dot is too small to list
+            by_alt = {i["alt"]["text"]: i for i in listed["images"]}  # the 8 by 8 dot is too small
+            assert sorted(by_alt) == ["By size", "Red shoe"]
+            shoe, sized = by_alt["Red shoe"], by_alt["By size"]
             assert shoe["kind"] == "image"
             assert shoe["alt"] == {"untrusted": True, "text": "Red shoe"}
             assert shoe["url"] == {"untrusted": True, "text": "http://site.test/big.png"}
             assert (shoe["width"], shoe["height"]) == (64, 64)
+            # Commas inside an address do not split it: the largest of the two is listed whole.
+            assert (
+                sized["url"]["text"]
+                == "http://site.test/cdn-cgi/image/fit=contain,width=1280/p.png"
+            )
             # The address it gave is one that save takes.
             result = await c.call("save", site="demo", url=shoe["url"]["text"])
             assert saved(result) == [("big.png", len(BIG), "image/png")]
@@ -213,7 +235,7 @@ def test_an_address_with_no_file_name_gets_one_from_its_type(
     async def scenario() -> None:
         async for c, _ in session(roots, pages):
             result = await c.call("save", site="demo", url="http://site.test/noext")
-            assert saved(result) == [("noext.jpeg", len(JPEG), "image/jpeg")]
+            assert saved(result) == [("noext.jpg", len(JPEG), "image/jpeg")]
 
     run(scenario())
 
@@ -256,6 +278,7 @@ def test_a_file_over_the_limit_is_not_saved(
 ) -> None:
     roots, pages = world
     monkeypatch.setattr(sessions, "SAVE_LIMIT", len(BIG) - 1)
+    monkeypatch.setattr(sessions, "_TOO_BIG", f"the file is larger than {len(BIG) - 1} bytes")
 
     async def scenario() -> None:
         async for c, _ in session(roots, pages):
@@ -266,5 +289,73 @@ def test_a_file_over_the_limit_is_not_saved(
             # A file under it still goes.
             small = await c.call("save", site="demo", url="http://site.test/small.png")
             assert saved(small) == [("small.png", len(SMALL), "image/png")]
+
+    run(scenario())
+
+
+def test_a_picture_whose_own_policy_forbids_scripts_is_saved(
+    world: tuple[sites.Roots, PageServer],
+) -> None:
+    """A script fetching it from a page of its own address is blocked, so none is used."""
+    roots, pages = world
+
+    async def scenario() -> None:
+        async for c, server in session(roots, pages):
+            result = await c.call("save", site="demo", url="http://site.test/guarded.png")
+            assert saved(result) == [("guarded.png", len(BIG), "image/png")]
+            assert (folder_of(roots) / "guarded.png").read_bytes() == BIG
+            tabs = await asyncio.to_thread(only_tab_left, server)
+            assert [t["url"] for t in tabs] == ["http://site.test/"]
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("start", ["/moved", "/moved-twice"])
+def test_a_picture_behind_redirects_is_saved_under_the_name_it_ends_at(
+    world: tuple[sites.Roots, PageServer], start: str
+) -> None:
+    roots, pages = world
+
+    async def scenario() -> None:
+        async for c, _ in session(roots, pages):
+            result = await c.call("save", site="demo", url=f"http://site.test{start}")
+            assert saved(result) == [("guarded.png", len(BIG), "image/png")]
+            assert result["source"]["text"] == f"http://site.test{start}"
+
+    run(scenario())
+
+
+def test_a_picture_listed_with_commas_in_its_address_is_saved(
+    world: tuple[sites.Roots, PageServer],
+) -> None:
+    roots, pages = world
+
+    async def scenario() -> None:
+        async for c, _ in session(roots, pages):
+            listed = await c.call("snapshot", site="demo", images=True)
+            address = next(i for i in listed["images"] if i["alt"]["text"] == "By size")["url"][
+                "text"
+            ]
+            result = await c.call("save", site="demo", url=address)
+            assert saved(result) == [("p.png", len(BIG), "image/png")]
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("address", "scheme"),
+    [("data:image/png;base64,AAAA", "data"), ("blob:http://site.test/1", "blob")],
+)
+def test_a_data_or_blob_address_is_refused_with_the_reason(
+    world: tuple[sites.Roots, PageServer], address: str, scheme: str
+) -> None:
+    roots, pages = world
+
+    async def scenario() -> None:
+        async for c, _ in session(roots, pages):
+            with pytest.raises(DaemonError) as info:
+                await c.call("save", site="demo", url=address)
+            assert f"the address is a {scheme}: URL" in info.value.message
+            assert "nothing to fetch from a server" in info.value.message
 
     run(scenario())

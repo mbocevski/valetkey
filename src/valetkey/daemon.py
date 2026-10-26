@@ -22,8 +22,11 @@ profile.
 * ``save`` ``{ref | url}``: save what an address serves into the site's downloads directory,
   by the contained browser and its proxy, so only hosts the site may reach work. ``ref`` is an
   element of the last snapshot (a link's target, a picture's or video's source or poster); ``url``
-  is an HTTP or HTTPS address. The answer is as for ``navigate``: the envelope, the address that
-  was fetched (``source``, untrusted) and ``downloads`` with the file that arrived, never its bytes.
+  is an HTTP or HTTPS address. The browser opens it in a tab of its own and the daemon takes the
+  body from the browser's record of the exchange, so nothing runs in the page of that address, and
+  writes it into the folder like any download. The answer is as for ``navigate``: the envelope,
+  the address that was fetched (``source``, untrusted) and ``downloads`` with the file that
+  arrived, never its bytes.
 * ``click`` ``{ref | text, role?, expect?}``: a verified click (see :mod:`valetkey.clicks`).
   A ``ref`` means the element it was in this client's last snapshot, which is looked up again
   at click time; ``text`` is visible text, optionally with a ``role``. ``expect`` is one of
@@ -234,8 +237,8 @@ class BrowserSession(Protocol):
     def images(self) -> list[dict[str, Any]]:
         """List the pictures and videos on the page."""
 
-    def save(self, url: str) -> None:
-        """Save what ``url`` serves into the downloads folder."""
+    def fetch(self, url: str) -> sessions.Body | None:
+        """Return what ``url`` serves, or ``None`` when the browser saves it by itself."""
 
     def screenshot(self, name: str = "screenshot.png") -> Path:
         """Save a screenshot and return its path."""
@@ -1749,14 +1752,26 @@ class Daemon:
         wanted = _string_arg(args, "ref" if ref is not None else "url")
         seen = await self._seen_downloads(connection, state.name)
 
+        folder = sites.downloads_path(self.roots, state.name)
+
         def fetch(session: BrowserSession) -> str:
             source = wanted if url is not None else session.resource_url(wanted)
             target = urljoin(session.current_url(), source)
-            if urlsplit(target).scheme not in {"http", "https"}:
+            scheme = urlsplit(target).scheme
+            if scheme in {"data", "blob"}:
+                code = "bad_request"
+                message = (
+                    f"the address is a {scheme}: URL, which is the file itself held inside the "
+                    "page, so there is nothing to fetch from a server"
+                )
+                raise DaemonError(code, message)
+            if scheme not in {"http", "https"}:
                 code = "bad_request"
                 message = "only http and https addresses can be saved"
                 raise DaemonError(code, message)
-            session.save(target)
+            body = session.fetch(target)
+            if body is not None:
+                downloads.put(folder, downloads.file_name(body.url, body.mime), body.data)
             return target
 
         result = await self._session_op(connection, state, _watching(fetch))

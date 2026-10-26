@@ -226,7 +226,9 @@ class FakeSession:
         """What each reference stands for, as the page wrote it."""
         self.pictures: list[dict[str, Any]] = []
         self.save_to: Path | None = None
-        """The file a save writes, as the browser's download would."""
+        """The file a fetch of an attachment writes, as the browser's own download would."""
+        self.body: sessions.Body | None = None
+        """What a fetch returns for a plain response; ``None`` when the browser saved it itself."""
         self.attached = 0
         self.passwords = 0
         self.attach_error: Exception | None = None
@@ -305,10 +307,11 @@ class FakeSession:
         self._use("images")
         return self.pictures
 
-    def save(self, url: str) -> None:
-        self._use("save", url)
+    def fetch(self, url: str) -> sessions.Body | None:
+        self._use("fetch", url)
         if self.save_to is not None:
             self.save_to.write_bytes(PNG)
+        return self.body
 
     def screenshot(self, name: str = "screenshot.png") -> Path:
         self._use("screenshot", name)
@@ -1227,9 +1230,10 @@ def test_save_fetches_an_address_and_reports_the_file_that_arrived(roots: sites.
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("open", site="sitex")
             session = rig.factory.made[0]
-            session.save_to = folder / "photo.png"
+            session.body = sessions.Body("https://sitex.test/img/photo.png", "image/png", PNG)
             result = await c.call("save", site="sitex", url="https://sitex.test/img/photo.png")
-            assert ("save", "https://sitex.test/img/photo.png") in session.calls
+            assert ("fetch", "https://sitex.test/img/photo.png") in session.calls
+            assert (folder / "photo.png").read_bytes() == PNG
             assert result["source"] == {
                 "untrusted": True,
                 "text": "https://sitex.test/img/photo.png",
@@ -1257,14 +1261,15 @@ def test_save_by_reference_asks_the_element_and_resolves_a_relative_address(
             session = rig.factory.made[0]
             session.url = "https://sitex.test/shop/item"
             session.addresses = {"e2": "../files/big.png", "e3": "//cdn.sitex.test/a.png"}
-            session.save_to = folder / "big.png"
+            session.body = sessions.Body("https://sitex.test/files/big.png", "image/png", PNG)
             result = await c.call("save", site="sitex", ref="e2")
             assert ("resource_url", "e2") in session.calls
-            assert ("save", "https://sitex.test/files/big.png") in session.calls
+            assert ("fetch", "https://sitex.test/files/big.png") in session.calls
             assert result["source"]["text"] == "https://sitex.test/files/big.png"
-            session.save_to = folder / "a.png"
+            session.body = sessions.Body("https://cdn.sitex.test/a.png", "image/png", PNG)
             await c.call("save", site="sitex", ref="e3")
-            assert ("save", "https://cdn.sitex.test/a.png") in session.calls
+            assert ("fetch", "https://cdn.sitex.test/a.png") in session.calls
+            assert (folder / "a.png").exists()
 
     run(scenario())
 
@@ -1284,14 +1289,12 @@ def test_save_needs_exactly_one_of_a_reference_and_an_address(
             with pytest.raises(DaemonError) as info:
                 await c.call("save", site="sitex", **arguments)
             assert info.value.code == "bad_request"
-            assert not [call for call in rig.factory.made[0].calls if call[0] == "save"]
+            assert not [call for call in rig.factory.made[0].calls if call[0] == "fetch"]
 
     run(scenario())
 
 
-@pytest.mark.parametrize(
-    "address", ["data:image/png;base64,AAAA", "file:///etc/passwd", "javascript:1", "ftp://x/a"]
-)
+@pytest.mark.parametrize("address", ["file:///etc/passwd", "javascript:1", "ftp://x/a"])
 def test_save_takes_only_http_and_https_addresses(roots: sites.Roots, address: str) -> None:
     add_site(roots)
 
@@ -1302,7 +1305,60 @@ def test_save_takes_only_http_and_https_addresses(roots: sites.Roots, address: s
                 await c.call("save", site="sitex", url=address)
             assert info.value.code == "bad_request"
             assert "http and https" in info.value.message
-            assert not [call for call in rig.factory.made[0].calls if call[0] == "save"]
+            assert not [call for call in rig.factory.made[0].calls if call[0] == "fetch"]
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("address", ["data:image/png;base64,AAAA", "blob:https://sitex.test/0f3a"])
+def test_save_says_plainly_when_the_address_is_the_file_itself(
+    roots: sites.Roots, address: str
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("save", site="sitex", url=address)
+            assert info.value.code == "bad_request"
+            scheme = address.split(":", 1)[0]
+            assert f"the address is a {scheme}: URL" in info.value.message
+            assert "nothing to fetch from a server" in info.value.message
+            assert not [call for call in rig.factory.made[0].calls if call[0] == "fetch"]
+
+    run(scenario())
+
+
+def test_a_file_the_browser_saved_itself_is_reported_without_a_body(roots: sites.Roots) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            rig.factory.made[0].save_to = folder / "invoice.pdf"
+            result = await c.call("save", site="sitex", url="https://sitex.test/invoice")
+            (item,) = result["downloads"]["new"]
+            assert item["path"]["text"] == str(folder / "invoice.pdf")
+
+    run(scenario())
+
+
+def test_a_second_save_of_the_same_name_does_not_overwrite_the_first(roots: sites.Roots) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.body = sessions.Body("https://sitex.test/p/photo.png", "image/png", PNG)
+            await c.call("save", site="sitex", url="https://sitex.test/p/photo.png")
+            session.body = sessions.Body("https://sitex.test/p/photo.png", "image/png", PNG + b"2")
+            await c.call("save", site="sitex", url="https://sitex.test/p/photo.png")
+            assert (folder / "photo.png").read_bytes() == PNG
+            assert (folder / "photo (2).png").read_bytes() == PNG + b"2"
 
     run(scenario())
 

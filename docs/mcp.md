@@ -88,11 +88,15 @@ valetkey reads the first bytes of a file to report its type and never opens or r
 
 `browser_save` takes a reference from the latest snapshot, which saves a link's target or a media
 element's source, or an address. The picture addresses are listed by `browser_snapshot` with
-`images` set. The result gives the name, size and type, never the file. The browser fetches the
-address in a tab of its own that is closed afterwards, with the site's login and through its proxy. So only hosts the site allows work, and a
-refused host is reported as it is for navigation. The file goes through the same path as any
-download, with the same names and limits, up to 100 MiB. The agent has no other way to get a file
-off the page, and the file never leaves the sandbox on its way to the folder.
+`images` set. The result gives the name, size and type, never the file to the model.
+valetkey opens the address in a tab of its own that is closed afterwards, with the site's login
+and through its proxy, and takes the body from the browser's record of the exchange. So the
+site's own security policy for scripts cannot block it, only hosts the site allows work, and a
+refused host is reported as it is for navigation. The file is named after the address, with the
+extension its type calls for, and goes into the folder under the same rules and limits as any
+download, up to 100 MiB. An address that is `data:` or `blob:` is the file itself, held in the
+page, so `browser_save` says so and does not try it. The agent has no other way to get a file off
+the page.
 
 ## Asking for a host
 

@@ -22,7 +22,10 @@ How it is arranged:
   dies, the thread dies with it and the whole namespace goes.
 """
 
+import base64
+import binascii
 import contextlib
+import itertools
 import json
 import logging
 import os
@@ -35,11 +38,12 @@ import stat
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass, replace
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
-from urllib.parse import urlsplit
+from urllib.parse import urldefrag, urljoin, urlsplit
 
 from valetkey import procs, profiles, sandbox, seccomp, sites
 
@@ -80,9 +84,9 @@ _FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.png")
 _LOG_TAIL = 2000
 _SRCSET_CANDIDATE = re.compile(r"\s*(\S+?)(?:\s+(\d+(?:\.\d+)?)[wx]\s*(?:,|$)|\s*(?:,\s|,$|$))")
 
-# Run in a tab that has the address open, as the page there. The address is fetched again from
-# that tab (its own origin, its cookies, the session's proxy) and handed to the browser's download
-# manager, which writes it into the downloads folder like any file the page offers.
+# What the browser's own viewer needs a download for: it shows a PDF in place of the bytes, so the
+# record of the request does not hold the file. Run in the tab that holds the address, it fetches
+# the address again and lets the browser save it, as it saves any download.
 _SAVE_SCRIPT = """(async () => {
   const limit = LIMIT;
   const response = await fetch(location.href, {credentials: 'include'});
@@ -103,41 +107,25 @@ _SAVE_SCRIPT = """(async () => {
   return 'saved';
 })()"""
 
-# The pictures and videos on the page, the biggest first, as JSON text: the address of the
-# largest candidate of a srcset (or the one the browser chose), HTTP and HTTPS ones only.
+# The pictures and videos on the page, the biggest first, as JSON text. The page's own words are
+# passed on as they are, srcset included: an address may hold commas (picture services put their
+# options in the path), so it is read in Python, by :func:`largest_candidate`, not here.
 _IMAGES_SCRIPT = r"""(() => {
-  const absolute = (value) => {
-    try {
-      const url = new URL(value, document.baseURI);
-      return (url.protocol === 'http:' || url.protocol === 'https:') ? url.href : '';
-    } catch (error) { return ''; }
-  };
-  const largest = (srcset) => {
-    let best = '', size = -1;
-    for (const part of srcset.split(',')) {
-      const [address, descriptor] = part.trim().split(/\s+/);
-      const value = descriptor ? parseFloat(descriptor) : 0;
-      if (address && value > size) { best = address; size = value; }
-    }
-    return best;
-  };
   const found = [];
   for (const img of document.images) {
-    const url = absolute((img.srcset && largest(img.srcset)) || img.currentSrc || img.src);
     const width = img.naturalWidth, height = img.naturalHeight;
-    if (url && width * height >= 2500) {
-      found.push({kind: 'image', alt: img.alt || img.title || '', url, width, height});
+    if (width * height >= 2500) {
+      found.push({kind: 'image', alt: img.alt || img.title || '', src: img.currentSrc || img.src,
+                  srcset: img.srcset || '', width, height});
     }
   }
   for (const video of document.querySelectorAll('video')) {
-    const url = absolute(video.currentSrc || video.src || video.poster);
-    if (url) {
-      found.push({kind: 'video', alt: video.title || '', url,
-                  width: video.videoWidth, height: video.videoHeight});
-    }
+    const src = video.currentSrc || video.src || video.poster;
+    found.push({kind: 'video', alt: video.title || '', src, srcset: '',
+                width: video.videoWidth, height: video.videoHeight});
   }
   found.sort((a, b) => b.width * b.height - a.width * a.height);
-  return JSON.stringify(found.slice(0, LIMIT));
+  return JSON.stringify({base: document.baseURI, found: found.slice(0, LIMIT)});
 })()"""
 
 
@@ -179,6 +167,15 @@ class Snapshot:
     url: str
     tree: str
     refs: dict[str, Ref]
+
+
+@dataclass(frozen=True, slots=True)
+class Body:
+    """What an address served: where it ended up after redirects, its type and its bytes."""
+
+    url: str
+    mime: str
+    data: bytes
 
 
 # -- versions ------------------------------------------------------------------------------
@@ -396,9 +393,9 @@ def holder_script(paths: SessionPaths, binary: str, open_command: list[str], run
     )
 
 
-OWN_FLAGS = frozenset({"-i", "--clear"})
+OWN_FLAGS = frozenset({"-i", "--clear", "--content"})
 """The only option-like arguments valetkey itself passes after a verb (``snapshot -i``,
-``network requests --clear``)."""
+``network requests --clear``, ``network har start --content all``)."""
 
 
 def call_command(
@@ -497,6 +494,128 @@ def largest_candidate(srcset: str) -> str:
         if address and number > size:
             best, size = address, number
     return best.rstrip(",")
+
+
+def _picture(item: object, base: str) -> dict[str, Any] | None:
+    """Return one entry of :meth:`Session.images` from what the page said, or ``None`` to skip."""
+    if not isinstance(item, dict):
+        return None
+    srcset, src, alt = item.get("srcset"), item.get("src"), item.get("alt")
+    address = (largest_candidate(srcset) if isinstance(srcset, str) else "") or (
+        src if isinstance(src, str) else ""
+    )
+    if not address or any(ord(c) <= ord(" ") or ord(c) == ord("\x7f") for c in address):
+        return None  # joining would silently drop a newline, so look first
+    try:
+        url = urljoin(base, address)
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme not in {"http", "https"} or not parts.hostname or len(url) > MAX_ADDRESS:
+        return None
+    width, height = (
+        n if isinstance(n, int) and not isinstance(n, bool) else 0
+        for n in (item.get("width"), item.get("height"))
+    )
+    return {
+        "kind": "video" if item.get("kind") == "video" else "image",
+        "alt": alt[:200] if isinstance(alt, str) else "",
+        "url": url,
+        "width": max(width, 0),
+        "height": max(height, 0),
+    }
+
+
+def _record_limit() -> int:
+    """Return the most bytes a record may have: a base64 body, a third bigger, plus headers."""
+    return SAVE_LIMIT * 4 // 3 + (1 << 20)
+
+
+def _read_record(path: Path) -> Any:  # noqa: ANN401 - whatever JSON the file holds
+    """Read the JSON file ``path``, which the sandbox could write, within a size limit.
+
+    Raises:
+        AgentBrowserError: when the file is not a plain file, is over the limit (a third
+            more than :data:`SAVE_LIMIT`, for base64, plus room for headers),
+            or is not JSON.
+
+    """
+    message = "the browser's record of the request could not be read"
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as error:
+        raise AgentBrowserError(message) from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise AgentBrowserError(message)  # noqa: TRY301 - closes the descriptor below
+        if info.st_size > _record_limit():
+            raise AgentBrowserError(_TOO_BIG)  # noqa: TRY301
+    except AgentBrowserError:
+        os.close(descriptor)
+        raise
+    with os.fdopen(descriptor, "rb") as file:
+        try:
+            return json.loads(file.read(_record_limit() + 1))
+        except (ValueError, RecursionError) as error:
+            raise AgentBrowserError(message) from error
+
+
+_VIEWED = "application/pdf"
+_TOO_BIG = f"the file is larger than {SAVE_LIMIT} bytes"
+
+
+def _body_of(record: Path, where: str) -> Body:
+    """Return the body of the first document request for ``where`` in the HAR file ``record``.
+
+    Raises:
+        AgentBrowserError: when the record is not readable, holds no such request, the server
+            did not answer with a 2xx status, or the body is empty or over :data:`SAVE_LIMIT`.
+
+    """
+    message = "the browser's record of the request could not be read"
+    document = _read_record(record)
+    try:
+        wanted = urldefrag(where).url
+        documents = [e for e in document["log"]["entries"] if e.get("_resourceType") == "Document"]
+        if urlsplit(wanted).scheme in {"http", "https"}:
+            entries = [e for e in documents if e["request"]["url"] == wanted]
+        else:
+            # The browser put its own viewer in the tab, as it does for a PDF: the file is the
+            # last page it got from the server before that.
+            served = list(
+                itertools.takewhile(
+                    lambda e: urlsplit(e["request"]["url"]).scheme in {"http", "https"}, documents
+                )
+            )
+            entries = served[-1:]
+            wanted = entries[0]["request"]["url"] if entries else wanted
+        if not entries:
+            msg = "the browser kept no record of that address"
+            raise AgentBrowserError(msg)  # noqa: TRY301 - caught below, which re-raises its own
+        response = entries[0]["response"]  # the viewer asks for a PDF a second time
+        status = int(response["status"])
+        if not HTTPStatus.OK <= status < HTTPStatus.MULTIPLE_CHOICES:
+            msg = f"the server answered {status}"
+            raise AgentBrowserError(msg)  # noqa: TRY301
+        content = response["content"]
+        if content.get("mimeType") == _VIEWED:
+            return Body(wanted, _VIEWED, b"")  # the record holds the viewer, not the file
+        text, encoding = content.get("text"), content.get("encoding")
+        if not isinstance(text, str) or not text:
+            msg = "the server sent nothing to save"
+            raise AgentBrowserError(msg)  # noqa: TRY301
+        data = base64.b64decode(text, validate=True) if encoding == "base64" else text.encode()
+        mime = content.get("mimeType")
+    except AgentBrowserError:
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError, binascii.Error) as error:
+        raise AgentBrowserError(message) from error
+    if len(data) > SAVE_LIMIT:
+        raise AgentBrowserError(_TOO_BIG)
+    return Body(
+        wanted, mime if isinstance(mime, str) and mime else "application/octet-stream", data
+    )
 
 
 def _check_ref(ref: str) -> str:
@@ -867,67 +986,76 @@ class Session:
     def images(self) -> list[dict[str, Any]]:
         """List the pictures and videos on the page, the biggest first, with their addresses.
 
-        Each has a kind, an alt text, an address, a width and a height. Pictures under 50 by 50
-        pixels, and addresses that are not HTTP or HTTPS, are left out. Everything in them came
-        from the page, which can say anything in its own script, so the shape is checked here.
+        Each has a kind, an alt text, an address, a width and a height. The address of a picture
+        is the largest candidate of its ``srcset``, or else the one the browser chose, made whole
+        against the page's base. Pictures under 50 by 50 pixels, and addresses that are not HTTP
+        or HTTPS, are left out. Everything in the answer came from the page, which can say
+        anything in its own script, so its shape is checked here.
         """
         raw = self._call("eval", _IMAGES_SCRIPT.replace("LIMIT", str(MAX_IMAGES))).get("result")
         try:
-            found = json.loads(raw) if isinstance(raw, str) else []
+            answer = json.loads(raw) if isinstance(raw, str) else {}
         except json.JSONDecodeError:
             return []
-        if not isinstance(found, list):
+        found = answer.get("found") if isinstance(answer, dict) else None
+        base = answer.get("base") if isinstance(answer, dict) else None
+        if not isinstance(found, list) or not isinstance(base, str):
             return []
         listed: list[dict[str, Any]] = []
         for item in found[:MAX_IMAGES]:
-            if not isinstance(item, dict):
-                continue
-            url, alt = item.get("url"), item.get("alt")
-            if not isinstance(url, str) or not url or len(url) > MAX_ADDRESS:
-                continue
-            numbers = [item.get("width"), item.get("height")]
-            width, height = (
-                n if isinstance(n, int) and not isinstance(n, bool) else 0 for n in numbers
-            )
-            kind = "video" if item.get("kind") == "video" else "image"
-            listed.append(
-                {
-                    "kind": kind,
-                    "alt": alt[:200] if isinstance(alt, str) else "",
-                    "url": url,
-                    "width": max(width, 0),
-                    "height": max(height, 0),
-                }
-            )
+            entry = _picture(item, base)
+            if entry is not None:
+                listed.append(entry)
         return listed
 
-    def save(self, url: str) -> None:
-        """Save what an HTTP or HTTPS address serves into the downloads folder.
+    def fetch(self, url: str) -> Body | None:
+        """Return what an HTTP or HTTPS address serves, read from the browser's own exchange.
 
         The address is opened in a tab of its own, so the page the person or the agent is on does
-        not move, and fetched again from there, so it goes through the session's proxy with the
-        session's cookies, and a host the site may not reach is refused as it is for navigation.
-        The browser then writes it as it writes any download. An address that is an attachment is
-        saved by the browser the moment the tab is opened. The tab is closed in the end, whatever
-        happened, and the first one is active again.
+        not move, and it goes through the session's proxy with the session's cookies: a host the
+        site may not reach is refused as it is for navigation. The browser records the exchange,
+        and the body is taken from that record. Nothing runs in the page of the address, so what
+        its server says about scripts, frames or other sites (a strict content security policy,
+        which picture services send, or a cross-origin policy) cannot stop it.
+
+        ``None`` means the browser saved the file itself: the address is an attachment, or a PDF,
+        which the browser's viewer shows in place of the bytes, so it is fetched once more from
+        the tab and saved as a download. The tab is closed in the end, whatever happened, and
+        the first one is in front again.
 
         Raises:
-            AgentBrowserError: when the browser cannot load the address, or the server does not
-                answer 200, or the file is over :data:`SAVE_LIMIT`.
+            AgentBrowserError: when the browser cannot load the address, the server does not
+                answer with a 2xx status, or the body is over :data:`SAVE_LIMIT`.
             ValueError: when ``url`` is not an HTTP or HTTPS address.
 
         """
         _check_url(url)
         known, active = self._tabs()
+        record = self.paths.screenshots_dir / f"fetch-{uuid.uuid4().hex}.har"
+        recording = False
         try:
+            self._call("network", "har", "start", "--content", "all")
+            recording = True
             try:
                 self._call("tab", "new", url)
             except AgentBrowserError as error:
                 if "ERR_ABORTED" not in str(error):
                     raise
-                return  # the address is a download, which the browser has started by itself
-            self._call("eval", _SAVE_SCRIPT.replace("LIMIT", str(SAVE_LIMIT)))
+                return None  # the address is a download, which the browser saves by itself
+            where = str(self._call("get", "url").get("url", ""))
+            self._call("network", "har", "stop", str(record))
+            recording = False
+            body = _body_of(record, where)
+            if body.mime == _VIEWED:
+                self._call("eval", _SAVE_SCRIPT.replace("LIMIT", str(SAVE_LIMIT)))
+                return None  # the browser wrote the file itself
+            return body
         finally:
+            if recording:
+                with contextlib.suppress(AgentBrowserError, SessionError):
+                    self._call("network", "har", "stop", str(record))
+            with contextlib.suppress(OSError):  # a directory put there by the sandbox stays
+                record.unlink(missing_ok=True)
             self._close_tabs_but(known, active)
 
     def _tabs(self) -> tuple[set[str], str | None]:
