@@ -12,11 +12,11 @@ import sys
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path  # the command-line framework reads the annotation at runtime
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 from cyclopts import App, Parameter
 
-from valetkey import __version__, daemon, login, mcp_server, sandbox, sessions, sites
+from valetkey import __version__, client, daemon, login, mcp_server, procs, sandbox, sessions, sites
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -125,12 +125,11 @@ def list_sites(
     elif not rows:
         _say("No sites yet.")
     else:
-        _print_table(rows)
+        _print_sites(rows)
     return 0
 
 
-def _print_table(rows: list[dict[str, object]]) -> None:
-    header = ["SITE", "HOST", "ALLOWED", "EXCLUDED", "LEARNED", "PROFILE"]
+def _print_sites(rows: list[dict[str, object]]) -> None:
     body = [
         [
             str(row["site"]),
@@ -142,6 +141,10 @@ def _print_table(rows: list[dict[str, object]]) -> None:
         ]
         for row in rows
     ]
+    _print_table(["SITE", "HOST", "ALLOWED", "EXCLUDED", "LEARNED", "PROFILE"], body)
+
+
+def _print_table(header: list[str], body: list[list[str]]) -> None:
     widths = [max(len(line[column]) for line in [header, *body]) for column in range(len(header))]
     for line in [header, *body]:
         _say(
@@ -225,18 +228,7 @@ def deny(site: str, host: str) -> int:
     return 0
 
 
-def _command_lines(proc: Path = Path("/proc")) -> list[list[str]]:
-    """Return the arguments of every process the host can see, sandboxed ones included."""
-    lines: list[list[str]] = []
-    for entry in proc.iterdir():
-        if not entry.name.isdigit() or entry.name == str(os.getpid()):
-            continue
-        try:
-            raw = (entry / "cmdline").read_bytes()
-        except OSError:
-            continue  # the process ended, or belongs to someone else
-        lines.append(raw.decode(errors="replace").split("\0"))
-    return lines
+_command_lines = procs.command_lines
 
 
 def _profile_in_use(profile: Path) -> bool:
@@ -247,13 +239,7 @@ def _profile_in_use(profile: Path) -> bool:
     counts when it, or the part after ``=``, resolves to the profile directory, as in
     ``--user-data-dir=PATH``.
     """
-    target = profile.resolve()
-    for arguments in _command_lines():
-        for argument in arguments:
-            for candidate in {argument, argument.partition("=")[2]}:
-                if candidate and Path(candidate).resolve() == target:
-                    return True
-    return False
+    return any(procs.uses_path(arguments, profile) for arguments in _command_lines())
 
 
 def _forget_targets(roots: sites.Roots, site: str) -> list[Path]:
@@ -677,6 +663,95 @@ def doctor(
         for check in checks:
             _say(f"{LABELS[check.status]:<6}{check.detail}")
     return 1 if any(c.status == "fail" for c in checks) else 0
+
+
+# -- what is running ---------------------------------------------------------------------
+
+
+async def _daemon_status() -> dict[str, Any]:
+    """Ask the running daemon what is open. It is never started for this."""
+    async with await client.Client.connect() as connection:
+        return await connection.call("status")
+
+
+def _activity_rows(activity: dict[str, Any]) -> list[list[str]]:
+    return [
+        [kind, entry["site"], entry["since"] or "-", entry.get("host") or "-"]
+        for kind, key in (("session", "sessions"), ("login", "logins"))
+        for entry in activity.get(key, [])
+    ]
+
+
+@app.command(name="status")
+def show_status(
+    *,
+    as_json: Annotated[
+        bool, Parameter(name="--json", negative="", help="Print JSON instead of a table.")
+    ] = False,
+) -> int:
+    """Show the browser sessions and login windows that are open.
+
+    The daemon reports what its own processes are doing, and nothing can hide a session from
+    it. A browser that was killed disappears within a second or two. The daemon is not started:
+    when none runs, this says so and exits 0.
+
+    With --json the output is an object with two lists. "sessions" holds objects with the keys
+    site, since, contained and host. "logins" holds objects with the keys site and since. since is
+    a UTC time like 2026-10-26T09:00:00Z. contained is always true. host is the host of the page
+    the browser was last reported at, never the whole address, which may carry a token.
+    """
+    try:
+        activity = asyncio.run(_daemon_status())
+    except client.DaemonError as error:
+        if error.code == "not_running":
+            _say("valetkeyd is not running")
+            return 0
+        return _fail(CommandError(error.message))
+    except sites.RuntimeDirUnavailableError as error:
+        return _fail(CommandError(str(error)))
+    if as_json:
+        _say(json.dumps(activity, indent=2))
+        return 0
+    rows = _activity_rows(activity)
+    if not rows:
+        _say("No browser sessions or login windows are open.")
+        return 0
+    _print_table(["KIND", "SITE", "SINCE", "HOST"], rows)
+    return 0
+
+
+async def _watch_daemon() -> int:
+    try:
+        connection = await client.Client.connect()
+    except client.DaemonError as error:
+        return _fail(CommandError(error.message))
+    async with connection:
+        try:
+            async for event in connection.watch():
+                _say(json.dumps(event, separators=(",", ":")))
+                sys.stdout.flush()
+        except client.DaemonError as error:
+            if error.code != "connection_lost":
+                return _fail(CommandError(error.message))
+    return 0
+
+
+@app.command
+def watch() -> int:
+    """Print one JSON line for every change to the sessions and login windows.
+
+    The first line is a snapshot of what is open, as `status --json` shows it, with "event" set
+    to "snapshot" and an "at" time. After that each line has the keys event, site and at, where
+    event is session_started, session_ended, login_opened or login_closed. Bars and indicators
+    can read the lines as they come. The command runs until it is interrupted or the daemon
+    stops; it exits 1 when no daemon is running, and does not start one.
+    """
+    try:
+        return asyncio.run(_watch_daemon())
+    except KeyboardInterrupt:
+        return 0
+    except sites.RuntimeDirUnavailableError as error:
+        return _fail(CommandError(str(error)))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

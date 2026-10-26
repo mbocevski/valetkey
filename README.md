@@ -48,6 +48,8 @@ Commands:
   install-units: Write the systemd user units that run the valetkey daemon.
   mcp: Serve the browser tools to an MCP client over standard input and output.
   sites: List the sites valetkey knows.
+  status: Show the browser sessions and login windows that are open.
+  watch: Print one JSON line for every change to the sessions and login windows.
   --help, -h: Display this message and exit.
   --version: Display application version.
 ```
@@ -170,6 +172,44 @@ Parameters:
   --json: Print a JSON array instead of lines. [default: False]
 ```
 <!-- end: valetkey doctor --help -->
+
+### Seeing what runs
+
+<!-- begin: valetkey status --help -->
+```text
+Usage: valetkey status [OPTIONS]
+
+Show the browser sessions and login windows that are open.
+
+The daemon reports what its own processes are doing, and nothing can hide a
+session from it. A browser that was killed disappears within a second or two.
+The daemon is not started: when none runs, this says so and exits 0.
+
+With --json the output is an object with two lists. "sessions" holds objects
+with the keys site, since, contained and host. "logins" holds objects with the
+keys site and since. since is a UTC time like 2026-10-26T09:00:00Z. contained is
+always true. host is the host of the page the browser was last reported at,
+never the whole address, which may carry a token.
+
+Parameters:
+  --json: Print JSON instead of a table. [default: False]
+```
+<!-- end: valetkey status --help -->
+
+<!-- begin: valetkey watch --help -->
+```text
+Usage: valetkey watch
+
+Print one JSON line for every change to the sessions and login windows.
+
+The first line is a snapshot of what is open, as status --json shows it, with
+"event" set to "snapshot" and an "at" time. After that each line has the keys
+event, site and at, where event is session_started, session_ended, login_opened
+or login_closed. Bars and indicators can read the lines as they come. The
+command runs until it is interrupted or the daemon stops; it exits 1 when no
+daemon is running, and does not start one.
+```
+<!-- end: valetkey watch --help -->
 
 ### Use it from an MCP client
 

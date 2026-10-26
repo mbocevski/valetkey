@@ -19,7 +19,7 @@ import pytest
 from environment import unusable_reason
 from proxy_stub import PageServer
 
-from valetkey import clicks, client, daemon, login, sessions, sites
+from valetkey import clicks, client, daemon, login, procs, sessions, sites
 from valetkey.client import DaemonError
 from valetkey.proxy import SeenHost
 
@@ -388,6 +388,7 @@ async def serving(roots: sites.Roots, **options: Any) -> AsyncGenerator[Rig]:  #
         "login_starter": logins,
         "now": lambda: NOW,
         "download_settle": 0,
+        "poll_interval": 3600,
     } | options
     server = daemon.Daemon(roots, **settings)
     await server.start()
@@ -1416,7 +1417,12 @@ def test_the_real_session_factory_passes_the_proxy_socket(
 
     monkeypatch.setattr(sessions.Session, "start", fake_start)
     assert daemon.start_session(roots, "sitex", "https://x.test/", Path("/p.sock")) == "session"  # type: ignore[comparison-overlap]
-    assert seen == [((roots, "sitex", "https://x.test/"), {"proxy_socket": Path("/p.sock")})]
+    assert seen == [
+        (
+            (roots, "sitex", "https://x.test/"),
+            {"proxy_socket": Path("/p.sock"), "watch_browser": True},
+        )
+    ]
 
 
 # -- the daemon as a process ---------------------------------------------------------------
@@ -2031,5 +2037,448 @@ def test_a_real_session_through_the_daemon(roots: sites.Roots) -> None:
                     assert not paths.driver_dir.exists()
             finally:
                 await server.shutdown()
+
+    run(scenario())
+
+
+# -- what is running: status, watch, liveness, announcements --------------------------------
+
+
+async def drain(stream: AsyncGenerator[dict[str, Any]]) -> None:
+    async for _ in stream:
+        pass
+
+
+async def next_event(stream: AsyncGenerator[dict[str, Any]]) -> dict[str, Any]:
+    return await asyncio.wait_for(anext(stream), 10)
+
+
+def test_status_without_a_site_says_what_is_running(roots: sites.Roots) -> None:
+    add_site(roots, "sitex")
+    add_site(roots, "another")
+    add_site(roots, "idle")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            assert await c.call("status") == {"sessions": [], "logins": []}
+            await c.call("open", site="sitex")
+            await c.call("login", target="another")
+            assert await c.call("status") == {
+                "sessions": [
+                    {
+                        "site": "sitex",
+                        "since": "2026-10-27T12:00:00Z",
+                        "contained": True,
+                        "host": "sitex.test",
+                    }
+                ],
+                "logins": [{"site": "another", "since": "2026-10-27T12:00:00Z"}],
+            }
+            await c.call("close", site="sitex")
+            assert (await c.call("status"))["sessions"] == []
+
+    run(scenario())
+
+
+def test_status_names_the_host_and_never_the_address(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            await c.call(
+                "navigate", site="sitex", url="https://sitex.test/account?token=secret#frag"
+            )
+            answer = await c.call("status")
+            assert answer["sessions"][0]["host"] == "sitex.test"
+            assert "secret" not in json.dumps(answer)
+            assert "account" not in json.dumps(answer)
+
+    run(scenario())
+
+
+def test_a_page_without_a_host_has_none() -> None:
+    assert daemon._host_of("about:blank") is None  # noqa: SLF001
+    assert daemon._host_of("data:text/html,hi") is None  # noqa: SLF001
+    assert daemon._host_of("http://bad_host/") is None  # noqa: SLF001
+    assert daemon._host_of("https://App.Sitex.test:8443/x?y=1") == "app.sitex.test"  # noqa: SLF001
+
+
+def test_watch_sends_a_snapshot_and_then_every_change(roots: sites.Roots) -> None:
+    add_site(roots, "sitex")
+    add_site(roots, "another")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c, await rig.connect() as w:
+            await c.call("open", site="sitex")
+            stream = w.watch()
+            snapshot = await next_event(stream)
+            assert snapshot["event"] == "snapshot"
+            assert snapshot["at"] == "2026-10-27T12:00:00Z"
+            assert [s["site"] for s in snapshot["sessions"]] == ["sitex"]
+            assert snapshot["logins"] == []
+            at = "2026-10-27T12:00:00Z"
+            await c.call("close", site="sitex")
+            assert await next_event(stream) == {
+                "event": "session_ended", "site": "sitex", "at": at,
+            }  # fmt: skip
+            await c.call("open", site="sitex")
+            assert (await next_event(stream))["event"] == "session_started"
+            await c.call("login", target="another")
+            assert await next_event(stream) == {
+                "event": "login_opened", "site": "another", "at": at,
+            }  # fmt: skip
+            await c.call("close", site="another")
+            assert (await next_event(stream))["event"] == "login_closed"
+            await stream.aclose()
+
+    run(scenario())
+
+
+def test_watch_is_removed_when_the_client_leaves(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c, await rig.connect() as w:
+            stream = w.watch()
+            await next_event(stream)
+            assert len(rig.daemon._watchers) == 1  # noqa: SLF001
+            await stream.aclose()
+            await w.close()
+            await eventually(lambda: not rig.daemon._watchers)  # noqa: SLF001
+            await c.call("open", site="sitex")  # nobody is told; nothing fails
+
+    run(scenario())
+
+
+def test_every_watcher_gets_every_event(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with (
+            serving(roots) as rig,
+            await rig.connect() as c,
+            await rig.connect() as w1,
+            await rig.connect() as w2,
+        ):
+            streams = [w1.watch(), w2.watch()]
+            for stream in streams:
+                await next_event(stream)
+            await c.call("open", site="sitex")
+            for stream in streams:
+                assert (await next_event(stream))["event"] == "session_started"
+                await stream.aclose()
+
+    run(scenario())
+
+
+def test_a_watcher_that_falls_too_far_behind_is_disconnected(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(daemon, "WATCH_QUEUE", 2)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as w:
+            stream = w.watch()
+            await next_event(stream)
+            for _ in range(3):  # no await between them: the stream cannot keep up
+                rig.daemon._emit("session_started", "sitex")  # noqa: SLF001
+            with pytest.raises(DaemonError) as info:
+                await drain(stream)
+            assert info.value.code == "connection_lost"
+            assert not rig.daemon._watchers  # noqa: SLF001
+
+    run(scenario())
+
+
+def test_a_session_whose_browser_died_is_ended_and_reported(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots, poll_interval=0.02) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            first = rig.factory.made[0]
+            async with await rig.connect() as w:
+                stream = w.watch()
+                assert len((await next_event(stream))["sessions"]) == 1
+                first.alive = False
+                event = await next_event(stream)
+                assert (event["event"], event["site"]) == ("session_ended", "sitex")
+                await stream.aclose()
+            assert first.closed == 1
+            assert (await c.call("status"))["sessions"] == []
+            assert (await c.call("status", site="sitex"))["state"] == "idle"
+            reopened = await c.call("open", site="sitex")
+            assert reopened["reused"] is False
+
+    run(scenario())
+
+
+def test_a_healthy_session_is_left_alone_by_the_liveness_check(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots, poll_interval=0.01) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            checks: list[int] = []
+            session = rig.factory.made[0]
+            original = session.is_alive
+
+            def counted() -> bool:
+                checks.append(1)
+                return original()
+
+            monkeypatch.setattr(session, "is_alive", counted)
+            await eventually(lambda: len(checks) >= 3)
+            assert session.closed == 0
+            assert len((await c.call("status"))["sessions"]) == 1
+
+    run(scenario())
+
+
+def test_a_login_window_is_left_alone_by_the_liveness_check(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots, poll_interval=0.01) as rig, await rig.connect() as c:
+            await c.call("login", target="sitex")
+            await asyncio.sleep(0.1)
+            assert (await c.call("status"))["logins"][0]["site"] == "sitex"
+
+    run(scenario())
+
+
+def test_a_failing_liveness_check_is_logged_and_the_next_one_runs(
+    roots: sites.Roots, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots, poll_interval=0.02) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            first = rig.factory.made[0]
+
+            def broken() -> bool:
+                message = "no process table"
+                raise OSError(message)
+
+            monkeypatch.setattr(first, "is_alive", broken)
+            await eventually(lambda: "checking the sitex session failed" in caplog.text)
+            monkeypatch.setattr(first, "is_alive", lambda: False)
+            await eventually(lambda: first.closed == 1)
+
+    run(scenario())
+
+
+def test_a_started_session_is_announced_once(roots: sites.Roots, announcements: list[str]) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            await c.call("open", site="sitex")  # joins the running session
+            await eventually(lambda: announcements == ["sitex"])
+            await c.call("close", site="sitex")
+            await c.call("open", site="sitex")
+            await eventually(lambda: announcements == ["sitex", "sitex"])
+
+    run(scenario())
+
+
+def test_a_failing_announcement_does_not_fail_the_open(
+    roots: sites.Roots, caplog: pytest.LogCaptureFixture
+) -> None:
+    add_site(roots)
+
+    async def broken(_site: str) -> None:
+        message = "no bus"
+        raise RuntimeError(message)
+
+    async def scenario() -> None:
+        async with serving(roots, announcer=broken) as rig, await rig.connect() as c:
+            assert (await c.call("open", site="sitex"))["reused"] is False
+            await eventually(lambda: "announcing the sitex session failed" in caplog.text)
+
+    run(scenario())
+
+
+class FakeNotifier:
+    """Stands in for the ``notify-send`` process."""
+
+    def __init__(self, *, hang: bool = False) -> None:
+        self.hang = hang
+        self.killed = False
+        self._released = asyncio.Event()
+
+    async def wait(self) -> int:
+        if self.hang and not self.killed:
+            await self._released.wait()
+        return 0
+
+    def kill(self) -> None:
+        self.killed = True
+        self._released.set()
+
+
+def test_announce_runs_notify_send_with_only_the_site_name(
+    real_announce: Callable[..., Awaitable[None]],
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    async def spawn(*args: Any, **kwargs: Any) -> FakeNotifier:  # noqa: ANN401
+        calls.append((args, kwargs))
+        return FakeNotifier()
+
+    run(real_announce("sitex", which=lambda _name: "/usr/bin/notify-send", spawn=spawn))
+    ((args, kwargs),) = calls
+    assert args == (
+        "/usr/bin/notify-send",
+        "--app-name=valetkey",
+        "--",
+        "valetkey: a browser session for sitex started",
+    )
+    assert kwargs["stdin"] == kwargs["stdout"] == kwargs["stderr"] == asyncio.subprocess.DEVNULL
+
+
+def test_announce_is_skipped_without_notify_send(
+    real_announce: Callable[..., Awaitable[None]],
+) -> None:
+    async def spawn(*_args: Any, **_kwargs: Any) -> FakeNotifier:  # noqa: ANN401
+        message = "must not run"
+        raise AssertionError(message)
+
+    run(real_announce("sitex", which=lambda _name: None, spawn=spawn))
+
+
+def test_announce_ignores_a_program_that_cannot_run(
+    real_announce: Callable[..., Awaitable[None]],
+) -> None:
+    async def spawn(*_args: Any, **_kwargs: Any) -> FakeNotifier:  # noqa: ANN401
+        raise PermissionError
+
+    run(real_announce("sitex", which=lambda _name: "/x", spawn=spawn))
+
+
+def test_announce_kills_a_notification_that_hangs(
+    real_announce: Callable[..., Awaitable[None]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(daemon, "NOTIFY_TIMEOUT", 0.05)
+    notifier = FakeNotifier(hang=True)
+
+    async def spawn(*_args: Any, **_kwargs: Any) -> FakeNotifier:  # noqa: ANN401
+        return notifier
+
+    run(real_announce("sitex", which=lambda _name: "/x", spawn=spawn))
+    assert notifier.killed
+
+
+def test_the_daemon_keeps_nothing_running_after_shutdown(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> daemon.Daemon:
+        async with serving(roots, poll_interval=0.01) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            return rig.daemon
+
+    server = run(scenario())
+    assert server._monitor is not None  # noqa: SLF001
+    assert server._monitor.cancelled()  # noqa: SLF001
+    assert not server._background  # noqa: SLF001
+
+
+def process_ids(profile: Path, *, program: str) -> list[int]:
+    """The host's processes named ``program`` that have ``profile`` in their arguments."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        arguments = raw.decode(errors="replace").split("\0")
+        if Path(arguments[0]).name == program and any(str(profile) in a for a in arguments):
+            found.append(int(entry.name))
+    return found
+
+
+@pytest.mark.integration
+@needs_everything
+def test_a_killed_browser_or_holder_is_reported_within_two_seconds(roots: sites.Roots) -> None:
+    sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
+    profile = sites.profile_path(roots, "demo")
+
+    async def killed(
+        stream: AsyncGenerator[dict[str, Any]], pid: int
+    ) -> tuple[dict[str, Any], float]:
+        started = time.monotonic()
+        os.kill(pid, signal.SIGKILL)
+        event = await next_event(stream)
+        return event, time.monotonic() - started
+
+    async def scenario() -> None:
+        with PageServer(PAGES) as pages:
+
+            async def resolve(_host: str, _port: int) -> list[str]:
+                return ["127.0.0.1"]
+
+            async def connect(_address: str, _port: int) -> Any:  # noqa: ANN401
+                return await asyncio.open_connection(*pages.address)
+
+            options = {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
+            server = daemon.Daemon(roots, proxy_options=options)
+            await server.start()
+            try:
+                path = client.socket_path(roots)
+                async with (
+                    await client.Client.connect(path) as one,
+                    await client.Client.connect(path) as watcher,
+                ):
+                    stream = watcher.watch()
+                    assert (await next_event(stream))["sessions"] == []
+                    for victim, label in (("chromium", "Chrome"), ("bwrap", "the holder")):
+                        opened = await one.call("open", site="demo")
+                        assert opened["reused"] is False, label  # a fresh session, every time
+                        assert (await next_event(stream))["event"] == "session_started"
+                        (entry,) = (await one.call("status"))["sessions"]
+                        assert entry["host"] == "site.test"
+                        pids = process_ids(profile, program=victim)
+                        assert pids, f"no {victim} process found for {label}"
+                        event, seconds = await killed(stream, min(pids))
+                        assert (event["event"], event["site"]) == ("session_ended", "demo"), label
+                        assert seconds < 2.0, f"{label}: {seconds:.2f}s"
+                        assert (await one.call("status"))["sessions"] == []
+                        # The session was torn down, not only reported: nothing of it is left.
+                        paths = sessions.session_paths(roots, "demo")
+                        assert not paths.directory.exists(), label
+                        assert not paths.driver_dir.exists(), label
+                        assert process_ids(profile, program="bwrap") == [], label
+                        assert process_ids(profile, program="chromium") == [], label
+                        assert not any(  # so `valetkey forget` would not call the profile in use
+                            procs.uses_path(arguments, profile)
+                            for arguments in procs.command_lines()
+                        ), label
+                    await stream.aclose()
+            finally:
+                await server.shutdown()
+
+    run(scenario())
+    assert process_ids(profile, program="chromium") == []
+
+
+def test_the_liveness_check_does_not_end_a_session_opened_since(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            state = rig.daemon._state("sitex")  # noqa: SLF001
+            current = rig.factory.made[0]
+            await rig.daemon._end_if_current(state, FakeSession())  # noqa: SLF001
+            assert (current.closed, state.kind) == (0, "session")
+            await rig.daemon._end_if_current(state, current)  # noqa: SLF001
+            assert (current.closed, state.kind) == (1, "idle")
 
     run(scenario())

@@ -231,3 +231,110 @@ def test_an_answer_that_arrives_just_before_the_connection_ends_is_kept(short_di
             assert await c.call("x") == {"a": 1}
 
     run(scenario())
+
+
+def test_watch_streams_the_snapshot_and_then_each_change(short_dir: Path) -> None:
+    path = short_dir / "d.sock"
+
+    async def behave(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        request = json.loads(await reader.readline())
+        assert (request["op"], request["args"]) == ("watch", {})
+        for result in (
+            {"event": "snapshot", "sessions": [], "logins": []},
+            {"event": "session_started", "site": "sitex"},
+            {"event": "session_ended", "site": "sitex"},
+        ):
+            writer.write(json.dumps({"id": request["id"], "ok": True, "result": result}).encode())
+            writer.write(b"\n")
+        await writer.drain()
+        await reader.read()  # stays open until the client leaves
+
+    async def scenario() -> None:
+        async with fake_daemon(path, behave), await Client.connect(path) as c:
+            stream = c.watch()
+            events = [(await anext(stream))["event"] for _ in range(3)]
+            assert events == ["snapshot", "session_started", "session_ended"]
+            await stream.aclose()
+            assert not c._streams  # noqa: SLF001
+
+    run(scenario())
+
+
+def test_watch_raises_the_daemons_error(short_dir: Path) -> None:
+    path = short_dir / "d.sock"
+
+    async def behave(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        request = json.loads(await reader.readline())
+        error = {"code": "unknown_op", "message": "no such operation: watch"}
+        writer.write(
+            json.dumps({"id": request["id"], "ok": False, "error": error}).encode() + b"\n"
+        )
+        await writer.drain()
+        await reader.read()
+
+    async def scenario() -> None:
+        async with fake_daemon(path, behave), await Client.connect(path) as c:
+            with pytest.raises(DaemonError) as info:
+                await anext(c.watch())
+            assert info.value.code == "unknown_op"
+
+    run(scenario())
+
+
+def test_watch_ends_with_connection_lost_when_the_daemon_goes(short_dir: Path) -> None:
+    path = short_dir / "d.sock"
+
+    async def behave(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        request = json.loads(await reader.readline())
+        result = {"event": "snapshot", "sessions": [], "logins": []}
+        writer.write(json.dumps({"id": request["id"], "ok": True, "result": result}).encode())
+        writer.write(b"\n")
+        await writer.drain()
+
+    async def scenario() -> None:
+        async with fake_daemon(path, behave), await Client.connect(path) as c:
+            stream = c.watch()
+            assert (await anext(stream))["event"] == "snapshot"
+            with pytest.raises(DaemonError) as info:
+                await anext(stream)
+            assert info.value.code == "connection_lost"
+
+    run(scenario())
+
+
+def test_watch_on_a_closed_connection_is_connection_lost(short_dir: Path) -> None:
+    path = short_dir / "d.sock"
+
+    async def behave(_reader: asyncio.StreamReader, _writer: asyncio.StreamWriter) -> None:
+        return
+
+    async def scenario() -> None:
+        async with fake_daemon(path, behave):
+            c = await Client.connect(path)
+            await asyncio.sleep(0.05)
+            c._writer.close()  # noqa: SLF001
+            with pytest.raises(DaemonError) as info:
+                await anext(c.watch())
+            assert info.value.code == "connection_lost"
+            await c.close()
+
+    run(scenario())
+
+
+def test_an_error_answer_for_nothing_this_client_asked_is_ignored(short_dir: Path) -> None:
+    path = short_dir / "d.sock"
+
+    async def behave(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        request = json.loads(await reader.readline())
+        stray = {"id": 999, "ok": False, "error": {"code": "x", "message": "y"}}
+        writer.write(json.dumps(stray).encode() + b"\n")
+        writer.write(json.dumps({"id": request["id"], "ok": True, "result": {"a": 1}}).encode())
+        writer.write(b"\n")
+        await writer.drain()
+        await reader.read()
+
+    async def scenario() -> None:
+        async with fake_daemon(path, behave), await Client.connect(path) as c:
+            assert await c.call("x") == {"a": 1}
+
+    run(scenario())

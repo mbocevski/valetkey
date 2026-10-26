@@ -15,7 +15,7 @@ import pytest
 from environment import unusable_reason
 from proxy_stub import PageServer, ProxyStub, host_of_request
 
-from valetkey import sandbox, sessions, sites
+from valetkey import procs, sandbox, sessions, sites
 
 # --- helpers ------------------------------------------------------------------------------
 
@@ -630,6 +630,46 @@ def start(
         timeout=timeout,
         proxy_socket=proxy_socket,
     )
+
+
+def browser_lines(session: sessions.Session) -> list[list[str]]:
+    return [["/usr/lib/chromium/chromium", f"--user-data-dir={session.paths.profile_dir}"]]
+
+
+def test_is_alive_looks_for_the_browser_only_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = make_session(tmp_path)
+    session._holder = subprocess.Popen(["sleep", "60"])  # noqa: S607, SLF001
+    lines: list[list[str]] = []
+    monkeypatch.setattr(procs, "command_lines", lambda: lines)
+    try:
+        assert session.is_alive()  # the holder is enough, as at startup
+        session._watch_browser = True  # noqa: SLF001
+        assert not session.is_alive()  # the holder runs but the browser is gone
+        lines.extend(browser_lines(session))
+        assert session.is_alive()
+        lines[:] = [[*browser_lines(session)[0], "--type=renderer"]]
+        assert not session.is_alive()  # a helper process is not the browser
+    finally:
+        session.close()
+    assert not session.is_alive()
+
+
+def test_start_can_watch_the_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    page = json.dumps({"success": True, "data": {"url": "http://site.test/", "title": "Hi"}})
+    FakeStart(monkeypatch, f"echo '{page}' > \"$READY\"; sleep 60")
+    lines: list[list[str]] = []
+    monkeypatch.setattr(procs, "command_lines", lambda: lines)
+    session = sessions.Session.start(
+        make_roots(tmp_path), "demo", "http://site.test/", timeout=10, watch_browser=True
+    )
+    try:
+        assert not session.is_alive()  # no browser process is running
+        lines.extend(browser_lines(session))
+        assert session.is_alive()
+    finally:
+        session.close()
 
 
 def test_start_waits_for_the_first_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

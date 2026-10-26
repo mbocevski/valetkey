@@ -9,7 +9,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Self
 
 import pytest
 
@@ -17,7 +17,7 @@ from valetkey import __version__, cli, daemon, mcp_server, sandbox, sites
 from valetkey.cli import main
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
 
 def test_without_arguments_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -1117,3 +1117,193 @@ def test_mcp_command_serves_over_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mcp_server, "serve", lambda: served.append(True))
     assert main(["mcp"]) == 0
     assert served == [True]
+
+
+# -- status and watch ----------------------------------------------------------------------
+
+ACTIVITY = {
+    "sessions": [
+        {"site": "sitex", "since": "2026-10-26T09:00:00Z", "contained": True, "host": "sitex.com"},
+    ],
+    "logins": [{"site": "another", "since": "2026-10-26T09:05:00Z"}],
+}
+
+
+class FakeConnection:
+    """Stands in for a client connected to the daemon."""
+
+    def __init__(
+        self,
+        *,
+        status: dict[str, Any] | None = None,
+        events: Sequence[dict[str, Any]] = (),
+        end: BaseException | None = None,
+    ) -> None:
+        self.status = status
+        self.events = events
+        self.end = end
+        self.asked: list[str] = []
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    async def call(self, op: str) -> dict[str, Any]:
+        self.asked.append(op)
+        if isinstance(self.end, cli.client.DaemonError):
+            raise self.end
+        return self.status or {}
+
+    async def watch(self) -> AsyncIterator[dict[str, Any]]:
+        for event in self.events:
+            yield event
+        if self.end is not None:
+            raise self.end
+
+
+def connect_to(monkeypatch: pytest.MonkeyPatch, connection: FakeConnection | BaseException) -> None:
+    async def connect(_path: object = None) -> FakeConnection:
+        if isinstance(connection, BaseException):
+            raise connection
+        return connection
+
+    monkeypatch.setattr(cli.client.Client, "connect", staticmethod(connect))
+
+
+def not_running() -> cli.client.DaemonError:
+    return cli.client.DaemonError("not_running", "valetkeyd is not running (/x: missing)")
+
+
+def test_status_prints_a_table(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = FakeConnection(status=ACTIVITY)
+    connect_to(monkeypatch, connection)
+    status, out, err = run(capsys, "status")
+    assert (status, err) == (0, "")
+    assert out.splitlines() == [
+        "KIND     SITE     SINCE                 HOST",
+        "session  sitex    2026-10-26T09:00:00Z  sitex.com",
+        "login    another  2026-10-26T09:05:00Z  -",
+    ]
+    assert connection.asked == ["status"]
+
+
+def test_status_json_is_the_daemons_answer(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect_to(monkeypatch, FakeConnection(status=ACTIVITY))
+    status, out, _ = run(capsys, "status", "--json")
+    assert status == 0
+    assert json.loads(out) == ACTIVITY
+
+
+def test_status_when_nothing_is_open(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect_to(monkeypatch, FakeConnection(status={"sessions": [], "logins": []}))
+    assert run(capsys, "status") == (0, "No browser sessions or login windows are open.\n", "")
+
+
+def test_status_without_a_host_shows_a_dash(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = {"site": "sitex", "since": None, "contained": True, "host": None}
+    connect_to(monkeypatch, FakeConnection(status={"sessions": [entry], "logins": []}))
+    assert run(capsys, "status")[1].splitlines()[1].split() == ["session", "sitex", "-", "-"]
+
+
+def test_status_without_a_daemon_says_so_and_succeeds(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect_to(monkeypatch, not_running())
+    assert run(capsys, "status") == (0, "valetkeyd is not running\n", "")
+    connect_to(monkeypatch, FakeConnection(end=not_running()))
+    assert run(capsys, "status", "--json") == (0, "valetkeyd is not running\n", "")
+
+
+def test_status_reports_other_errors(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = cli.client.DaemonError("internal", "the daemon hit an unexpected error")
+    connect_to(monkeypatch, FakeConnection(end=error))
+    status, out, err = run(capsys, "status")
+    assert (status, out) == (1, "")
+    assert err == "valetkey: the daemon hit an unexpected error\n"
+
+
+def test_status_and_watch_need_a_runtime_directory(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    for command in ("status", "watch"):
+        status, out, err = run(capsys, command)
+        assert (status, out) == (1, "")
+        assert "XDG_RUNTIME_DIR is not set" in err
+
+
+def test_status_and_watch_never_start_the_daemon(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    assert run(capsys, "status") == (0, "valetkeyd is not running\n", "")
+    status, out, err = run(capsys, "watch")
+    assert (status, out) == (1, "")
+    assert "valetkeyd is not running" in err
+    assert list(tmp_path.iterdir()) == []
+
+
+EVENTS = [
+    {"event": "snapshot", "at": "2026-10-26T09:00:00Z", "sessions": [], "logins": []},
+    {"event": "session_started", "site": "sitex", "at": "2026-10-26T09:00:01Z"},
+]
+
+
+def test_watch_prints_one_json_line_per_event(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect_to(monkeypatch, FakeConnection(events=EVENTS))
+    status, out, err = run(capsys, "watch")
+    assert (status, err) == (0, "")
+    assert [json.loads(line) for line in out.splitlines()] == EVENTS
+    assert out.splitlines()[1] == (
+        '{"event":"session_started","site":"sitex","at":"2026-10-26T09:00:01Z"}'
+    )
+
+
+def test_watch_ends_quietly_when_the_daemon_stops(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lost = cli.client.DaemonError("connection_lost", "the connection to valetkeyd was lost")
+    connect_to(monkeypatch, FakeConnection(events=EVENTS[:1], end=lost))
+    status, out, err = run(capsys, "watch")
+    assert (status, err) == (0, "")
+    assert len(out.splitlines()) == 1
+
+
+def test_watch_without_a_daemon_fails(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect_to(monkeypatch, not_running())
+    status, out, err = run(capsys, "watch")
+    assert (status, out) == (1, "")
+    assert err.startswith("valetkey: valetkeyd is not running")
+
+
+def test_watch_reports_a_daemon_error(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = cli.client.DaemonError("unknown_op", "no such operation: watch")
+    connect_to(monkeypatch, FakeConnection(end=error))
+    status, _, err = run(capsys, "watch")
+    assert (status, err) == (1, "valetkey: no such operation: watch\n")
+
+
+def test_watch_stops_quietly_when_interrupted(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect_to(monkeypatch, FakeConnection(events=EVENTS[:1], end=KeyboardInterrupt()))
+    status, out, _ = run(capsys, "watch")
+    assert (status, len(out.splitlines())) == (0, 1)

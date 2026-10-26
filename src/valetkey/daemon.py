@@ -14,8 +14,8 @@ profile.
   is delivered once.
 * ``open`` ``{site}``: start the site's session, or join the running one (``reused: true``).
 * ``snapshot``, ``type`` ``{ref, text, submit?}``, ``navigate`` ``{url}``,
-  ``screenshot`` ``{name?}``, ``status``: act on the site's session. ``submit`` presses Enter
-  after the text is typed.
+  ``screenshot`` ``{name?}``, ``status`` ``{site}``: act on the site's session. ``submit``
+  presses Enter after the text is typed.
 * ``click`` ``{ref | text, role?, expect?}``: a verified click (see :mod:`valetkey.clicks`).
   A ``ref`` means the element it was in this client's last snapshot, which is looked up again
   at click time; ``text`` is visible text, optionally with a ``role``. ``expect`` is one of
@@ -27,6 +27,14 @@ profile.
   the content, and ``new`` if this client has not been told of it) and those still being
   downloaded (``in_progress``). A ``click`` or ``navigate`` answer carries the same under
   ``downloads``: the files that arrived since this client last looked.
+* ``status`` with no ``site``: what is running now. ``{"sessions": [{"site", "since",
+  "contained", "host"}], "logins": [{"site", "since"}]}``, sorted by site. ``since`` is a UTC
+  time, ``host`` is the host of the page the browser was last reported at (never the whole
+  URL, which may carry a token). It is read from the processes the daemon owns.
+* ``watch``: the connection stays open. The first answer is ``{"event": "snapshot", "at",
+  "sessions", "logins"}`` as for ``status``; then one answer per change, each
+  ``{"event": "session_started" | "session_ended" | "login_opened" | "login_closed",
+  "site", "at"}``, all with the request's ``id``. Nothing can hide a session from it.
 * ``close`` ``{site}``: end the site's session or login. ``{site, closed}``.
 * ``reload_policy`` ``{site}``: read the policy file again and give it to the live proxy.
 * ``login`` ``{target}``: ``target`` is a known site name or a host or URL. Opens a login
@@ -48,6 +56,11 @@ can tell it from anything the daemon says itself.
 ``unknown_site``, ``unknown_ref``, ``target_not_found``, ``target_ambiguous``,
 ``login_in_progress``, ``session_running``, ``no_session``, ``session_ended``, ``session_failed``,
 ``browser_error``, ``no_display``, ``x11_only``, ``bad_policy`` and ``internal``.
+
+**Liveness.** A task polls every session twice a second. A session whose browser has been
+killed (the holder or Chrome itself) is ended and reported within about a second, instead of the
+next time a client asks. When a session starts, ``notify-send`` is run, if it exists, with the
+site name; it is never waited for.
 
 **Registry.** Each site is ``idle``, ``login`` or ``session``, changed only under a per-site
 lock. ``open`` is refused while a login runs, ``login`` while a session runs, and a second
@@ -78,6 +91,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
+from urllib.parse import urlsplit
 
 from valetkey import clicks, client, downloads, learn, login, sandbox, sessions, sites
 from valetkey.client import MAX_LINE_BYTES, DaemonError
@@ -92,6 +106,13 @@ logger = logging.getLogger(__name__)
 SD_LISTEN_FDS_START = 3
 """The first file descriptor systemd passes to a socket-activated service."""
 STATES = ("idle", "login", "session")
+WATCH_QUEUE = 1000
+"""Events a `watch` client may fall behind by. A client further behind is disconnected."""
+POLL_INTERVAL = 0.5
+"""Seconds between checks that each session's browser still runs."""
+NOTIFY_TIMEOUT = 5.0
+"""Seconds `notify-send` gets before it is killed."""
+_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _ACTIVATION_VARIABLES = ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES")
 _NEWEST = 2**62
 STARTUP_GRACE = 3.0
@@ -168,6 +189,42 @@ class LoginWindow(Protocol):
 type SessionFactory = Callable[[sites.Roots, str, str, Path], BrowserSession]
 type LoginStarter = Callable[..., Awaitable[LoginWindow]]
 type PeerUid = Callable[[socket.socket], int]
+type Announcer = Callable[[str], Awaitable[None]]
+
+
+async def announce_session(
+    site: str,
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = asyncio.create_subprocess_exec,
+) -> None:
+    """Tell the person, with ``notify-send``, that a session for ``site`` started.
+
+    Nothing happens when ``notify-send`` is not installed. Only the site name, which valetkey
+    validated, goes into the message; nothing from a page does. A notification that does not
+    finish in :data:`NOTIFY_TIMEOUT` seconds is killed, and a failure is ignored.
+    """
+    program = which("notify-send")
+    if program is None:
+        return
+    message = f"valetkey: a browser session for {site} started"
+    try:
+        process = await spawn(
+            program,
+            "--app-name=valetkey",
+            "--",
+            message,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), NOTIFY_TIMEOUT)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
 
 
 # -- the protocol: small pure functions ------------------------------------------------------
@@ -371,6 +428,17 @@ class _Site:
     """Newest background refusal of the start-up burst; ``None`` while the burst is going on."""
     start: str = ""
     summary: str | None = None
+    since: datetime | None = None
+    host: str | None = None
+
+
+@dataclass(eq=False)
+class _Watcher:
+    """One `watch` connection: the events it has not been sent yet."""
+
+    queue: asyncio.Queue[dict[str, Any] | None] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=WATCH_QUEUE)
+    )
 
 
 @dataclass(eq=False)
@@ -394,7 +462,9 @@ class Daemon:
     keyword arguments for each session's :class:`valetkey.proxy.Proxy`, ``startup_grace`` is
     :data:`STARTUP_GRACE`, and ``peer_uid`` reads a connection's user id. ``download_settle`` is
     how long to look for a download that a click has only just started, and ``download_wait`` is
-    the longest to wait for downloads that are running.
+    the longest to wait for downloads that are running. ``announcer`` (default
+    :func:`announce_session`) tells the person that a session started, and ``poll_interval`` is
+    how often each session's browser is checked.
     """
 
     def __init__(  # noqa: PLR0913 - each is a seam the tests replace
@@ -409,6 +479,8 @@ class Daemon:
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         download_settle: float = downloads.SETTLE_SECONDS,
         download_wait: float = downloads.FINISH_SECONDS,
+        announcer: Announcer | None = None,
+        poll_interval: float = POLL_INTERVAL,
     ) -> None:
         """Create a daemon for the directories in ``roots``. Nothing listens until :func:`run`."""
         self.roots = roots
@@ -420,6 +492,11 @@ class Daemon:
         self._now = now
         self._download_settle = download_settle
         self._download_wait = download_wait
+        self._announcer = announcer or announce_session
+        self._poll_interval = poll_interval
+        self._watchers: set[_Watcher] = set()
+        self._monitor: asyncio.Task[None] | None = None
+        self._background: set[asyncio.Task[None]] = set()
         self._uid = os.getuid()
         self._sites: dict[str, _Site] = {}
         self._connections: set[asyncio.Task[None]] = set()
@@ -467,6 +544,7 @@ class Daemon:
             self._server = await asyncio.start_unix_server(
                 self._serve_connection, sock=inherited, limit=MAX_LINE_BYTES, cleanup_socket=False
             )
+            self._monitor = asyncio.ensure_future(self._monitor_sessions())
             return
         target = path or client.socket_path(self.roots)
         await asyncio.to_thread(make_private_dirs, target.parent)
@@ -484,6 +562,7 @@ class Daemon:
         except BaseException:
             self._release_lock()
             raise
+        self._monitor = asyncio.ensure_future(self._monitor_sessions())
 
     def _release_lock(self) -> None:
         if self._lock_fd is not None:
@@ -494,6 +573,13 @@ class Daemon:
         """Stop serving, end every session and login, and remove the socket file."""
         if self._server is not None:
             self._server.close()
+        for task in (self._monitor, *self._background):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(
+            *(t for t in (self._monitor, *self._background) if t is not None),
+            return_exceptions=True,
+        )
         tasks = list(self._connections)
         for task in tasks:
             task.cancel()
@@ -538,15 +624,18 @@ class Daemon:
                 return
             if not line.endswith(b"\n"):
                 return
-            await _send(writer, await self._answer(connection, line))
+            try:
+                request = parse_request(line)
+            except DaemonError as error:
+                await _send(writer, error_response(request_id_of(error), error))
+                continue
+            if request.op == "watch":
+                await self._stream(reader, writer, request.id)
+                return
+            await _send(writer, await self._dispatch(connection, request))
 
-    async def _answer(self, connection: _Connection, line: bytes) -> bytes:
-        """Return the response line for one request line. Never raises."""
-        identifier: int | str | None = None
-        try:
-            request = parse_request(line)
-        except DaemonError as error:
-            return error_response(request_id_of(error), error)
+    async def _dispatch(self, connection: _Connection, request: Request) -> bytes:
+        """Return the response line for one request. Never raises."""
         identifier = request.id
         handler = self._ops.get(request.op)
         if handler is None:
@@ -560,6 +649,94 @@ class Daemon:
             if mapped.code == "internal":
                 logger.exception("request failed: %s", request.op)
             return error_response(identifier, mapped)
+
+    async def _stream(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        identifier: int | str | None,
+    ) -> None:
+        """Answer ``watch``: a snapshot, then one answer per event, until the client goes away.
+
+        The watcher is added before the snapshot is read, and neither step awaits, so no change
+        falls between the two. A client that stops reading and falls :data:`WATCH_QUEUE` events
+        behind is disconnected rather than allowed to hold memory.
+        """
+        watcher = _Watcher()
+        self._watchers.add(watcher)
+        gone = asyncio.ensure_future(reader.read())  # finishes at end-of-file: the client left
+        try:
+            await _send(writer, ok_response(identifier, self._activity("snapshot")))
+            while True:
+                event = asyncio.ensure_future(watcher.queue.get())
+                await asyncio.wait({event, gone}, return_when=asyncio.FIRST_COMPLETED)
+                if not event.done():
+                    event.cancel()
+                    return
+                item = event.result()
+                if item is None:
+                    return
+                await _send(writer, ok_response(identifier, item))
+        finally:
+            gone.cancel()
+            self._watchers.discard(watcher)
+
+    def _emit(self, event: str, site: str) -> None:
+        """Tell every `watch` client that ``event`` happened to ``site``."""
+        message = {"event": event, "site": site, "at": self._now().strftime(_TIME_FORMAT)}
+        for watcher in list(self._watchers):
+            try:
+                watcher.queue.put_nowait(message)
+            except asyncio.QueueFull:
+                self._watchers.discard(watcher)
+                watcher.queue.get_nowait()
+                watcher.queue.put_nowait(None)  # ends that client's stream
+
+    def _activity(self, event: str | None = None) -> dict[str, Any]:
+        """Describe what runs now, from the registry the daemon's own processes keep."""
+        sessions_now = []
+        logins_now = []
+        for name in sorted(self._sites):
+            state = self._sites[name]
+            since = state.since.strftime(_TIME_FORMAT) if state.since else None
+            if state.kind == "session":
+                sessions_now.append(
+                    {"site": name, "since": since, "contained": True, "host": state.host}
+                )
+            elif state.kind == "login":
+                logins_now.append({"site": name, "since": since})
+        result: dict[str, Any] = {"sessions": sessions_now, "logins": logins_now}
+        if event is not None:
+            result = {"event": event, "at": self._now().strftime(_TIME_FORMAT)} | result
+        return result
+
+    async def _announce(self, site: str) -> None:
+        """Run the announcer; a failure to tell the person never reaches the session."""
+        try:
+            await self._announcer(site)
+        except Exception:
+            logger.exception("announcing the %s session failed", site)
+
+    async def _monitor_sessions(self) -> None:
+        """End every session whose browser has died, so the registry matches the processes."""
+        while True:
+            await asyncio.sleep(self._poll_interval)
+            for state in list(self._sites.values()):
+                session = state.session
+                if state.kind != "session" or session is None:
+                    continue
+                try:
+                    if await asyncio.to_thread(session.is_alive):
+                        continue
+                    await self._end_if_current(state, session)
+                except Exception:
+                    logger.exception("checking the %s session failed", state.name)
+
+    async def _end_if_current(self, state: _Site, session: BrowserSession) -> None:
+        """End the site's session if it is still ``session``, not one opened in the meantime."""
+        async with state.lock:
+            if state.session is session:
+                await self._end(state)
 
     # -- state --
 
@@ -642,7 +819,9 @@ class Daemon:
             except BaseException:
                 state.kind = "idle"
                 raise
+            state.since = self._now()
             state.watcher = asyncio.ensure_future(self._watch_login(state, state.window))
+            self._emit("login_opened", site)
         return {"site": site, "window": "open"}
 
     async def _login_target(self, target: str) -> tuple[str, str]:
@@ -684,6 +863,7 @@ class Daemon:
         finally:
             state.window = None
             state.kind = "idle"
+            self._emit("login_closed", state.name)
 
     # -- operations: sessions --
 
@@ -729,6 +909,12 @@ class Daemon:
         state.session, state.proxy, state.kind = session, proxy, "session"
         state.start = policy.start
         state.generation += 1
+        state.since = self._now()
+        state.host = _host_of(policy.start)
+        self._emit("session_started", state.name)
+        task = asyncio.ensure_future(self._announce(state.name))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
         self._end_startup_burst(state, proxy)
 
     def _end_startup_burst(self, state: _Site, proxy: Proxy) -> None:
@@ -769,6 +955,8 @@ class Daemon:
             if session is not None or proxy is not None:
                 directory = sessions.session_paths(self.roots, state.name).directory
                 await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
+            if session is not None:
+                self._emit("session_ended", state.name)
 
     async def _op_close(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         site = _site_arg(args)
@@ -779,6 +967,8 @@ class Daemon:
         return {"site": site, "closed": was}
 
     async def _op_status(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
+        if "site" not in args:
+            return self._activity()
         site = _site_arg(args)
         state = self._state(site)
         if state.kind != "session":
@@ -998,6 +1188,8 @@ class Daemon:
         made from now on, not from the history of other clients' pages.
         """
         proxy = cast("Proxy", state.proxy)
+        if url is not None:
+            state.host = _host_of(url) or state.host
         known = connection.cursors.get(state.name)
         if known is None or known[0] != state.generation:
             known = (
@@ -1026,7 +1218,19 @@ def start_session(
     roots: sites.Roots, site: str, start_url: str, proxy_socket: Path
 ) -> BrowserSession:
     """Start the real session: a contained agent-browser behind the site's proxy."""
-    return sessions.Session.start(roots, site, start_url, proxy_socket=proxy_socket)
+    return sessions.Session.start(
+        roots, site, start_url, proxy_socket=proxy_socket, watch_browser=True
+    )
+
+
+def _host_of(url: str) -> str | None:
+    """Return the host of ``url``, or ``None`` for one that has none (``about:blank``)."""
+    if urlsplit(url).scheme not in {"http", "https"}:
+        return None
+    try:
+        return sites.host_of(url)
+    except ValueError:
+        return None
 
 
 def _is_site_name(name: str) -> bool:

@@ -17,3 +17,8 @@ ty
 uv
 Wayland
 strace
+cmdline
+session_started
+session_ended
+login_opened
+login_closed

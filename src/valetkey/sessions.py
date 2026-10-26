@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import urlsplit
 
-from valetkey import sandbox, sites
+from valetkey import procs, sandbox, sites
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -417,6 +417,7 @@ class Session:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._closed = False
+        self._watch_browser = False
 
     @classmethod
     def start(  # noqa: PLR0913  # each argument is a distinct thing a caller decides
@@ -429,8 +430,12 @@ class Session:
         executable: str = DEFAULT_EXECUTABLE,
         binary: str = "agent-browser",
         timeout: float = DEFAULT_TIMEOUT,
+        watch_browser: bool = False,
     ) -> Self:
         """Start the browser for ``site`` and load ``start_url``.
+
+        With ``watch_browser``, :meth:`is_alive` also looks for the browser's own process once
+        the first page has loaded, so a browser that was killed on its own counts as gone.
 
         ``proxy_socket`` defaults to ``session_paths(...).proxy_socket``. Only one session per
         site may run at a time, and the caller makes sure of it: any files an earlier,
@@ -465,6 +470,7 @@ class Session:
         try:
             session._launch(box, ["/usr/bin/bash", "-c", script])
             session.first_page = parse_page(session._await_first_page())
+            session._watch_browser = watch_browser
         except BaseException:
             session.close()
             raise
@@ -512,11 +518,17 @@ class Session:
             return ""
 
     def is_alive(self) -> bool:
-        """Whether the holder runs. The daemon and Chrome live exactly as long as it does.
+        """Whether the session runs: the holder does and, when asked for, so does the browser.
 
-        A killed daemon leaves its socket file behind, so the files say nothing; the process does.
+        A killed daemon leaves its socket file behind, so the files say nothing; the processes
+        do. When only Chrome is killed, the holder keeps running, so the browser is looked up in
+        the host's process table by its profile directory.
         """
-        return self._holder is not None and self._holder.poll() is None
+        if self._holder is None or self._holder.poll() is not None:
+            return False
+        return not self._watch_browser or procs.browser_running(
+            self.paths.profile_dir, procs.command_lines()
+        )
 
     def close(self) -> None:
         """End the session: close the browser, stop everything in the namespace, delete files.

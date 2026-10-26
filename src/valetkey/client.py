@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Self
 from valetkey import sites
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
     from pathlib import Path
     from types import TracebackType
 
@@ -79,6 +80,7 @@ class Client:
         self._writer = writer
         self._ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self._streams: dict[int, asyncio.Queue[dict[str, Any] | DaemonError]] = {}
         self._reader_task = asyncio.ensure_future(self._read_answers(reader))
 
     @classmethod
@@ -122,6 +124,36 @@ class Client:
         finally:
             self._pending.pop(identifier, None)
 
+    async def watch(self) -> AsyncGenerator[dict[str, Any]]:
+        """Stream what the daemon reports with ``watch``: first a snapshot, then each change.
+
+        Each item is a dictionary with an ``event`` key (``snapshot``, ``session_started``,
+        ``session_ended``, ``login_opened`` or ``login_closed``). The connection is used for
+        nothing else while this runs. Stop iterating to stop watching; close the client to end it.
+
+        Raises:
+            DaemonError: with code ``connection_lost`` when the daemon goes away.
+
+        """
+        identifier = next(self._ids)
+        queue: asyncio.Queue[dict[str, Any] | DaemonError] = asyncio.Queue()
+        self._streams[identifier] = queue
+        line = json.dumps({"id": identifier, "op": "watch", "args": {}}).encode() + b"\n"
+        try:
+            try:
+                self._writer.write(line)
+                await self._writer.drain()
+            except OSError as error:
+                code = "connection_lost"
+                raise DaemonError(code, _LOST) from error
+            while True:
+                item = await queue.get()
+                if isinstance(item, DaemonError):
+                    raise item
+                yield item
+        finally:
+            self._streams.pop(identifier, None)
+
     async def close(self) -> None:
         """Close the connection. Calls still waiting fail with ``connection_lost``."""
         self._writer.close()
@@ -154,23 +186,30 @@ class Client:
             for future in list(self._pending.values()):
                 with contextlib.suppress(asyncio.InvalidStateError):  # already answered
                     future.set_exception(lost)
+            for queue in list(self._streams.values()):
+                queue.put_nowait(lost)
 
     def _deliver(self, line: bytes) -> None:
         try:
             answer = json.loads(line)
             future = self._pending.get(answer["id"])
+            queue = self._streams.get(answer["id"])
         except ValueError, KeyError, TypeError:
             return  # not an answer to anything this client sent
-        if future is None or future.done():
-            return
         if answer.get("ok") is True:
-            future.set_result(answer.get("result") or {})
+            result = answer.get("result") or {}
+            if queue is not None:
+                queue.put_nowait(result)
+            elif future is not None and not future.done():
+                future.set_result(result)
             return
         error = answer.get("error") or {}
-        future.set_exception(
-            DaemonError(
-                str(error.get("code", "error")),
-                str(error.get("message", "")),
-                error.get("details"),
-            )
+        failure = DaemonError(
+            str(error.get("code", "error")),
+            str(error.get("message", "")),
+            error.get("details"),
         )
+        if queue is not None:
+            queue.put_nowait(failure)
+        elif future is not None and not future.done():
+            future.set_exception(failure)
