@@ -173,6 +173,13 @@ The browser's own error messages and the tails of its logs are fenced and labell
 because they can repeat what a page chose. The summary of a login holds only valetkey's words and
 host names, never text from the login's history.
 
+## Sessions that nobody uses
+
+A session closes by itself after 15 minutes without use, so an agent that forgets to close one, or
+a client that crashes, does not leave a logged-in browser running for good. The limit is
+`session_idle_minutes` in `config.json`, at most 1440 (a day), and it cannot be switched off. The
+site's own login expiry still applies, and the saved login stays on disk for the next open.
+
 ## Seeing what runs
 
 `valetkey status` and `valetkey watch` show every open session and login window, taken from the

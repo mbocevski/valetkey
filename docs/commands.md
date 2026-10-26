@@ -278,6 +278,10 @@ JSON line for each start or end, which a status bar can read. Both ask the daemo
 it. Nothing can hide a session from them. When a session starts, `notify-send` shows a desktop
 notification if it is installed.
 
+A session that nothing uses is closed after `session_idle_minutes` minutes, 15 unless you set it
+in `config.json` to a whole number from 1 to 1440. `status` shows each session's idle time and the
+time it will close.
+
 <!-- begin: valetkey status --help -->
 ```text
 Usage: valetkey status [OPTIONS]
@@ -289,11 +293,14 @@ session from it. A browser that was killed disappears within a second or two.
 The daemon is not started: when none runs, this says so and exits 0.
 
 With --json the output is an object with three lists. "sessions" holds objects
-with the keys site, since, contained and host. "logins" holds objects with the
-keys site and since. "bridges" holds objects with the keys bridge and since, one
-for each laptop connected to take login windows. since is a UTC time like
-2026-10-26T09:00:00Z. contained is always true. host is the host of the page the
-browser was last reported at, never the whole address, which may carry a token.
+with the keys site, since, contained, host, idle_seconds and closes_at. "logins"
+holds objects with the keys site and since. "bridges" holds objects with the
+keys bridge and since, one for each laptop connected to take login windows.
+since is a UTC time like 2026-10-26T09:00:00Z. contained is always true. host is
+the host of the page the browser was last reported at, never the whole address,
+which may carry a token. idle_seconds is how long nothing has used the session,
+and closes_at is the UTC time the daemon will close it if nothing does: after
+session_idle_minutes in config.json, 15 by default.
 
 A login shown in a web browser has a link that works like a password: whoever
 opens it can type into the login window. The table prints it under the table,

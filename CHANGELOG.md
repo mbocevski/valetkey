@@ -8,6 +8,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Added
 
+- A browser session that nothing uses for 15 minutes is closed, keeping the login; `session_idle_minutes` in the config file sets the time (1 to 1440), and `valetkey status` shows when each session will close.
 - `browser_open` notices a login that has expired without a redirect, by the sign-in cookies it recorded at login, before the browser starts.
 - `valetkey sites SITE` prints one site's complete allowed, excluded and denied hosts, as text or with `--json`.
 - The `browser_deny` tool, which asks you to stop a site reaching hosts it reaches now, and `browser_sites` takes a `site` to list its complete host lists.

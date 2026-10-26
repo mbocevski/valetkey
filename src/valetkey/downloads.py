@@ -291,6 +291,14 @@ def _running_download(directory: Path, name: str, size: int) -> Download:
     return Download(name, directory / name, size, "application/octet-stream", "in_progress")
 
 
+def running(incoming: Path) -> bool:
+    """Say whether the browser is writing a download into ``incoming`` right now."""
+    try:
+        return any(path.name.endswith(PARTIAL_SUFFIX) for path in incoming.iterdir())
+    except OSError:
+        return False
+
+
 def snapshot(directory: Path) -> dict[str, Signature]:
     """Return the signature of every file in ``directory``, to compare against later."""
     return {name: signature for name, (signature, _) in scan(directory).items()}

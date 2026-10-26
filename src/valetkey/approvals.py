@@ -52,7 +52,9 @@ if TYPE_CHECKING:
 CONFIG_NAME = "config.json"
 COMMAND_TIMEOUT = 60.0
 REASON_LENGTH = 240
-_CONFIG_KEYS = frozenset({"approve_command", "notifications", "remote_logins"})
+_CONFIG_KEYS = frozenset(
+    {"approve_command", "notifications", "remote_logins", "session_idle_minutes"}
+)
 _REMOTE_KEYS = ("waypipe", "novnc")
 _PASSED_ENVIRONMENT = (
     "HOME",
@@ -271,6 +273,12 @@ def deny_eligibility(policy: sites.Policy, host: str) -> Eligibility:
 # -- the approval command --------------------------------------------------------------------
 
 
+MIN_IDLE_MINUTES = 1
+MAX_IDLE_MINUTES = 1440
+DEFAULT_IDLE_MINUTES = 15
+"""The shortest and longest time, in minutes, a session may sit unused, and the default."""
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     """What ``config.json`` holds.
@@ -280,13 +288,15 @@ class Config:
     nothing else can (see :mod:`valetkey.notify`). The switches under ``remote_logins``
     are ``waypipe`` and the one for noVNC, both off unless the file says ``true``: whether a login
     with no screen on this machine may open on a laptop through a connected bridge, or be shown
-    in a web browser.
+    in a web browser. ``session_idle_minutes`` is how long a browser session may go unused before
+    the daemon closes it, from :data:`MIN_IDLE_MINUTES` to :data:`MAX_IDLE_MINUTES`.
     """
 
     approve_command: tuple[str, ...] | None = None
     notifications: bool = True
     novnc: bool = False
     waypipe: bool = False
+    session_idle_minutes: int = DEFAULT_IDLE_MINUTES
 
 
 _OTHERS_CAN_WRITE = stat.S_IWGRP | stat.S_IWOTH
@@ -313,7 +323,8 @@ def load_config(roots: Roots) -> Config:
         ConfigError: when the file belongs to another user, can be written by its group or by
             others, is not a regular file, is not a JSON object with only known keys, when
             ``approve_command`` is not a non-empty list of non-empty strings, or when
-            ``notifications`` is not a boolean, or ``remote_logins`` is not an object holding
+            ``notifications`` is not a boolean, ``session_idle_minutes`` is not a whole number
+            from 1 to 1440, or ``remote_logins`` is not an object holding
             only the boolean switches.
 
     """
@@ -344,8 +355,25 @@ def load_config(roots: Roots) -> Config:
     return Config(
         _approve_command(path, data.get("approve_command")),
         _notifications(path, data.get("notifications")),
+        session_idle_minutes=_idle_minutes(path, data.get("session_idle_minutes")),
         **_remote_logins(path, data),
     )
+
+
+def _idle_minutes(path: Path, value: object) -> int:
+    if value is None:
+        return DEFAULT_IDLE_MINUTES
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not (MIN_IDLE_MINUTES <= value <= MAX_IDLE_MINUTES)
+    ):
+        message = (
+            f"{path}: session_idle_minutes must be a whole number from {MIN_IDLE_MINUTES} "
+            f"to {MAX_IDLE_MINUTES}"
+        )
+        raise ConfigError(message)
+    return value
 
 
 def _notifications(path: Path, value: object) -> bool:

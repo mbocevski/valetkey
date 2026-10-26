@@ -39,16 +39,20 @@ profile.
   downloaded (``in_progress``). A ``click`` or ``navigate`` answer carries the same under
   ``downloads``: the files that arrived since this client last looked.
 * ``status`` with no ``site``: what is running now. ``{"sessions": [{"site", "since",
-  "contained", "host"}], "logins": [{"site", "since"}], "bridges": [{"bridge", "since"}]}``, the
+  "contained", "host", "idle_seconds", "closes_at"}], "logins": [{"site", "since"}],
+  "bridges": [{"bridge", "since"}]}``, the
   first two sorted by site. ``since`` is a UTC time, ``host`` is the host of the page the
-  browser was last reported at (never the whole URL, which may carry a token). It is read from
+  browser was last reported at (never the whole URL, which may carry a token). ``idle_seconds``
+  is how long nothing has used the session and ``closes_at`` a UTC time: see **Idle sessions**.
+  It is read from
   the processes the daemon owns. With ``links: true`` a login shown in a web browser also has
   ``remote`` (``url``, ``port``, ``ssh``): the link is a credential, so ``watch`` never carries
   it and nothing that reaches a model asks for it.
 * ``watch``: the connection stays open. The first answer is ``{"event": "snapshot", "at",
   "sessions", "logins"}`` as for ``status``; then one answer per change, each
   ``{"event": "session_started" | "session_ended" | "login_opened" | "login_closed",
-  "site", "at"}``, or ``{"event": "bridge_connected" | "bridge_disconnected", "bridge", "at"}``,
+  "site", "at"}`` (a ``session_ended`` caused by lack of use also has ``"reason": "idle"``), or
+  ``{"event": "bridge_connected" | "bridge_disconnected", "bridge", "at"}``,
   all with the request's ``id``. Nothing can hide a session from it.
 * ``bridge_register`` ``{rand}``: record the bridge ``bridge-<rand>``, whose socket the ssh
   connection forwards to ``<runtime>/valetkey/bridge-<rand>.sock``. The socket must already be
@@ -84,7 +88,7 @@ can tell it from anything the daemon says itself.
 **Errors** are ``{code, message}``: ``bad_request``, ``request_too_large``, ``unknown_op``,
 ``unknown_site``, ``ambiguous_account``, ``unknown_ref``, ``target_not_found``,
 ``target_ambiguous``, ``login_in_progress``, ``private_address``, ``bridge_exists``, ``no_socket``,
-``no_session``, ``session_ended``, ``session_failed``,
+``no_session``, ``session_idle``, ``session_ended``, ``session_failed``,
 ``browser_error``, ``no_display``, ``x11_only``, ``bad_policy`` and ``internal``.
 
 **Liveness.** A task polls every session twice a second. A session whose browser has been
@@ -96,6 +100,13 @@ site name; it is never waited for.
 lock. ``open`` is refused while a login runs, ``login`` while a session runs, and a second
 ``open`` joins the live session. Session operations run in worker threads under a second
 per-site lock, so two clients never interleave a click and a snapshot.
+
+**Idle sessions.** A session that nothing uses for ``session_idle_minutes`` (config file, 1 to
+1440, 15 unless set) is ended like ``close`` does it: the profile, cookies and downloads stay,
+``session_ended`` carries ``"reason": "idle"`` and one line is logged. Using it means a request
+that names the site, a call still running, a question waiting for the person, or a download
+still being written. The next call that needs the session fails with ``session_idle`` and a
+message that says so, until the site is opened or closed.
 
 **Refusal cursors** are kept per connection and site: each client is told about each refusal
 once, and one client asking does not use up what another has yet to see. A client that joins a
@@ -121,9 +132,10 @@ import socket
 import sqlite3
 import stat
 import struct
+import time
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 from urllib.parse import urljoin, urlsplit
@@ -562,6 +574,14 @@ def _download_entry(item: downloads.Download) -> dict[str, Any]:
     return {"path": untrusted(str(item.path)), "size": item.size, "mime": item.mime}
 
 
+def _idle_message(site: str, minutes: int) -> str:
+    noun = "minute" if minutes == 1 else "minutes"
+    return (
+        f"The {site} session was closed after {minutes} {noun} without use. "
+        "Call browser_open to start it again."
+    )
+
+
 def make_private_dirs(path: Path) -> None:
     """Create ``path`` and its missing parents with mode ``0700``."""
     missing = [path, *path.parents]
@@ -612,6 +632,10 @@ class _Site:
     """Hosts the approval command said no to, so the agent is not allowed to ask again."""
     ask_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """One question at a time per site."""
+    last_used: float = 0.0
+    """When a client last used the site, on the daemon's idle clock."""
+    idle_closed: int | None = None
+    """How many minutes unused ended the last session, until the site is opened or closed."""
 
 
 @dataclass(eq=False)
@@ -658,7 +682,9 @@ class Daemon:
     the longest to wait for downloads that are running. ``announcer`` (default
     :func:`announce_session`) tells the person that a session started, and ``poll_interval`` is
     how often each session's browser is checked. ``display_starter`` makes the private display of
-    a login shown in a web browser (:func:`valetkey.display.start_display`).
+    a login shown in a web browser (:func:`valetkey.display.start_display`). ``idle_limit`` is
+    how many seconds a session may go unused, instead of the config file's
+    ``session_idle_minutes``, and ``idle_clock`` tells the time for it.
     """
 
     def __init__(  # noqa: PLR0913 - each is a seam the tests replace
@@ -679,6 +705,8 @@ class Daemon:
         approve_timeout: float = approvals.COMMAND_TIMEOUT,
         user_environment: Callable[[], Mapping[str, str]] = login.systemd_user_environment,
         display_starter: DisplayStarter = display.start_display,
+        idle_limit: float | None = None,
+        idle_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Create a daemon for the directories in ``roots``. Nothing listens until :func:`run`."""
         self.roots = roots
@@ -696,6 +724,11 @@ class Daemon:
         self._announcer = announcer or announce_session
         self._notifier = notifier
         self._poll_interval = poll_interval
+        self._idle_limit = (
+            approvals.DEFAULT_IDLE_MINUTES * 60.0 if idle_limit is None else idle_limit
+        )
+        self._idle_given = idle_limit is not None
+        self._idle_clock = idle_clock
         self._watchers: set[_Watcher] = set()
         self._bridges: dict[str, _RegisteredBridge] = {}
         self._monitor: asyncio.Task[None] | None = None
@@ -749,6 +782,7 @@ class Daemon:
             AlreadyRunningError: when another daemon holds that path or listens on it.
 
         """
+        await self._read_idle_limit()
         inherited = activated_socket(os.environ, os.getpid())
         if inherited is not None:
             for name in _ACTIVATION_VARIABLES:
@@ -772,6 +806,18 @@ class Daemon:
             self._release_lock()
             raise
         self._monitor = asyncio.ensure_future(self._monitor_sessions())
+
+    async def _read_idle_limit(self) -> None:
+        """Take the idle limit from the config file, unless one was given.
+
+        Raises:
+            approvals.ConfigError: when the file is not valid, so a wrong value stops the daemon
+                at start-up instead of being ignored.
+
+        """
+        if not self._idle_given:
+            config = await asyncio.to_thread(approvals.load_config, self.roots)
+            self._idle_limit = config.session_idle_minutes * 60.0
 
     async def _start_activated(self, inherited: socket.socket, path: Path | None) -> None:
         """Serve on the socket systemd passed in, holding the lock that sits next to it.
@@ -931,11 +977,20 @@ class Daemon:
             gone.cancel()
             self._watchers.discard(watcher)
 
-    def _emit(self, event: str, site: str | None = None, *, bridge: str | None = None) -> None:
+    def _emit(
+        self,
+        event: str,
+        site: str | None = None,
+        *,
+        bridge: str | None = None,
+        reason: str | None = None,
+    ) -> None:
         """Tell every `watch` client that ``event`` happened to ``site`` or to ``bridge``."""
         message: dict[str, Any] = {"event": event}
         if site is not None:
             message["site"] = site
+        if reason is not None:
+            message["reason"] = reason
         if bridge is not None:
             message["bridge"] = bridge
         message["at"] = self._now().strftime(_TIME_FORMAT)
@@ -961,6 +1016,7 @@ class Daemon:
             if state.kind == "session":
                 sessions_now.append(
                     {"site": name, "since": since, "contained": True, "host": state.host}
+                    | self._idle_fields(state)
                 )
             elif state.kind == "login":
                 entry: dict[str, Any] = {"site": name, "since": since}
@@ -980,6 +1036,18 @@ class Daemon:
             result = {"event": event, "at": self._now().strftime(_TIME_FORMAT)} | result
         return result
 
+    def _idle_fields(self, state: _Site) -> dict[str, Any]:
+        """Say how long the session has been unused and when that will close it."""
+        limit = self._idle_limit
+        idle = max(0.0, self._idle_clock() - state.last_used)
+        closes = self._now() + timedelta(seconds=max(0.0, limit - idle))
+        return {"idle_seconds": int(idle), "closes_at": closes.strftime(_TIME_FORMAT)}
+
+    def _touch(self, name: str) -> None:
+        """Note that a client used the site, so its idle time starts again."""
+        if (state := self._sites.get(name)) is not None:
+            state.last_used = self._idle_clock()
+
     async def _announce(self, site: str) -> None:
         """Run the announcer; a failure to tell the person never reaches the session."""
         try:
@@ -991,16 +1059,48 @@ class Daemon:
         """End every session whose browser has died, so the registry matches the processes."""
         while True:
             await asyncio.sleep(self._poll_interval)
-            for state in list(self._sites.values()):
-                session = state.session
-                if state.kind != "session" or session is None:
+            await self._check_sessions()
+
+    async def _check_sessions(self) -> None:
+        """End the sessions whose browser has died or that nobody has used for too long."""
+        for state in list(self._sites.values()):
+            session = state.session
+            if state.kind != "session" or session is None:
+                continue
+            try:
+                if await asyncio.to_thread(session.is_alive):
+                    await self._close_if_idle(state, session)
                     continue
-                try:
-                    if await asyncio.to_thread(session.is_alive):
-                        continue
-                    await self._end_if_current(state, session)
-                except Exception:
-                    logger.exception("checking the %s session failed", state.name)
+                await self._end_if_current(state, session)
+            except Exception:
+                logger.exception("checking the %s session failed", state.name)
+
+    async def _in_use(self, state: _Site) -> bool:
+        """Say whether something is happening on the site that keeps its session open.
+
+        A call that is running, a question waiting for the person, or a download that is not
+        finished. A login window is no session, so it never reaches here.
+        """
+        if state.op_lock.locked() or state.ask_lock.locked():
+            return True
+        paths = sessions.session_paths(self.roots, state.name)
+        return await asyncio.to_thread(downloads.running, paths.incoming_dir)
+
+    async def _close_if_idle(self, state: _Site, session: BrowserSession) -> None:
+        """End the session if nobody has used it for the idle limit, as ``browser_close`` would."""
+        limit = self._idle_limit
+        if self._idle_clock() - state.last_used < limit:
+            return
+        if await self._in_use(state):
+            self._touch(state.name)
+            return
+        async with state.lock:
+            if state.session is not session or self._idle_clock() - state.last_used < limit:
+                return
+            minutes = max(1, round(limit / 60))
+            logger.info("closing the %s session: unused for %d minutes", state.name, minutes)
+            await self._end(state, reason="idle")
+            state.idle_closed = minutes
 
     async def _end_if_current(self, state: _Site, session: BrowserSession) -> None:
         """End the site's session if it is still ``session``, not one opened in the meantime."""
@@ -1015,7 +1115,9 @@ class Daemon:
 
     def _site(self, args: dict[str, Any]) -> str:
         """Return the account the ``site`` argument names; a bare name must be unambiguous."""
-        return sites.resolve_account(self.roots, _string_arg(args, "site"))
+        name = sites.resolve_account(self.roots, _string_arg(args, "site"))
+        self._touch(name)
+        return name
 
     def _shown(self, name: str, known: list[str] | None = None) -> str:
         """Return ``name`` as a client has to write it (see :func:`valetkey.sites.listed_name`)."""
@@ -1717,6 +1819,8 @@ class Daemon:
         state.start = policy.start
         state.generation += 1
         state.since = self._now()
+        state.idle_closed = None
+        state.last_used = self._idle_clock()
         state.host = _host_of(policy.start)
         self._emit("session_started", state.name)
         task = asyncio.ensure_future(self._announce(state.name))
@@ -1739,8 +1843,12 @@ class Daemon:
         else:
             mark()
 
-    async def _end(self, state: _Site) -> None:
-        """Stop whatever the site is doing and make it idle. The caller holds ``state.lock``."""
+    async def _end(self, state: _Site, *, reason: str | None = None) -> None:
+        """Stop whatever the site is doing and make it idle. The caller holds ``state.lock``.
+
+        ``reason`` goes in the ``session_ended`` event.
+        """
+        state.idle_closed = None
         window, watcher = state.window, state.watcher
         if window is not None:
             await window.cancel()
@@ -1766,7 +1874,7 @@ class Daemon:
                 directory = sessions.session_paths(self.roots, state.name).directory
                 await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
             if session is not None:
-                self._emit("session_ended", state.name)
+                self._emit("session_ended", state.name, reason=reason)
 
     async def _op_close(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         site = self._site(args)
@@ -2030,11 +2138,21 @@ class Daemon:
         """Run ``call`` on the site's session in a worker thread and wrap the answer.
 
         The returned dictionary holds the envelope and, under ``_value``, what ``call``
-        returned, for the caller to shape and remove.
+        returned, for the caller to shape and remove. The site counts as used until it ends.
         """
+        try:
+            return await self._run_session_op(connection, state, call)
+        finally:
+            self._touch(state.name)
+
+    async def _run_session_op(
+        self, connection: _Connection, state: _Site, call: Callable[[BrowserSession], Any]
+    ) -> dict[str, Any]:
         dead: BrowserSession | None = None
         async with state.op_lock:
             if state.kind != "session":
+                if state.idle_closed is not None:
+                    _fail("session_idle", _idle_message(state.name, state.idle_closed))
                 _fail("no_session", f"{state.name} has no running session; open it first")
             session = cast("BrowserSession", state.session)
             if not session.is_alive():

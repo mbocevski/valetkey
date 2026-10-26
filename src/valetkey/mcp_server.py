@@ -28,6 +28,7 @@ daemon, if started here, writes to a log file.
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import re
@@ -948,6 +949,23 @@ async def show_link(ctx: Context, result: dict[str, Any], remote: dict[str, Any]
     return True
 
 
+class _IdleClosed(Exception):  # noqa: N818 - an answer, not a failure
+    """The session was closed for lack of use. The tool answers with the message, not an error."""
+
+
+def _answering_idle(tool: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+    """Wrap ``tool`` so a session closed for lack of use is a plain answer, not a tool error."""
+
+    @functools.wraps(tool)
+    async def run(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401 - the tool's own types
+        try:
+            return await tool(*args, **kwargs)
+        except _IdleClosed as closed:
+            return str(closed)
+
+    return run
+
+
 class _Tools:
     """The tool functions. Each forwards one request through the bridge."""
 
@@ -962,6 +980,8 @@ class _Tools:
         try:
             return await self._bridge.call(op, **args)
         except DaemonError as error:
+            if error.code == "session_idle":
+                raise _IdleClosed(error.message) from error
             raise ToolError(error_text(error)) from error
 
     async def browser_sites(
@@ -1416,7 +1436,7 @@ def build_server(bridge: Bridge) -> MCPServer:
     tools = _Tools(bridge)
     for name, description in DESCRIPTIONS.items():
         server.add_tool(
-            getattr(tools, name),
+            _answering_idle(getattr(tools, name)),
             name=name,
             description=description,
             annotations=ANNOTATIONS[name],

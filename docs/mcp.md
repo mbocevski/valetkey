@@ -63,6 +63,22 @@ and the site, as in `The page did not load: example.org is not allowed for sitex
 hosts and the advice follow. `browser_open` says the same when the host of the site's own start
 page is refused, and adds that no session is running.
 
+## Idle sessions
+
+A session that nothing uses for 15 minutes is closed, the same way `browser_close` does it. The
+login, the profile and the downloads stay, so `browser_open` starts it again, logged in, in a few
+seconds. These count as use: any tool call that names the site, a call that is still running, a
+question waiting for you, and a download that is still being written.
+
+The next call on that site, other than `browser_open`, returns an ordinary result, not an error:
+`The sitex session was closed after 15 minutes without use. Call browser_open to start it again.`
+The agent should open the site and go on.
+
+Set the time with `session_idle_minutes` in `$XDG_CONFIG_HOME/valetkey/config.json`, from 1 to
+1440. Any other value stops the daemon at start-up with a message that names the file. There is no
+way to turn the limit off. `valetkey status` shows how long each session has been idle and when it
+will close. `valetkey watch` reports the close as `session_ended` with `"reason": "idle"`.
+
 ## Hints for the client
 
 Each tool carries the standard MCP hints, so a client can decide what to ask you about.

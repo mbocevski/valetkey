@@ -37,3 +37,6 @@ setpriv
 copy_hosts_from
 srcset
 as_json
+idle_seconds
+closes_at
+session_idle_minutes

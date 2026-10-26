@@ -1265,6 +1265,21 @@ async def _daemon_status(*, links: bool) -> dict[str, Any]:
         return await connection.call("status", links=links)
 
 
+_MINUTE = 60
+_HOUR = 3600
+
+
+def _idle_text(seconds: object) -> str:
+    """Say a time unused as ``45s``, ``7m`` or ``2h``, or ``-`` when there is none."""
+    if not isinstance(seconds, int):
+        return "-"
+    if seconds < _MINUTE:
+        return f"{seconds}s"
+    if seconds < _HOUR:
+        return f"{seconds // _MINUTE}m"
+    return f"{seconds // _HOUR}h"
+
+
 def _activity_rows(activity: dict[str, Any]) -> list[list[str]]:
     return [
         [
@@ -1272,6 +1287,8 @@ def _activity_rows(activity: dict[str, Any]) -> list[list[str]]:
             entry.get("site") or entry["bridge"],
             entry["since"] or "-",
             entry.get("host") or "-",
+            _idle_text(entry.get("idle_seconds")),
+            entry.get("closes_at") or "-",
         ]
         for kind, key in (("session", "sessions"), ("login", "logins"), ("bridge", "bridges"))
         for entry in activity.get(key, [])
@@ -1300,11 +1317,14 @@ def show_status(
     when none runs, this says so and exits 0.
 
     With --json the output is an object with three lists. "sessions" holds objects with the keys
-    site, since, contained and host. "logins" holds objects with the keys site and since.
-    "bridges" holds objects with the keys bridge and since, one for each laptop connected to
-    take login windows. since is a UTC time like 2026-10-26T09:00:00Z. contained is always true.
+    site, since, contained, host, idle_seconds and closes_at. "logins" holds objects with the
+    keys site and since. "bridges" holds objects with the keys bridge and since, one for each
+    laptop connected to take login windows. since is a UTC time like 2026-10-26T09:00:00Z.
+    contained is always true.
     host is the host of the page the browser was last reported at, never the whole address,
-    which may carry a token.
+    which may carry a token. idle_seconds is how long nothing has used the session, and
+    closes_at is the UTC time the daemon will close it if nothing does: after
+    session_idle_minutes in config.json, 15 by default.
 
     A login shown in a web browser has a link that works like a password: whoever opens it can
     type into the login window. The table prints it under the table, with the ssh command that
@@ -1327,7 +1347,7 @@ def show_status(
     if not rows:
         _say("No browser sessions or login windows are open.")
         return 0
-    _print_table(["KIND", "SITE", "SINCE", "HOST"], rows)
+    _print_table(["KIND", "SITE", "SINCE", "HOST", "IDLE", "CLOSES"], rows)
     for entry in activity.get("logins", []):
         if remote := entry.get("remote"):
             _say(f"\nThe {entry['site']} login is shown in a web browser.")

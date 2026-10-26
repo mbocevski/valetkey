@@ -559,3 +559,21 @@ def test_no_shell_is_involved(tmp_path: Path) -> None:
     # An argument that would be a command in a shell is just an argument.
     assert ask((*argv, f"; touch {marker}", "$(touch " + str(marker) + ")")) == "yes"
     assert not marker.exists()
+
+
+def test_the_idle_limit_is_fifteen_minutes_unless_the_config_says_otherwise(
+    roots: sites.Roots,
+) -> None:
+    assert approvals.load_config(roots).session_idle_minutes == 15
+    write_config(roots, "{}")
+    assert approvals.load_config(roots).session_idle_minutes == 15
+    for minutes in (1, 90, 1440):
+        write_config(roots, f'{{"session_idle_minutes": {minutes}}}')
+        assert approvals.load_config(roots).session_idle_minutes == minutes
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "1441", "2.5", '"15"', "true", "[]"])
+def test_an_idle_limit_out_of_range_is_a_config_error(roots: sites.Roots, value: str) -> None:
+    write_config(roots, f'{{"session_idle_minutes": {value}}}')
+    with pytest.raises(approvals.ConfigError, match="session_idle_minutes must be a whole number"):
+        approvals.load_config(roots)

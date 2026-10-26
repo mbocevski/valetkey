@@ -3048,3 +3048,23 @@ def test_the_host_in_the_note_is_shown_safely() -> None:
     note = mcp_server.not_loaded_note(odd)
     assert note.count("\n") == 1
     assert note.startswith('The page did not load: "a b')
+
+
+def test_a_session_closed_for_lack_of_use_is_an_answer_not_an_error(short_dir: Path) -> None:
+    said = (
+        "The sitex session was closed after 15 minutes without use. "
+        "Call browser_open to start it again."
+    )
+
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _):
+            fake.handlers["snapshot"] = lambda _a: fail("session_idle", said)
+            fake.handlers["click"] = lambda _a: fail("session_idle", said)
+            snapshot = await mcp.call_tool("browser_snapshot", {"site": "sitex"})
+            assert not snapshot.is_error
+            assert text_of(snapshot) == said
+            click = await mcp.call_tool("browser_click", {"site": "sitex", "ref": "e1"})
+            assert not click.is_error
+            assert text_of(click) == said
+
+    asyncio.run(scenario())

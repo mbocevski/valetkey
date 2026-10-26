@@ -1288,7 +1288,14 @@ def test_mcp_command_serves_over_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
 
 ACTIVITY = {
     "sessions": [
-        {"site": "sitex", "since": "2026-10-26T09:00:00Z", "contained": True, "host": "sitex.com"},
+        {
+            "site": "sitex",
+            "since": "2026-10-26T09:00:00Z",
+            "contained": True,
+            "host": "sitex.com",
+            "idle_seconds": 125,
+            "closes_at": "2026-10-26T09:12:55Z",
+        },
     ],
     "logins": [{"site": "another", "since": "2026-10-26T09:05:00Z"}],
 }
@@ -1351,12 +1358,20 @@ def test_status_prints_a_table(
     status, out, err = run(capsys, "status")
     assert (status, err) == (0, "")
     assert out.splitlines() == [
-        "KIND     SITE     SINCE                 HOST",
-        "session  sitex    2026-10-26T09:00:00Z  sitex.com",
-        "login    another  2026-10-26T09:05:00Z  -",
+        "KIND     SITE     SINCE                 HOST       IDLE  CLOSES",
+        "session  sitex    2026-10-26T09:00:00Z  sitex.com  2m    2026-10-26T09:12:55Z",
+        "login    another  2026-10-26T09:05:00Z  -          -     -",
     ]
     assert connection.asked == ["status"]
     assert connection.arguments == [{"links": True}]
+
+
+@pytest.mark.parametrize(
+    ("seconds", "shown"),
+    [(0, "0s"), (59, "59s"), (60, "1m"), (3599, "59m"), (3600, "1h"), (None, "-")],
+)
+def test_status_shows_how_long_a_session_has_been_idle(seconds: int | None, shown: str) -> None:
+    assert cli._idle_text(seconds) == shown  # noqa: SLF001
 
 
 def test_status_json_is_the_daemons_answer(
@@ -1387,7 +1402,7 @@ def test_status_shows_the_link_of_a_login_in_a_browser_and_how_to_reach_it(
     status, out, _ = run(capsys, "status")
     assert status == 0
     lines = out.splitlines()
-    assert lines[1].split() == ["login", "sitex", "2026-10-26T09:05:00Z", "-"]
+    assert lines[1].split() == ["login", "sitex", "2026-10-26T09:05:00Z", "-", "-", "-"]
     assert lines[-3:] == [
         "The sitex login is shown in a web browser.",
         "On the machine you will use, run: ssh -L 4242:localhost:4242 box",
@@ -1423,7 +1438,14 @@ def test_status_without_a_host_shows_a_dash(
 ) -> None:
     entry = {"site": "sitex", "since": None, "contained": True, "host": None}
     connect_to(monkeypatch, FakeConnection(status={"sessions": [entry], "logins": []}))
-    assert run(capsys, "status")[1].splitlines()[1].split() == ["session", "sitex", "-", "-"]
+    assert run(capsys, "status")[1].splitlines()[1].split() == [
+        "session",
+        "sitex",
+        "-",
+        "-",
+        "-",
+        "-",
+    ]
 
 
 def test_status_without_a_daemon_says_so_and_succeeds(
@@ -1741,7 +1763,7 @@ def test_status_lists_a_connected_bridge(
     activity = ACTIVITY | {"bridges": [{"bridge": "bridge-abc", "since": "2026-10-26T09:10:00Z"}]}
     connect_to(monkeypatch, FakeConnection(status=activity))
     rows = run(capsys, "status")[1].splitlines()
-    assert rows[-1].split() == ["bridge", "bridge-abc", "2026-10-26T09:10:00Z", "-"]
+    assert rows[-1].split() == ["bridge", "bridge-abc", "2026-10-26T09:10:00Z", "-", "-", "-"]
     connect_to(monkeypatch, FakeConnection(status=activity))
     assert json.loads(run(capsys, "status", "--json")[1]) == activity
 

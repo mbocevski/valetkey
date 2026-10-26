@@ -454,6 +454,7 @@ async def serving(roots: sites.Roots, **options: Any) -> AsyncGenerator[Rig]:  #
         "now": lambda: NOW,
         "download_settle": 0,
         "poll_interval": 3600,
+        "idle_limit": 900.0,
         "user_environment": dict,
         "proxy_options": {"resolver": no_answer},
     } | options
@@ -2812,7 +2813,7 @@ def test_status_without_a_site_says_what_is_running(roots: sites.Roots) -> None:
     add_site(roots, "idle")
 
     async def scenario() -> None:
-        async with serving(roots) as rig, await rig.connect() as c:
+        async with serving(roots, idle_clock=lambda: 100.0) as rig, await rig.connect() as c:
             assert await c.call("status") == {"sessions": [], "logins": [], "bridges": []}
             await c.call("open", site="sitex")
             await c.call("login", target="another")
@@ -2823,6 +2824,8 @@ def test_status_without_a_site_says_what_is_running(roots: sites.Roots) -> None:
                         "since": "2026-10-27T12:00:00Z",
                         "contained": True,
                         "host": "sitex.test",
+                        "idle_seconds": 0,
+                        "closes_at": "2026-10-27T12:15:00Z",
                     }
                 ],
                 "logins": [{"site": "another", "since": "2026-10-27T12:00:00Z"}],
@@ -5372,5 +5375,275 @@ def test_an_open_of_a_policy_with_no_recorded_cookie_says_nothing(roots: sites.R
             answer = await c.call("open", site="sitex")
             assert "login_expired" not in answer
             assert len(rig.factory.made) == 1
+
+    run(scenario())
+
+
+# -- idle sessions -------------------------------------------------------------------------
+
+
+class Ticks:
+    """A clock the test moves by hand."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def at(self, seconds: float) -> None:
+        self.now = 1000.0 + seconds
+
+
+IDLE = 15 * 60.0
+
+
+async def still_open(rig: Rig, ticks: Ticks, seconds: float) -> bool:
+    """Move the clock to ``seconds`` and say whether the session survives a check."""
+    ticks.at(seconds)
+    await rig.daemon._check_sessions()  # noqa: SLF001
+    return rig.daemon._sites["sitex"].kind == "session"  # noqa: SLF001
+
+
+def test_a_session_closes_when_it_has_been_idle_for_the_limit(roots: sites.Roots) -> None:
+    add_site(roots)
+    ticks = Ticks()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            assert await still_open(rig, ticks, IDLE - 1)
+            assert not await still_open(rig, ticks, IDLE)
+            assert rig.factory.made[0].closed
+            assert (await c.call("status"))["sessions"] == []
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("op", ["snapshot", "status"])
+def test_a_call_on_the_site_starts_the_idle_time_again(roots: sites.Roots, op: str) -> None:
+    add_site(roots)
+    ticks = Ticks()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            ticks.at(600)
+            await c.call(op, site="sitex")
+            assert await still_open(rig, ticks, 600 + IDLE - 1)
+            assert not await still_open(rig, ticks, 600 + IDLE)
+
+    run(scenario())
+
+
+def test_a_call_that_is_still_running_keeps_the_session_open(roots: sites.Roots) -> None:
+    add_site(roots)
+    ticks = Ticks()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            state = rig.daemon._sites["sitex"]  # noqa: SLF001
+            async with state.op_lock:
+                assert await still_open(rig, ticks, 3 * IDLE)
+            # Seen busy at 3 * IDLE, so the time counts from there.
+            assert await still_open(rig, ticks, 4 * IDLE - 1)
+            assert not await still_open(rig, ticks, 4 * IDLE)
+
+    run(scenario())
+
+
+def test_a_question_waiting_for_the_person_keeps_the_session_open(roots: sites.Roots) -> None:
+    add_site(roots)
+    ticks = Ticks()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            state = rig.daemon._sites["sitex"]  # noqa: SLF001
+            async with state.ask_lock:
+                assert await still_open(rig, ticks, 3 * IDLE)
+            assert not await still_open(rig, ticks, 4 * IDLE)
+
+    run(scenario())
+
+
+def test_a_download_in_progress_keeps_the_session_open(roots: sites.Roots) -> None:
+    add_site(roots)
+    downloads_dir(roots)
+    ticks = Ticks()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            partial = incoming_dir(roots) / "big.bin.crdownload"
+            partial.write_bytes(b"x")
+            assert await still_open(rig, ticks, 3 * IDLE)
+            partial.unlink()
+            assert not await still_open(rig, ticks, 4 * IDLE)
+
+    run(scenario())
+
+
+def test_an_idle_session_ends_with_the_reason_and_a_finished_download_is_kept(
+    roots: sites.Roots, caplog: pytest.LogCaptureFixture
+) -> None:
+    add_site(roots)
+    folder = downloads_dir(roots)
+    ticks = Ticks()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+            await rig.connect() as w,
+        ):
+            await c.call("open", site="sitex")
+            stream = w.watch()
+            await next_event(stream)
+            (incoming_dir(roots) / "done.txt").write_text("kept", encoding="utf-8")
+            assert not await still_open(rig, ticks, IDLE)
+            assert await next_event(stream) == {
+                "event": "session_ended",
+                "site": "sitex",
+                "reason": "idle",
+                "at": "2026-10-27T12:00:00Z",
+            }
+            assert (folder / "done.txt").read_text(encoding="utf-8") == "kept"
+            await c.call("open", site="sitex")
+            await c.call("close", site="sitex")
+            assert (await next_event(stream))["event"] == "session_started"
+            assert "reason" not in await next_event(stream)  # the person closed it
+            await stream.aclose()
+
+    with caplog.at_level("INFO", logger="valetkey.daemon"):
+        run(scenario())
+    lines = [r.getMessage() for r in caplog.records if "unused for" in r.getMessage()]
+    assert lines == ["closing the sitex session: unused for 15 minutes"]
+
+
+def test_the_next_call_after_an_idle_close_says_so_until_the_site_is_opened(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    ticks = Ticks()
+    said = (
+        "The sitex session was closed after 15 minutes without use. "
+        "Call browser_open to start it again."
+    )
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            await still_open(rig, ticks, IDLE)
+            for _ in range(2):
+                with pytest.raises(DaemonError) as info:
+                    await c.call("snapshot", site="sitex")
+                assert (info.value.code, info.value.message) == ("session_idle", said)
+            await c.call("open", site="sitex")
+            await c.call("snapshot", site="sitex")
+            await c.call("close", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("snapshot", site="sitex")
+            assert info.value.code == "no_session"
+
+    run(scenario())
+
+
+def test_a_close_by_the_person_is_not_reported_as_idle(roots: sites.Roots) -> None:
+    add_site(roots)
+    ticks = Ticks()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            await c.call("close", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("snapshot", site="sitex")
+            assert info.value.code == "no_session"
+
+    run(scenario())
+
+
+def test_the_idle_limit_comes_from_the_config_and_a_bad_one_stops_the_start(
+    roots: sites.Roots,
+) -> None:
+    async def start_with(text: str | None) -> float | None:
+        if text is not None:
+            folder = roots.config / "valetkey"
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / approvals.CONFIG_NAME).write_text(text, encoding="utf-8")
+        server = daemon.Daemon(roots, user_environment=dict)
+        await server.start()
+        try:
+            return server._idle_limit  # noqa: SLF001
+        finally:
+            await server.shutdown()
+
+    assert run(start_with(None)) == IDLE
+    assert run(start_with('{"session_idle_minutes": 2}')) == 120.0
+    with pytest.raises(approvals.ConfigError):
+        run(start_with('{"session_idle_minutes": 0}'))
+
+
+def test_status_shows_the_idle_time_and_when_the_session_closes(roots: sites.Roots) -> None:
+    add_site(roots)
+    ticks = Ticks()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            ticks.at(300)
+            entry = (await c.call("status"))["sessions"][0]
+            assert entry["idle_seconds"] == 300
+            assert entry["closes_at"] == "2026-10-27T12:10:00Z"  # 600 s left, from 12:00:00
+
+    run(scenario())
+
+
+def test_a_call_that_arrives_while_the_session_is_being_checked_keeps_it_open(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    ticks = Ticks()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            state = rig.daemon._sites["sitex"]  # noqa: SLF001
+            ticks.at(IDLE)
+            async with state.lock:
+                check = asyncio.ensure_future(rig.daemon._check_sessions())  # noqa: SLF001
+                await asyncio.sleep(0.05)  # the check is waiting for the lock
+                rig.daemon._touch("sitex")  # noqa: SLF001
+            await check
+            assert state.kind == "session"
 
     run(scenario())
