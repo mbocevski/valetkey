@@ -28,6 +28,7 @@ Changes that affect users of valetkey. The format follows
 - `valetkey doctor` warns when the installed agent-browser is newer than the version valetkey was tested with, and the README names that version.
 - A `PKGBUILD` in `packaging/arch` that builds an Arch Linux package with the daemon's systemd units.
 - `valetkey allow SITE --private-network RANGE` and `valetkey deny` let a site's allowed hosts resolve to addresses in a private range you list, for that site only; `valetkey sites` shows the ranges.
+- The `valetkey add` command, which creates a site with its private address ranges before the first login, so a site on a private network can be logged in to.
 
 ### Changed
 

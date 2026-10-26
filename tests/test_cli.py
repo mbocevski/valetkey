@@ -1432,3 +1432,115 @@ def test_allow_a_host_keeps_the_listed_ranges(
     run(capsys, "allow", "sitex", "login.okta.com")
     run(capsys, "deny", "sitex", "login.okta.com")
     assert sites.load_policy(roots, "sitex").private_networks == ("10.20.0.0/24",)
+
+
+# -- add: a site before its first login ----------------------------------------------------
+
+
+def test_add_writes_a_policy_with_the_start_host_and_the_ranges(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, _ = run(
+        capsys, "add", "intra", "wiki.corp.test/home", "--private-network", "10.20.0.0/24",
+        "--private-network", "fd12:3456:789a::/48", "--private-network", "10.20.0.0/24",
+    )  # fmt: skip
+    assert status == 0
+    assert out.splitlines() == [
+        "intra: added, starting at https://wiki.corp.test/home.",
+        "intra: hosts it allows may resolve inside 10.20.0.0/24.",
+        "intra: hosts it allows may resolve inside fd12:3456:789a::/48.",
+        "intra: now ask your client to log in to intra.",
+    ]
+    saved = sites.load_policy(roots, "intra")
+    assert saved == sites.Policy(
+        "intra",
+        "https://wiki.corp.test/home",
+        ("wiki.corp.test",),
+        (),
+        None,
+        (),
+        ("10.20.0.0/24", "fd12:3456:789a::/48"),
+    )
+
+
+def test_add_without_a_range_is_a_plain_new_site(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, _ = run(capsys, "add", "plain", "http://app.test/")
+    assert (status, out.count("\n")) == (0, 2)
+    assert sites.load_policy(roots, "plain").private_networks == ()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["Bad_Name", "https://a.test/"], "invalid site name"),
+        (["UPPER", "https://a.test/"], "invalid site name"),
+        (["a" * 60, "https://a.test/"], "invalid site name"),
+        (["intra", "ftp://a.test/"], "http or https"),
+        (["intra", "https://"], "host"),
+        (["intra", "https://a.test/", "--private-network", "8.8.8.0/24"], "not in a private range"),
+        (["intra", "https://a.test/", "--private-network", "10.0.0.0/7"], "not in a private range"),
+        (["intra", "https://a.test/", "--private-network", "fd00::/47"], "too wide"),
+        (["intra", "https://a.test/", "--private-network", "10.0.0.1"], "prefix length"),
+    ],
+)
+def test_add_refuses_bad_input_and_writes_nothing(
+    roots: sites.Roots,
+    capsys: pytest.CaptureFixture[str],
+    arguments: list[str],
+    message: str,
+) -> None:
+    status, _, err = run(capsys, "add", *arguments)
+    assert status == 1
+    assert message in err
+    assert not list(sites.policy_path(roots, "x").parent.glob("*.json"))
+
+
+def test_add_refuses_an_existing_site_unless_forced(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    before = sites.policy_path(roots, "sitex").read_text(encoding="utf-8")
+    status, _, err = run(capsys, "add", "sitex", "https://other.test/")
+    assert status == 1
+    assert "already exists" in err
+    assert sites.policy_path(roots, "sitex").read_text(encoding="utf-8") == before
+    status, _, _ = run(
+        capsys, "add", "sitex", "https://other.test/", "--force", "--private-network", "10.0.0.0/24"
+    )
+    assert status == 0
+    saved = sites.load_policy(roots, "sitex")
+    assert (saved.start, saved.allow, saved.private_networks) == (
+        "https://other.test/",
+        ("other.test",),
+        ("10.0.0.0/24",),
+    )
+
+
+def test_add_refuses_a_site_that_only_has_a_profile(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sites.ensure_profile(roots, "orphan")
+    status, _, err = run(capsys, "add", "orphan", "https://a.test/")
+    assert (status, "already exists" in err) == (1, True)
+    status, _, _ = run(capsys, "add", "orphan", "https://a.test/", "--force")
+    assert status == 0
+    assert sites.profile_path(roots, "orphan").is_dir()
+
+
+def test_add_needs_a_site_and_a_url(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["add", "onlyone"])
+    assert exit_info.value.code == 2
+    assert "--private-network" in run(capsys, "add", "--help")[1]
+
+
+def test_add_accepts_a_site_that_lives_at_an_address(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, _, _ = run(
+        capsys, "add", "lab", "http://10.20.0.7/", "--private-network", "10.20.0.7/32"
+    )
+    saved = sites.load_policy(roots, "lab")
+    assert (status, saved.allow, saved.private_networks) == (0, ("10.20.0.7",), ("10.20.0.7/32",))

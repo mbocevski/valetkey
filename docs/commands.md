@@ -10,6 +10,7 @@ Usage: valetkey COMMAND
 A logged-in browser for MCP clients, contained to the sites it may reach.
 
 Commands:
+  add: Create a site before its first login, for one on a private network.
   allow: Allow a host, and its subdomains, for a site.
   daemon: Run the valetkeyd daemon in the foreground.
   deny: Stop allowing a host for a site.
@@ -99,6 +100,38 @@ Parameters:
 of a host.
 ```
 <!-- end: valetkey deny --help -->
+
+## Adding a site
+
+A site is normally created by logging in. A site on a private network cannot be, because the login
+proxy refuses private addresses until you list their range. `valetkey add SITE START
+--private-network RANGE` creates the site first, with its start URL and the ranges, and then your
+client can log in to it. It refuses a site that already exists unless you pass `--force`, which
+replaces the policy and keeps the login. Only you can run it.
+
+<!-- begin: valetkey add --help -->
+```text
+Usage: valetkey add [OPTIONS] SITE START
+
+Create a site before its first login, for one on a private network.
+
+A site is normally created by logging in. A site whose host resolves to a
+private address cannot be logged in to that way, because the login proxy refuses
+private addresses unless the person lists their range. This writes the site's
+policy with its start URL, its start host and the ranges, and nothing else; then
+log in to it. Only you can do this: a client cannot create a site or list a
+range. It refuses a site that already exists, unless --force, which replaces the
+policy and keeps the login profile.
+
+Parameters:
+  SITE, --site: The new site's name: lowercase letters, digits and hyphens.
+[required]
+  START, --start: The URL the login starts at. [required]
+  --private-network STR...: A private address range the site may reach, such as
+10.20.0.0/24. Repeat it.
+  --force: Replace the policy of an existing site. [default: False]
+```
+<!-- end: valetkey add --help -->
 
 ## Forgetting a site
 

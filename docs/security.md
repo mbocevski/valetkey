@@ -50,7 +50,9 @@ reserved addresses, and the cloud metadata services at `169.254.169.254`, `fd00:
 Only you can let a site reach a private range, with `valetkey allow SITE --private-network RANGE`.
 The range must lie inside `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` or
 `fc00::/7`, and be no wider than a `/8` (a `/48` for IPv6). Use the narrowest range that holds the
-address. The permission is for that site only, and the agent cannot grant it.
+address. The permission is for that site only, and the agent cannot grant it. For a site you have
+not logged in to yet, run `valetkey add SITE START --private-network RANGE` first; a login keeps
+the ranges, and an agent that asks to log in to an unknown private host is told to ask you.
 
 ## Trust boundary
 

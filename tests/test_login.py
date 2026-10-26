@@ -400,6 +400,62 @@ def test_closing_the_window_cleans_up_then_calls_finish_with_what_was_seen(
     assert not handle.running
 
 
+def test_the_login_proxy_lets_a_host_reach_only_the_listed_private_range(
+    roots: sites.Roots,
+) -> None:
+    results: list[tuple[str, str]] = []
+    fake = FakeSandbox()
+
+    def finish(_seen: list[SeenHost], _profile: Path) -> None:
+        return None
+
+    async def scenario() -> login.LoginResult:
+        answers = {
+            "in.corp.test": "10.20.1.5",
+            "out.corp.test": "10.99.0.1",
+            "meta.test": "169.254.169.254",
+        }
+        async with Upstream().serving() as upstream:
+
+            async def resolve(host: str, _port: int) -> list[str]:
+                return [answers[host]]
+
+            options = upstream.proxy_options() | {"resolver": resolve}
+            del options["address_check"]
+            handle = await start(
+                roots,
+                fake,
+                finish,
+                upstream,
+                proxy_options=options,
+                private_networks=["10.20.1.0/24"],
+            )
+            proxy_socket = login_dir(roots) / "proxy.sock"
+            for host in answers:
+                reader, writer = await asyncio.open_unix_connection(proxy_socket)
+                writer.write(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode())
+                results.append((host, (await reader.readline()).split()[1].decode()))
+                writer.close()
+            fake.processes[0].terminate()
+            return await handle.wait()
+
+    result = run(scenario())
+    assert results == [("in.corp.test", "200"), ("out.corp.test", "403"), ("meta.test", "403")]
+    assert result.private_refused == ("out.corp.test", "meta.test")
+    assert [h.host for h in result.seen_hosts] == ["in.corp.test"]
+
+
+def test_a_login_with_no_private_refusals_reports_none(roots: sites.Roots) -> None:
+    fake = FakeSandbox(["true"])
+
+    async def scenario() -> login.LoginResult:
+        async with Upstream().serving() as upstream:
+            handle = await start(roots, fake, lambda *_: None, upstream)
+            return await handle.wait()
+
+    assert run(scenario()).private_refused == ()
+
+
 def test_the_browser_is_started_in_a_private_sandbox_with_the_display(roots: sites.Roots) -> None:
     fake = FakeSandbox(["true"])
     modes: dict[str, int] = {}

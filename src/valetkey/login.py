@@ -32,10 +32,10 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
 from valetkey import sandbox, sites
-from valetkey.proxy import Mode, Proxy, SeenHost
+from valetkey.proxy import PRIVATE_ADDRESS, Mode, Proxy, SeenHost
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 NO_SESSION = "no desktop session here — log in on a machine with one, or enable remote logins"
 X11_ONLY = (
@@ -228,12 +228,15 @@ class LoginResult:
     ``seen_hosts`` are the hosts the browser connected to, in the order first seen, with
     connection counts. ``exit_code`` is the sandbox's exit status. ``cancelled`` is true when
     :meth:`LoginHandle.cancel` ended the login rather than the person closing the window.
+    ``private_refused`` are the hosts the proxy refused because of the private address they
+    resolve to, each once: the person may want to list a range for them.
     """
 
     seen_hosts: list[SeenHost]
     profile_dir: Path
     exit_code: int
     cancelled: bool
+    private_refused: tuple[str, ...] = ()
 
 
 class LoginHandle:
@@ -292,9 +295,13 @@ class LoginHandle:
             exit_code = await self._exited
         finally:
             seen = self._proxy.seen_hosts()
+            refused = self._proxy.refused_since(0)[0]
             await self._proxy.close()
             await asyncio.to_thread(shutil.rmtree, self._login_dir, ignore_errors=True)
-        result = LoginResult(seen, self._profile_dir, exit_code, self._cancelled)
+        private = tuple(
+            dict.fromkeys(entry.host for entry in refused if entry.reason == PRIVATE_ADDRESS)
+        )
+        result = LoginResult(seen, self._profile_dir, exit_code, self._cancelled, private)
         if not self._cancelled:
             outcome = self._finish(seen, self._profile_dir)
             if inspect.isawaitable(outcome):
@@ -353,6 +360,7 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     chrome_major: int | None = None,
     launcher: Launcher = sandbox.start,
     proxy_options: Mapping[str, Any] | None = None,
+    private_networks: Sequence[str] = (),
 ) -> LoginHandle:
     """Open a login window for ``site`` and return once it has been started.
 
@@ -368,10 +376,13 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     (default: ask ``chromium --version``). ``launcher`` starts the sandbox (default:
     :func:`valetkey.sandbox.start`). ``proxy_options`` are extra keyword arguments for
     :class:`valetkey.proxy.Proxy`, such as ``resolver``; ``quiet_hosts`` defaults to the
-    browser's background hosts.
+    browser's background hosts. ``private_networks`` are the site's listed private address
+    ranges (see :func:`valetkey.sites.private_network`); the proxy lets a host resolve into them,
+    and into nothing else that is private.
 
     The proxy runs in record mode, which lets every host through, so its policy only has to be
-    valid: it allows the start host. The hosts the browser used are in the result instead.
+    valid: it allows the start host and lists the ranges. The hosts the browser used are in the
+    result instead.
 
     Raises:
         DisplayError: when there is no Wayland display to open a window on.
@@ -379,7 +390,9 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
 
     """
     url = normalize_start_url(start_url)
-    placeholder = sites.Policy(site, url, (sites.host_of(url),))
+    placeholder = sites.Policy(
+        site, url, (sites.host_of(url),), private_networks=tuple(private_networks)
+    )
     socket_path = wayland_socket or await asyncio.to_thread(find_wayland_socket)
     major = chrome_major or await asyncio.to_thread(sandbox.installed_chrome_major)
     runtime = sites.runtime_path(roots)

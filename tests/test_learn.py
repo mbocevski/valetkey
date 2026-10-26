@@ -492,3 +492,11 @@ def test_merge_records_the_login_pages_and_keeps_old_ones_when_there_are_none() 
     assert kept.login_pages == ("sitex.com/login",)
     replaced = learn.merge(first, new, START, NOW, pages=["login.okta.com/signin"])
     assert replaced.login_pages == ("login.okta.com/signin",)
+
+
+def test_merge_keeps_the_ranges_the_person_listed_and_never_adds_any() -> None:
+    new = learn.Classification(("sitex.com", "10.20.1.5.nip.test"), ())
+    listed = learn.merge(policy(private_networks=("10.20.0.0/24",)), new, START, NOW)
+    assert listed.private_networks == ("10.20.0.0/24",)
+    assert learn.merge(None, new, START, NOW).private_networks == ()
+    assert learn.merge(policy(), new, START, NOW).private_networks == ()

@@ -108,13 +108,24 @@ from valetkey import (
     sites,
 )
 from valetkey.client import MAX_LINE_BYTES, DaemonError
-from valetkey.proxy import NOT_ALLOWED, PRIVATE_ADDRESS, Mode, Proxy
+from valetkey.proxy import (
+    NOT_ALLOWED,
+    PRIVATE_ADDRESS,
+    Mode,
+    Proxy,
+    address_refusal,
+    private_address_allowed,
+    system_resolver,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
 logger = logging.getLogger(__name__)
 
+RESOLVE_SECONDS = 10.0
+"""The longest to wait for the start host of a login to resolve."""
+_MAX_NAMED_HOSTS = 5
 MAX_REFUSED_HOSTS = 2000
 """How many refused hosts are remembered per site."""
 SD_LISTEN_FDS_START = 3
@@ -433,6 +444,19 @@ def _allow_answer(site: str, host: str, found: approvals.Eligibility) -> dict[st
     """Answer for a host that is not to be asked about: allowed already, or not eligible."""
     result = "allowed" if found.status == "already_allowed" else "not_eligible"
     return _answer(site, host, result, found.message)
+
+
+def _private_note(summary: str | None, site: str, hosts: tuple[str, ...]) -> str:
+    """Add to a login's summary the hosts refused for their private address, and what to do."""
+    shown = ", ".join(hosts[:_MAX_NAMED_HOSTS])
+    more = len(hosts) - _MAX_NAMED_HOSTS
+    named = f"{shown} and {more} more" if more > 0 else shown
+    note = (
+        f"Refused because they are on a private network: {named}. Only the person can allow "
+        f"that, with `valetkey allow {site} --private-network RANGE` (the narrowest range that "
+        "holds the address); then log in again."
+    )
+    return f"{summary} {note}" if summary else note
 
 
 def _remember_refusals(state: _Site, proxy: Proxy) -> None:
@@ -1020,6 +1044,8 @@ class Daemon:
     async def _op_login(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         target = _string_arg(args, "target")
         site, start = await self._login_target(target)
+        existing = await self._existing_policy(site)
+        await self._refuse_private_start(site, start, existing)
         state = self._state(site)
         async with state.lock:
             if state.kind == "session":
@@ -1030,7 +1056,12 @@ class Daemon:
             state.start = start
             try:
                 state.window = await self._login_starter(
-                    site, start, self.roots, self._finisher(state, start)
+                    site,
+                    start,
+                    self.roots,
+                    self._finisher(state, start),
+                    proxy_options=self._proxy_options,
+                    private_networks=existing.private_networks if existing else (),
                 )
             except BaseException:
                 state.kind = "idle"
@@ -1039,6 +1070,49 @@ class Daemon:
             state.watcher = asyncio.ensure_future(self._watch_login(state, state.window))
             self._emit("login_opened", site)
         return {"site": site, "window": "open"}
+
+    async def _existing_policy(self, site: str) -> sites.Policy | None:
+        """Return ``site``'s policy, or ``None`` when it has none yet."""
+        try:
+            return await asyncio.to_thread(sites.load_policy, self.roots, site)
+        except FileNotFoundError:
+            return None
+
+    async def _refuse_private_start(
+        self, site: str, start: str, existing: sites.Policy | None
+    ) -> None:
+        """Fail early when ``start`` resolves to a private address the site may not reach.
+
+        The login proxy would refuse it anyway, and the person would be left with a window that
+        shows an error. Only the person can list a range, so the error says which command to
+        run. A name that does not resolve is left to the browser to report.
+        """
+        host = sites.host_of(start)
+        resolver = self._proxy_options.get("resolver", system_resolver)
+        check = self._proxy_options.get("address_check", address_refusal)
+        try:
+            async with asyncio.timeout(RESOLVE_SECONDS):
+                addresses = await resolver(host, 443)
+        except OSError, TimeoutError:
+            return
+        networks = existing.private_networks if existing else ()
+        if not any(
+            check(address) is not None and not private_address_allowed(address, networks)
+            for address in addresses
+        ):
+            return
+        command = (
+            f"valetkey allow {site} --private-network RANGE"
+            if existing
+            else f"valetkey add {site} {start} --private-network RANGE"
+        )
+        _fail(
+            "private_address",
+            f"{host} resolves to a private address that {site} may not reach. Only the person "
+            f"can allow that, for this site only: ask them to run `{command}`, with the "
+            "narrowest range that holds its address (one address such as 10.20.0.7/32, or a /24), "
+            "and then log in again.",
+        )
 
     async def _login_target(self, target: str) -> tuple[str, str]:
         """Return the site name and start URL for a known site name, a host or a URL."""
@@ -1080,7 +1154,9 @@ class Daemon:
 
     async def _watch_login(self, state: _Site, window: LoginWindow) -> None:
         try:
-            await window.wait()
+            result = await window.wait()
+            if result.private_refused:
+                state.summary = _private_note(state.summary, state.name, result.private_refused)
         except Exception:
             logger.exception("login for %s failed", state.name)
         finally:

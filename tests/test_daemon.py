@@ -324,10 +324,13 @@ class FakeWindow:
         self.finish = finish
         self.done = asyncio.Event()
         self.cancelled = False
+        self.private_refused: list[str] = []
 
     async def wait(self) -> login.LoginResult:
         await self.done.wait()
-        return login.LoginResult([], Path("/profile"), 0, self.cancelled)
+        return login.LoginResult(
+            [], Path("/profile"), 0, self.cancelled, tuple(self.private_refused)
+        )
 
     async def cancel(self) -> login.LoginResult:
         self.cancelled = True
@@ -346,6 +349,7 @@ class Logins:
     def __init__(self) -> None:
         self.windows: list[FakeWindow] = []
         self.fail: Exception | None = None
+        self.options: list[dict[str, Any]] = []
 
     async def __call__(
         self,
@@ -353,8 +357,9 @@ class Logins:
         start: str,
         _roots: sites.Roots,
         finish: Finish,
-        **_: Any,  # noqa: ANN401
+        **options: Any,  # noqa: ANN401
     ) -> FakeWindow:
+        self.options.append(options)
         if self.fail is not None:
             raise self.fail
         window = FakeWindow(site, start, finish)
@@ -390,6 +395,11 @@ class Rig:
         return client.Client.connect(self.path)
 
 
+async def no_answer(_host: str, _port: int) -> list[str]:
+    """A resolver that finds nothing, so no test depends on the network's DNS."""
+    return []
+
+
 @contextlib.asynccontextmanager
 async def serving(roots: sites.Roots, **options: Any) -> AsyncGenerator[Rig]:  # noqa: ANN401
     factory, logins = Factory(), Logins()
@@ -400,6 +410,7 @@ async def serving(roots: sites.Roots, **options: Any) -> AsyncGenerator[Rig]:  #
         "download_settle": 0,
         "poll_interval": 3600,
         "user_environment": dict,
+        "proxy_options": {"resolver": no_answer},
     } | options
     server = daemon.Daemon(roots, **settings)
     await server.start()
@@ -3463,3 +3474,160 @@ def test_a_private_address_loads_only_inside_a_listed_range(roots: sites.Roots) 
                 await server.shutdown()
 
     run(scenario())
+
+
+# -- logins on a private network -----------------------------------------------------------
+
+
+def resolving_to(*addresses: str) -> dict[str, Any]:
+    """Proxy options with a resolver that answers ``addresses`` and the real address check."""
+
+    async def resolve(_host: str, _port: int) -> list[str]:
+        return list(addresses)
+
+    return {"resolver": resolve}
+
+
+def test_a_login_for_an_unknown_private_host_fails_and_names_the_command(
+    roots: sites.Roots,
+) -> None:
+    async def scenario() -> None:
+        async with serving(roots, proxy_options=resolving_to("10.20.1.5")) as rig:
+            async with await rig.connect() as c:
+                with pytest.raises(DaemonError) as info:
+                    await c.call("login", target="https://wiki.corp.test/")
+            assert info.value.code == "private_address"
+            message = info.value.message
+            assert "wiki.corp.test resolves to a private address" in message
+            assert "valetkey add corp https://wiki.corp.test/ --private-network RANGE" in message
+            assert "narrowest range" in message
+            assert rig.logins.windows == []
+            assert not sites.policy_path(roots, "corp").exists()
+
+    run(scenario())
+
+
+def test_a_login_for_a_known_site_without_the_range_says_to_use_allow(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots, proxy_options=resolving_to("10.20.1.5")) as rig:
+            async with await rig.connect() as c:
+                with pytest.raises(DaemonError) as info:
+                    await c.call("login", target="sitex")
+            assert info.value.code == "private_address"
+            assert "valetkey allow sitex --private-network RANGE" in info.value.message
+            assert rig.logins.windows == []
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        ["10.20.1.5"],
+        ["10.20.1.5", "10.20.1.9"],
+        ["93.184.216.34", "10.20.1.5"],
+        ["10.20.1.5", "10.99.0.1"],
+    ],
+)
+def test_a_login_for_a_site_with_the_range_opens_and_passes_the_ranges_on(
+    roots: sites.Roots, answers: list[str]
+) -> None:
+    sites.save_policy(
+        roots,
+        sites.Policy(
+            "sitex", "https://sitex.test/", ("sitex.test",), private_networks=("10.20.1.0/24",)
+        ),
+    )
+
+    async def scenario() -> None:
+        options = resolving_to(*answers)
+        async with serving(roots, proxy_options=options) as rig, await rig.connect() as c:
+            if "10.99.0.1" in answers:
+                with pytest.raises(DaemonError):  # one answer is outside the range
+                    await c.call("login", target="sitex")
+                return
+            assert (await c.call("login", target="sitex"))["window"] == "open"
+            (call,) = rig.logins.options
+            assert call["private_networks"] == ("10.20.1.0/24",)
+            assert call["proxy_options"] == options
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("answers", [[], ["93.184.216.34"]])
+def test_a_login_for_a_host_that_does_not_resolve_privately_just_opens(
+    roots: sites.Roots, answers: list[str]
+) -> None:
+    async def scenario() -> None:
+        async with serving(roots, proxy_options=resolving_to(*answers)) as rig:
+            async with await rig.connect() as c:
+                assert (await c.call("login", target="https://wiki.corp.test/"))["window"] == "open"
+            assert rig.logins.options[0]["private_networks"] == ()
+
+    run(scenario())
+
+
+def test_a_host_that_cannot_be_resolved_or_is_slow_does_not_stop_a_login(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(daemon, "RESOLVE_SECONDS", 0.1)
+
+    async def broken(_host: str, _port: int) -> list[str]:
+        raise OSError
+
+    async def slow(_host: str, _port: int) -> list[str]:
+        await asyncio.sleep(30)
+        return ["10.20.1.5"]
+
+    async def scenario() -> None:
+        for resolver in (broken, slow):
+            options = {"resolver": resolver}
+            async with serving(roots, proxy_options=options) as rig, await rig.connect() as c:
+                assert (await c.call("login", target="https://a.corp.test/"))["window"] == "open"
+
+    run(scenario())
+
+
+def test_a_login_that_was_refused_private_hosts_says_what_only_the_person_can_do(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("login", target="sitex")
+            window = rig.logins.windows[0]
+            window.private_refused = [f"h{n}.corp.test" for n in range(7)]
+            await window.close_window([SeenHost("sitex.test", 1)], Path("/profile"))
+            await asyncio.sleep(0.1)
+            listing = (await c.call("sites"))["sites"]
+            summary = listing[0]["summary"]
+            assert summary.startswith("Saved your sitex login.")
+            assert "private network: h0.corp.test, h1.corp.test" in summary
+            assert "and 2 more" in summary
+            assert "valetkey allow sitex --private-network RANGE" in summary
+
+    run(scenario())
+
+
+def test_a_login_with_no_private_refusals_has_no_note(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("login", target="sitex")
+            window = rig.logins.windows[0]
+            await window.close_window([SeenHost("sitex.test", 1)], Path("/profile"))
+            await asyncio.sleep(0.1)
+            summary = (await c.call("sites"))["sites"][0]["summary"]
+            assert "private network" not in summary
+
+    run(scenario())
+
+
+def test_the_note_stands_alone_when_the_login_could_not_be_saved() -> None:
+    note = daemon._private_note(None, "sitex", ("a.test",))  # noqa: SLF001
+    assert note.startswith("Refused because they are on a private network: a.test. Only")
+    assert daemon._private_note("Saved.", "sitex", ("a.test",)).startswith("Saved. Refused")  # noqa: SLF001

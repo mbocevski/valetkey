@@ -54,6 +54,7 @@ host, the agent can ask with `browser_allow`, or you can run `valetkey allow SIT
 An intranet site fails with "resolves to a private address". The name is allowed, but the address
 is private. See [Private networks](security.md) and run
 `valetkey allow SITE --private-network RANGE` with the narrowest range that holds the address.
+Before the first login, run `valetkey add SITE START --private-network RANGE` instead.
 
 ## The daemon does not start
 

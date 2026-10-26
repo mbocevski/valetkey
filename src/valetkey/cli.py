@@ -244,6 +244,77 @@ PrivateNetwork = Annotated[
 ]
 
 
+PrivateNetworks = Annotated[
+    list[str] | None,
+    Parameter(
+        name="--private-network",
+        negative_iterable="",
+        help="A private address range the site may reach, such as 10.20.0.0/24. Repeat it.",
+    ),
+]
+
+
+Force = Annotated[bool, Parameter(negative="", help="Replace the policy of an existing site.")]
+
+
+@app.command
+def add(site: str, start: str, *, network: PrivateNetworks = None, force: Force = False) -> int:
+    """Create a site before its first login, for one on a private network.
+
+    A site is normally created by logging in. A site whose host resolves to a private address
+    cannot be logged in to that way, because the login proxy refuses private addresses unless
+    the person lists their range. This writes the site's policy with its start URL, its start
+    host and the ranges, and nothing else; then log in to it. Only you can do this: a client
+    cannot create a site or list a range. It refuses a site that already exists, unless
+    ``--force``, which replaces the policy and keeps the login profile.
+
+    Parameters
+    ----------
+    site
+        The new site's name: lowercase letters, digits and hyphens.
+    start
+        The URL the login starts at.
+    network
+        A private address range such as ``10.20.0.0/24``. Repeat it for more.
+    force
+        Replace the policy of an existing site.
+
+    """
+    roots = sites.roots_from_env()
+    try:
+        policy = _new_site(roots, site, start, network or [], force=force)
+    except CommandError as error:
+        return _fail(error)
+    applied = save_and_reload(roots, site, policy)
+    _say(f"{site}: added, starting at {policy.start}.")
+    for entry in policy.private_networks:
+        _say(f"{site}: hosts it allows may resolve inside {entry}.")
+    _say(f"{site}: now ask your client to log in to {site}.")
+    _say_applied(site, applied=applied)
+    return 0
+
+
+def _new_site(
+    roots: sites.Roots, site: str, start_url: str, networks: list[str], *, force: bool
+) -> sites.Policy:
+    """Build the policy ``valetkey add`` writes, or raise ``CommandError``."""
+    try:
+        sites.validate_site_name(site)
+        start = login.normalize_start_url(start_url)
+        listed = tuple(dict.fromkeys(sites.private_network(entry) for entry in networks))
+        policy = sites.Policy(site, start, (sites.host_of(start),), private_networks=listed)
+    except ValueError as error:
+        raise CommandError(str(error)) from error
+    taken = sites.policy_path(roots, site).exists() or sites.profile_path(roots, site).exists()
+    if taken and not force:
+        msg = (
+            f"{site} already exists. To change it, use `valetkey allow` and `valetkey deny`; "
+            "`--force` replaces its policy."
+        )
+        raise CommandError(msg)
+    return policy
+
+
 def _private_network_change(site: str, network: str, *, add: bool) -> int:
     """List (or remove) a private address range for ``site`` and say what happened."""
     roots = sites.roots_from_env()

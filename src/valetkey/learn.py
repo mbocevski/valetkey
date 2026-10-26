@@ -195,7 +195,8 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
     becomes ``now`` in UTC, rounded down to whole seconds (``now`` must carry a time zone). The
     site name is ``existing``'s, else ``site``, else one derived from ``start_url``. ``pages`` are
     the login pages this login recorded (see :func:`login_pages`); they replace the old ones, and
-    if none were recorded the old ones are kept.
+    if none were recorded the old ones are kept. The person's ``private_networks`` are kept as
+    they are; a login never adds to them.
     """
     old_allow = existing.allow if existing else ()
     old_excluded = existing.excluded if existing else ()
@@ -215,6 +216,7 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
         excluded=excluded,
         learned=now.astimezone(UTC).replace(microsecond=0),
         login_pages=tuple(sorted(set(pages))) or (existing.login_pages if existing else ()),
+        private_networks=existing.private_networks if existing else (),
     )
 
 
