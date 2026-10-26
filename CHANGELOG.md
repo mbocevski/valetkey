@@ -61,6 +61,7 @@ Changes that affect users of valetkey. The format follows
 - `browser_login` no longer closes a running session when there is no screen to open the login on, and when a login window fails after the session was closed, the error says so.
 - The check for a lost login no longer reports a login that is still there: it follows a cookie's last update, keeps the longest-lived cookies, and a new login replaces the old record.
 - When downloads start but no file is saved, the result now lists each one's name and address, says if the page started them without a click, and explains names that repeat.
+- Starting a browser on a heavily loaded machine no longer fails with "Failed to read: Resource temporarily unavailable". agent-browser stops waiting for a slow launch after 30 seconds, so valetkey launches once more.
 - `browser_navigate` lists as refused only the hosts its own page asked for, not the beacons the previous page fired as it unloaded.
 - `browser_navigate` and `browser_open` now begin with "The page did not load: HOST is not allowed for SITE" when the proxy refused the target's host, instead of the browser's tunnel error.
 - `browser_login` closes the site's running session before it opens the login window, and says so, instead of failing with `session_running` and asking the agent to close it first.

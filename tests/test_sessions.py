@@ -1507,6 +1507,37 @@ def test_start_reports_a_first_page_that_failed(
     assert not (tmp_path / "rt" / "agent-browser" / "namespaces" / "demo").exists()
 
 
+SLOW = json.dumps(
+    {"code": "outcome_unknown", "error": "Failed to read: Resource temporarily unavailable"}
+)
+
+
+def test_a_launch_agent_browser_stopped_waiting_for_is_tried_once_more(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = json.dumps({"success": True, "data": {"url": "http://site.test/", "title": "Hi"}})
+    seen = tmp_path / "seen"
+    FakeStart(
+        monkeypatch,
+        f"if [ -e '{seen}' ]; then echo '{page}' > \"$READY\"; else touch '{seen}'; "
+        f"echo '{SLOW}' > \"$READY\"; fi; sleep 60",
+    )
+    with start(tmp_path, timeout=10) as session:
+        assert session.first_page == sessions.Page("http://site.test/", "Hi")
+    assert seen.exists()
+
+
+def test_a_launch_that_is_never_answered_fails_after_the_second_try(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    starts = tmp_path / "starts"
+    FakeStart(monkeypatch, f"echo x >> '{starts}'; echo '{SLOW}' > \"$READY\"; sleep 60")
+    with pytest.raises(sessions.LaunchTimeoutError, match="Failed to read"):
+        start(tmp_path, timeout=10)
+    assert len(starts.read_text().split()) == sessions.LAUNCH_ATTEMPTS
+    assert not (tmp_path / "rt" / "agent-browser" / "namespaces" / "demo").exists()
+
+
 def test_start_reports_a_holder_that_exits_early_with_the_log(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -276,6 +276,10 @@ def world() -> Iterator[World]:
                 PageServer(pages, redirects) as upstream,
                 _proxy(paths.proxy_socket, upstream) as running,
             ):
+                # Under heavy load the browser, which starts under strace here, can take over 30
+                # seconds to come up. agent-browser's command then gives up waiting with "Failed
+                # to read: Resource temporarily unavailable" (EAGAIN on its socket), and every
+                # test of this module errored. Session.start launches again once when that happens.
                 session = sessions.Session.start(
                     roots,
                     "demo",

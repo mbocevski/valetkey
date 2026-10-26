@@ -70,6 +70,8 @@ STOP_GRACE = 5.0
 """Seconds the holder gets after SIGTERM before SIGKILL."""
 DEFAULT_TIMEOUT = 60.0
 """Seconds to wait for the first page, and for each later call."""
+LAUNCH_ATTEMPTS = 2
+"""How often :meth:`Session.start` launches the browser when agent-browser stops waiting for it."""
 
 SAVE_LIMIT = 100 * 1024 * 1024
 """The most bytes :meth:`Session.save` takes from one address: 100 MiB."""
@@ -136,6 +138,14 @@ class SessionError(RuntimeError):
 
 class AgentBrowserError(RuntimeError):
     """agent-browser reported a failure. The message is its own."""
+
+
+class LaunchTimeoutError(AgentBrowserError):
+    """agent-browser stopped waiting for an answer from its daemon (``outcome_unknown``).
+
+    Its command waits 30 seconds, a limit that cannot be set. A browser that is slow to start
+    (a loaded machine) outlasts it, and the daemon is left unable to answer.
+    """
 
 
 class VersionError(SessionError):
@@ -461,7 +471,10 @@ def parse_response(text: str) -> dict[str, Any]:
         message = f"unexpected answer from agent-browser: {text[:200]!r}"
         raise AgentBrowserError(message)
     if answer.get("success") is not True:
-        raise AgentBrowserError(str(answer.get("error") or "agent-browser failed"))
+        message = str(answer.get("error") or "agent-browser failed")
+        if answer.get("code") == "outcome_unknown":
+            raise LaunchTimeoutError(message)
+        raise AgentBrowserError(message)
     data = answer.get("data")
     return data if isinstance(data, dict) else {}
 
@@ -709,28 +722,36 @@ class Session:
         binary_path = _resolve_binary(binary)
         runtime = sites.runtime_path(roots).parent
         chrome_major = sandbox.installed_chrome_major(executable)
-        _prepare(roots, paths)
-        open_command = launch_command(binary_path, paths, start_url, executable, chrome_major)
-        script = holder_script(paths, binary_path, open_command, runtime)
-        session = cls(paths, runtime, binary_path, timeout, Page(start_url, ""))
-        box = sandbox.Sandbox(
-            profile_dir=paths.profile_dir,
-            writable_dirs=(paths.incoming_dir, paths.screenshots_dir),
-            proxy_socket=paths.proxy_socket,
-            log_file=paths.log_file,
-            runtime_dir=runtime,
-            shared_dir=paths.driver_dir,
-            policy_dir=sandbox.write_chrome_policy(paths.directory / "chrome-policy"),
-            allow_ptrace=allow_ptrace,
-        )
-        try:
-            session._launch(box, ["/usr/bin/bash", "-c", script])
-            session.first_page = parse_page(session._await_first_page())
-            session._watch_browser = watch_browser
-        except BaseException:
-            session.close()
-            raise
-        return session
+        for attempt in range(LAUNCH_ATTEMPTS):
+            _prepare(roots, paths)
+            open_command = launch_command(binary_path, paths, start_url, executable, chrome_major)
+            script = holder_script(paths, binary_path, open_command, runtime)
+            session = cls(paths, runtime, binary_path, timeout, Page(start_url, ""))
+            box = sandbox.Sandbox(
+                profile_dir=paths.profile_dir,
+                writable_dirs=(paths.incoming_dir, paths.screenshots_dir),
+                proxy_socket=paths.proxy_socket,
+                log_file=paths.log_file,
+                runtime_dir=runtime,
+                shared_dir=paths.driver_dir,
+                policy_dir=sandbox.write_chrome_policy(paths.directory / "chrome-policy"),
+                allow_ptrace=allow_ptrace,
+            )
+            try:
+                session._launch(box, ["/usr/bin/bash", "-c", script])
+                session.first_page = parse_page(session._await_first_page())
+                session._watch_browser = watch_browser
+            except LaunchTimeoutError:
+                # The daemon cannot answer again, so a second launch starts from nothing.
+                session.close()
+                if attempt == LAUNCH_ATTEMPTS - 1:
+                    raise
+                continue
+            except BaseException:
+                session.close()
+                raise
+            return session
+        raise AssertionError  # pragma: no cover  # the loop returns or raises
 
     # -- lifecycle --
 
