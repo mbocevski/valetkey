@@ -805,13 +805,114 @@ def test_a_login_on_a_private_display_gives_the_link_and_the_ssh_line(short_dir:
             result = await mcp.call_tool("browser_login", {"site_or_url": "sitex"})
             assert not result.is_error
             text = text_of(result)
-            assert "http://127.0.0.1:4242/token/vnc.html?autoconnect=true" in text
-            assert "first run: ssh -L 4242:localhost:4242 box" in text
+            assert "token" not in text
+            assert "127.0.0.1" not in text
+            assert "ssh -L" not in text
+            assert "valetkey status" in text
             assert "ten minutes" in text
-            assert "one viewer at a time" in text
             assert "on the person's screen" not in text
 
     run(scenario())
+
+
+REMOTE = {
+    "url": "http://127.0.0.1:4242/SECRETTOKEN/vnc.html?autoconnect=true",
+    "port": 4242,
+    "ssh": "ssh -L 4242:localhost:4242 box",
+}
+
+
+def test_a_login_on_a_private_display_shows_the_person_the_link_and_not_the_model(
+    short_dir: Path,
+) -> None:
+    person = Person("accept")
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            fake.handlers["login"] = lambda _a: {
+                "site": "sitex",
+                "window": "open",
+                "remote": REMOTE,
+            }
+            result = await mcp.call_tool("browser_login", {"site_or_url": "sitex"})
+            assert not result.is_error
+            text = text_of(result)
+            assert "SECRETTOKEN" not in text
+            assert "127.0.0.1" not in text
+            assert "shown to the person in their client, not to you" in text
+            assert person.urls == [REMOTE["url"]]
+            assert "first run: ssh -L 4242:localhost:4242 box" in person.questions[0]
+            assert "sitex" in person.questions[0]
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("action", ["decline", "cancel"])
+def test_the_link_is_shown_even_when_the_person_does_not_follow_it(
+    short_dir: Path, action: Literal["decline", "cancel"]
+) -> None:
+    person = Person(action)
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            fake.handlers["login"] = lambda _a: {
+                "site": "sitex",
+                "window": "open",
+                "remote": REMOTE,
+            }
+            text = text_of(await mcp.call_tool("browser_login", {"site_or_url": "sitex"}))
+            assert "SECRETTOKEN" not in text
+            assert person.urls == [REMOTE["url"]]
+
+    run(scenario())
+
+
+def test_a_client_that_cannot_show_the_link_gets_the_status_command_instead(
+    short_dir: Path,
+) -> None:
+    person = Person()
+    person.fail = True
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            fake.handlers["login"] = lambda _a: {
+                "site": "sitex",
+                "window": "open",
+                "remote": REMOTE,
+            }
+            text = text_of(await mcp.call_tool("browser_login", {"site_or_url": "sitex"}))
+            assert "SECRETTOKEN" not in text
+            assert "valetkey status" in text
+
+    run(scenario())
+
+
+class _Capabilities:
+    def __init__(self, elicitation: Any) -> None:  # noqa: ANN401
+        self.elicitation = elicitation
+
+
+class _Context:
+    def __init__(self, capabilities: Any) -> None:  # noqa: ANN401
+        session = type("Session", (), {"client_capabilities": capabilities})()
+        self.request_context = type("Request", (), {"session": session})()
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "expected"),
+    [
+        (None, False),
+        (_Capabilities(None), False),
+        (_Capabilities(type("E", (), {"form": object(), "url": None})()), False),
+        (_Capabilities(type("E", (), {"form": None, "url": object()})()), True),
+    ],
+)
+def test_only_a_client_that_declares_url_elicitation_gets_the_link(
+    capabilities: object,
+    *,
+    expected: bool,
+) -> None:
+    assert mcp_server.can_elicit_url(_Context(capabilities)) is expected  # ty: ignore[invalid-argument-type]
 
 
 def test_an_expired_login_leads_the_result_with_what_to_do(short_dir: Path) -> None:
@@ -1475,11 +1576,14 @@ class Person:
         self.action = action
         self.content = {"allow": True} if content is None else content
         self.questions: list[str] = []
+        self.urls: list[str] = []
         self.delay = 0.0
         self.fail = False
 
     async def __call__(self, context: Any, params: Any) -> Any:  # noqa: ANN401, ARG002 - SDK types
         self.questions.append(params.message)
+        if getattr(params, "url", None):
+            self.urls.append(params.url)
         if self.fail:
             raise NoScreenError
         await asyncio.sleep(self.delay)

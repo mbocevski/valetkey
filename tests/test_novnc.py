@@ -127,7 +127,9 @@ def fetch(url: str, headers: dict[str, str] | None = None) -> tuple[int, dict[st
             return error.code, dict(error.headers), error.read()
 
 
-def websocket_banner(port: int, token: str, origin: str | None) -> tuple[str, bytes]:
+def websocket_banner(
+    port: int, token: str, origin: str | None, cookie: str | None = None
+) -> tuple[str, bytes]:
     """Open the viewer's WebSocket and return the status line and the first frame's payload."""
     with socket.create_connection(("127.0.0.1", port), timeout=15) as connection:
         key = base64.b64encode(os.urandom(16)).decode()
@@ -142,6 +144,8 @@ def websocket_banner(port: int, token: str, origin: str | None) -> tuple[str, by
         ]
         if origin:
             lines.append(f"Origin: {origin}")
+        if cookie:
+            lines.append(f"Cookie: {cookie}")
         connection.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
         data = b""
         while b"\r\n\r\n" not in data:
@@ -199,6 +203,34 @@ def roots(short_dir: Path) -> sites.Roots:
     return roots
 
 
+async def check_the_link(port: int, token: str, url: str) -> None:
+    """Load the viewer once with the link, then try what a copied link and a stranger can do."""
+    status, headers, body = await asyncio.to_thread(fetch, url)
+    assert status == 200
+    assert b"noVNC" in body
+    assert headers["Cache-Control"] == "no-store"
+    assert headers["X-Frame-Options"] == "DENY"
+    assert headers["Content-Security-Policy"] == "frame-ancestors 'none'"
+    cookie = headers["Set-Cookie"]
+    assert "HttpOnly" in cookie
+    assert "SameSite=Strict" in cookie
+    pair = cookie.split(";")[0]
+    # The link is spent: the same address without the cookie is refused.
+    assert (await asyncio.to_thread(fetch, url))[0] == 404
+    assert (await asyncio.to_thread(fetch, url, {"Cookie": pair}))[0] == 200
+    other = f"http://127.0.0.1:{port}/not-the-token/vnc.html"
+    assert (await asyncio.to_thread(fetch, other))[0] == 404
+    no_cookie = await asyncio.to_thread(websocket_banner, port, token, f"http://127.0.0.1:{port}")
+    assert no_cookie[0].split()[1] == "404"
+    refused = await asyncio.to_thread(websocket_banner, port, token, "https://evil.example", pair)
+    assert refused[0].split()[1] == "403"
+    status_line, banner = await asyncio.to_thread(
+        websocket_banner, port, token, f"http://127.0.0.1:{port}", pair
+    )
+    assert " 101 " in status_line
+    assert banner.startswith(b"RFB 003.")
+
+
 def test_a_login_with_no_screen_is_shown_in_a_web_browser_and_ends_with_the_window(
     roots: sites.Roots, short_dir: Path
 ) -> None:
@@ -213,26 +245,14 @@ def test_a_login_with_no_screen_is_shown_in_a_web_browser_and_ends_with_the_wind
             assert url.startswith(f"http://127.0.0.1:{port}/{token}/vnc.html?")
             assert remote["ssh"].startswith(f"ssh -L {port}:localhost:{port} ")
             try:
-                status, headers, body = await asyncio.to_thread(fetch, url)
-                assert status == 200
-                assert b"noVNC" in body
-                assert headers["Cache-Control"] == "no-store"
-                assert headers["X-Frame-Options"] == "DENY"
-                assert headers["Content-Security-Policy"] == "frame-ancestors 'none'"
-                other = f"http://127.0.0.1:{port}/not-the-token/vnc.html"
-                assert (await asyncio.to_thread(fetch, other))[0] == 404
-                refused = await asyncio.to_thread(
-                    websocket_banner, port, token, "https://evil.example"
-                )
-                assert refused[0].split()[1] == "403"
-                status_line, banner = await asyncio.to_thread(
-                    websocket_banner, port, token, f"http://127.0.0.1:{port}"
-                )
-                assert " 101 " in status_line
-                assert banner.startswith(b"RFB 003.")
+                await check_the_link(port, token, url)
                 await eventually(lambda: chromium_windows(directory))
                 swaymsg(directory, "[app_id=chromium]", "kill")  # the person closes the window
                 async with await client.Client.connect(short_dir / "d.sock") as c:
+                    hidden = (await c.call("status"))["logins"]
+                    assert "remote" not in hidden[0]
+                    shown = (await c.call("status", links=True))["logins"]
+                    assert shown[0]["remote"]["url"] == url
 
                     async def idle() -> bool:
                         return not (await c.call("status"))["logins"]

@@ -7,9 +7,14 @@ listens on ``127.0.0.1`` alone, so a remote person reaches it with ``ssh -L`` an
 is exposed. It serves a pinned copy of noVNC, the viewer, and passes the viewer's WebSocket to
 the VNC server's socket.
 
-The link is the credential: a 192-bit random token is the first part of every path. Rules:
+The link is the credential: a 192-bit random token is the first part of every path. It works
+once. The first load of the viewer page uses it up and sets a cookie holding a second random value
+(``HttpOnly``, ``SameSite=Strict``, limited to the token's path). Every other request, the
+WebSocket included, must present that cookie. A link that someone copies out of a log after the
+person has opened it is worth nothing. Rules:
 
 * A path without the token, or with a wrong one, is ``404``, whatever else is wrong with it.
+* So is a request for anything but the page, or for the page a second time, without the cookie.
 * A request whose ``Host`` is not a loopback name is ``403``: it comes through a name that
   someone else controls, which is how DNS rebinding reaches a local service.
 * A WebSocket whose ``Origin`` is not the page that was served is ``403``. A page on another
@@ -44,6 +49,7 @@ HEAD_TIMEOUT = 10.0
 """Seconds a client has to send its request line and headers."""
 MAX_HEAD = 16 * 1024
 CHUNK = 64 * 1024
+COOKIE = "valetkey_viewer"
 LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 INDEX = "vnc.html"
 VIEWER_PARAMETERS = "autoconnect=true&resize=scale"
@@ -212,6 +218,8 @@ class Gateway:
         self._server: asyncio.Server | None = None
         self._deadline = 0.0
         self._viewer = False
+        self._used = False
+        self._cookie = secrets.token_urlsafe(24)
         self._tasks: set[asyncio.Task[None]] = set()
 
     @property
@@ -282,6 +290,10 @@ class Gateway:
             raise _BadRequestError(404)
         if not host_is_loopback(request.headers.get("host")):
             raise _BadRequestError(403, "the request does not name this machine's loopback address")
+        has_cookie = self._has_cookie(request)
+        is_page = relative in {"", INDEX}
+        if not has_cookie and not (is_page and not self._used):
+            raise _BadRequestError(404)
         if relative == "websockify":
             await self._websocket(request, reader, writer)
             return
@@ -291,10 +303,23 @@ class Gateway:
         if path is None:
             raise _BadRequestError(404)
         body = await asyncio.to_thread(path.read_bytes)
-        kind = CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
-        await _respond(
-            writer, 200, body, {"Content-Type": kind}, head_only=request.method == "HEAD"
-        )
+        headers = {
+            "Content-Type": CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+        }
+        if is_page and not has_cookie and request.method == "GET":
+            self._used = True  # the link is spent by the first page that is sent
+            headers["Set-Cookie"] = (
+                f"{COOKIE}={self._cookie}; Path=/{self.token}/; HttpOnly; SameSite=Strict"
+            )
+        await _respond(writer, 200, body, headers, head_only=request.method == "HEAD")
+
+    def _has_cookie(self, request: Request) -> bool:
+        """Tell whether the request carries the cookie that the first page load set."""
+        for part in request.headers.get("cookie", "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE and hmac.compare_digest(value.encode(), self._cookie.encode()):
+                return True
+        return False
 
     def _relative_path(self, request: Request) -> str | None:
         """Return the part of the path after the token, or ``None`` for a 404.

@@ -98,13 +98,18 @@ program on that display is the login's Chromium, with its address bar visible. A
 on `127.0.0.1` serves the [noVNC](https://github.com/novnc/noVNC) viewer and passes the VNC traffic
 on.
 
-The tool result holds a link and an `ssh -L` line. On your own machine, run the `ssh` line first,
-then open the link. The address is on the daemon's loopback, so the link only works through the
-tunnel.
+The link never goes to the agent, because it gives control of a window where a password is typed.
+If your client can show a link (MCP URL elicitation), it shows you the link and the `ssh -L` line.
+If not, the agent only hears that a login window is waiting, and you run `valetkey status` on
+the server, which prints both. On your own machine, run the `ssh` line first, then open the link.
+The address is on the daemon's loopback, so the link only works through the tunnel.
 
 ## What limits the link
 
 - The link holds a random 192-bit token. A request with any other token gets a 404.
+- The link works once. The first load of the page uses it up and sets a cookie that no script can
+  read (`HttpOnly`, `SameSite=Strict`). Everything else, the WebSocket included, needs that cookie,
+  so a link copied from a log later opens nothing.
 - Only one viewer at a time. A second one is refused while the first is connected.
 - It stops accepting new connections ten minutes after the login starts.
 - A page on another site cannot use it: a request whose `Origin` is not the viewer page gets a 403.

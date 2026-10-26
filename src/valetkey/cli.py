@@ -1116,10 +1116,10 @@ def doctor(
 # -- what is running ---------------------------------------------------------------------
 
 
-async def _daemon_status() -> dict[str, Any]:
+async def _daemon_status(*, links: bool) -> dict[str, Any]:
     """Ask the running daemon what is open. It is never started for this."""
     async with await client.Client.connect() as connection:
-        return await connection.call("status")
+        return await connection.call("status", links=links)
 
 
 def _activity_rows(activity: dict[str, Any]) -> list[list[str]]:
@@ -1141,6 +1141,14 @@ def show_status(
     as_json: Annotated[
         bool, Parameter(name="--json", negative="", help="Print JSON instead of a table.")
     ] = False,
+    show_links: Annotated[
+        bool,
+        Parameter(
+            name="--show-links",
+            negative="",
+            help="With --json, also print the link of a login shown in a web browser.",
+        ),
+    ] = False,
 ) -> int:
     """Show the browser sessions, login windows and bridges that are open.
 
@@ -1154,9 +1162,14 @@ def show_status(
     take login windows. since is a UTC time like 2026-10-26T09:00:00Z. contained is always true.
     host is the host of the page the browser was last reported at, never the whole address,
     which may carry a token.
+
+    A login shown in a web browser has a link that works like a password: whoever opens it can
+    type into the login window. The table prints it under the table, with the ssh command that
+    makes it reachable. --json leaves it out unless --show-links is given, so a script that
+    logs its input does not keep it.
     """
     try:
-        activity = asyncio.run(_daemon_status())
+        activity = asyncio.run(_daemon_status(links=show_links or not as_json))
     except client.DaemonError as error:
         if error.code == "not_running":
             _say("valetkeyd is not running")
@@ -1172,6 +1185,11 @@ def show_status(
         _say("No browser sessions or login windows are open.")
         return 0
     _print_table(["KIND", "SITE", "SINCE", "HOST"], rows)
+    for entry in activity.get("logins", []):
+        if remote := entry.get("remote"):
+            _say(f"\nThe {entry['site']} login is shown in a web browser.")
+            _say(f"On the machine you will use, run: {remote['ssh']}")
+            _say(f"Then open: {remote['url']}")
     return 0
 
 

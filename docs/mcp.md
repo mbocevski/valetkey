@@ -23,7 +23,8 @@ Start with `browser_sites`. The others act on one site by its name.
   the last login learned.
 - `browser_login` opens a login window on your screen and returns at once. With no screen it
   uses a connected bridge if `remote_logins.waypipe` is on, so the window opens on your laptop.
-  Otherwise, with `remote_logins.novnc` on, it returns a link and an `ssh -L` line (see
+  Otherwise, with `remote_logins.novnc` on, the window is shown in a web browser. The link goes to
+  you, never to the agent: your client shows it, or you run `valetkey status` (see
   [remote logins](remote.md)).
 - `browser_open` starts the signed-in browser for a site, or joins the running one. It says when
   the saved login has expired.

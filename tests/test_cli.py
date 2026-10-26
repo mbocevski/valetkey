@@ -1237,6 +1237,7 @@ class FakeConnection:
         self.events = events
         self.end = end
         self.asked: list[str] = []
+        self.arguments: list[dict[str, Any]] = []
 
     async def __aenter__(self) -> Self:
         return self
@@ -1244,8 +1245,9 @@ class FakeConnection:
     async def __aexit__(self, *_exc: object) -> None:
         return None
 
-    async def call(self, op: str) -> dict[str, Any]:
+    async def call(self, op: str, **args: Any) -> dict[str, Any]:  # noqa: ANN401 - JSON values
         self.asked.append(op)
+        self.arguments.append(args)
         if isinstance(self.end, cli.client.DaemonError):
             raise self.end
         return self.status or {}
@@ -1283,6 +1285,7 @@ def test_status_prints_a_table(
         "login    another  2026-10-26T09:05:00Z  -",
     ]
     assert connection.asked == ["status"]
+    assert connection.arguments == [{"links": True}]
 
 
 def test_status_json_is_the_daemons_answer(
@@ -1292,6 +1295,49 @@ def test_status_json_is_the_daemons_answer(
     status, out, _ = run(capsys, "status", "--json")
     assert status == 0
     assert json.loads(out) == ACTIVITY
+
+
+REMOTE_LOGIN = {
+    "site": "sitex",
+    "since": "2026-10-26T09:05:00Z",
+    "remote": {
+        "url": "http://127.0.0.1:4242/TOKEN/vnc.html",
+        "port": 4242,
+        "ssh": "ssh -L 4242:localhost:4242 box",
+    },
+}
+
+
+def test_status_shows_the_link_of_a_login_in_a_browser_and_how_to_reach_it(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = FakeConnection(status={"sessions": [], "logins": [REMOTE_LOGIN]})
+    connect_to(monkeypatch, connection)
+    status, out, _ = run(capsys, "status")
+    assert status == 0
+    lines = out.splitlines()
+    assert lines[1].split() == ["login", "sitex", "2026-10-26T09:05:00Z", "-"]
+    assert lines[-3:] == [
+        "The sitex login is shown in a web browser.",
+        "On the machine you will use, run: ssh -L 4242:localhost:4242 box",
+        "Then open: http://127.0.0.1:4242/TOKEN/vnc.html",
+    ]
+    assert connection.arguments == [{"links": True}]
+
+
+def test_status_json_asks_for_no_link_unless_told_to(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = FakeConnection(status=ACTIVITY)
+    connect_to(monkeypatch, plain)
+    run(capsys, "status", "--json")
+    assert plain.arguments == [{"links": False}]
+    asked = FakeConnection(status={"sessions": [], "logins": [REMOTE_LOGIN]})
+    connect_to(monkeypatch, asked)
+    status, out, _ = run(capsys, "status", "--json", "--show-links")
+    assert status == 0
+    assert asked.arguments == [{"links": True}]
+    assert json.loads(out)["logins"][0]["remote"]["url"].endswith("/TOKEN/vnc.html")
 
 
 def test_status_when_nothing_is_open(

@@ -3728,6 +3728,14 @@ def test_a_login_with_no_screen_opens_on_a_private_display_when_the_config_allow
             assert logins.options[-1]["wayland_socket"] == shown.wayland_socket
             assert (await next_event(stream))["event"] == "login_opened"
             assert shown.closed == 0
+            # The link is a credential: status leaves it out unless it is asked for, and watch
+            # never carries it.
+            (plain,) = (await c.call("status"))["logins"]
+            assert plain == {"site": "sitex", "since": plain["since"]}
+            (linked,) = (await c.call("status", links=True))["logins"]
+            assert linked["remote"] == answer["remote"]
+            with pytest.raises(client.DaemonError, match="links"):
+                await c.call("status", links="yes")
             await window.close_window([], Path("/profile"))  # the person closes the browser window
             assert (await next_event(stream))["event"] == "login_closed"
             assert shown.closed == 1

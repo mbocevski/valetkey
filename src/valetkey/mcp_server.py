@@ -30,6 +30,7 @@ import contextlib
 import json
 import logging
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -547,7 +548,9 @@ DESCRIPTIONS = {
     "browser_login": (
         "Open a login window on the person's own screen so they can sign in to a site. Returns "
         "at once. The person signs in and closes the window; then the site is ready for "
-        "browser_open. When a page shows a login screen, call this again without asking first."
+        "browser_open. When a page shows a login screen, call this again without asking first. "
+        "With no screen to use, the window may be shown in a web browser instead; the link is "
+        "for the person only and is never given to you."
     ),
     "browser_open": (
         "Start the signed-in browser for a site, or join the one already running, and load its "
@@ -637,6 +640,36 @@ def can_elicit(ctx: Context) -> bool:
     return elicitation is not None and (elicitation.form is not None or elicitation.url is None)
 
 
+def can_elicit_url(ctx: Context) -> bool:
+    """Tell whether the client declared that it can show the person a link to open."""
+    capabilities = ctx.request_context.session.client_capabilities
+    elicitation = capabilities.elicitation if capabilities is not None else None
+    return elicitation is not None and elicitation.url is not None
+
+
+async def show_link(ctx: Context, site: str, remote: dict[str, Any]) -> bool:
+    """Show the person the link of a login in a browser, through the client; ``True`` if it did.
+
+    The link is a credential that gives control of a window where a password is typed, so it
+    goes to the person through URL-mode elicitation, which does not pass through the model, and
+    never into a tool result. ``False`` means the client cannot show it, or failed to.
+    """
+    if not can_elicit_url(ctx):
+        return False
+    message = (
+        f"Sign in to {site}. This machine has no screen, so the login window is shown in a web "
+        f"browser. On the machine you are at, first run: {remote['ssh']}\n"
+        "The link works once, for ten minutes."
+    )
+    try:
+        async with asyncio.timeout(ELICIT_SECONDS):
+            await ctx.elicit_url(message, remote["url"], secrets.token_urlsafe(16))
+    except Exception:
+        logger.warning("the client could not show the login link", exc_info=True)
+        return False
+    return True
+
+
 async def _elicit(ctx: Context, message: str) -> Literal["yes", "denied", "expired"] | None:
     """Put ``message`` to the person through the client, or return ``None`` if that can't be done.
 
@@ -680,16 +713,26 @@ class _Tools:
         site_or_url: Annotated[
             str, Field(description="A site name from browser_sites, or a host or URL.")
         ],
+        ctx: Context,
     ) -> str:
         result = await self._ask("login", target=site_or_url)
         if remote := result.get("remote"):
+            if await show_link(ctx, result["site"], remote):
+                how = (
+                    "The link was shown to the person in their client, not to you. Ask them to "
+                    "open it"
+                )
+            else:
+                how = (
+                    "The person can open it with `valetkey status` on this machine, which shows "
+                    "the link and the command that reaches it. Ask them to run that"
+                )
             return (
                 f"No screen is available here, so the {result['site']} login window is on a "
-                f"private display that the person opens in a web browser. Give them this link: "
-                f"{remote['url']}\nOn another machine they must first run: {remote['ssh']}\n"
-                "The link works for ten minutes and for one viewer at a time. Ask them to sign in "
-                "and close the browser window when they are done. Then call browser_sites to see "
-                "what was learned, and browser_open to start."
+                f"private display that the person opens in a web browser. {how}, sign in and "
+                "close the browser window when they are done. The link works once, for ten "
+                "minutes. Then call browser_sites to see what was learned, and browser_open to "
+                "start."
             )
         where = "laptop" if result.get("route") == "bridge" else "screen"
         return (

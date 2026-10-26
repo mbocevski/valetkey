@@ -31,7 +31,9 @@ profile.
   "contained", "host"}], "logins": [{"site", "since"}], "bridges": [{"bridge", "since"}]}``, the
   first two sorted by site. ``since`` is a UTC time, ``host`` is the host of the page the
   browser was last reported at (never the whole URL, which may carry a token). It is read from
-  the processes the daemon owns.
+  the processes the daemon owns. With ``links: true`` a login shown in a web browser also has
+  ``remote`` (``url``, ``port``, ``ssh``): the link is a credential, so ``watch`` never carries
+  it and nothing that reaches a model asks for it.
 * ``watch``: the connection stays open. The first answer is ``{"event": "snapshot", "at",
   "sessions", "logins"}`` as for ``status``; then one answer per change, each
   ``{"event": "session_started" | "session_ended" | "login_opened" | "login_closed",
@@ -868,8 +870,12 @@ class Daemon:
                 watcher.queue.get_nowait()
                 watcher.queue.put_nowait(None)  # ends that client's stream
 
-    def _activity(self, event: str | None = None) -> dict[str, Any]:
-        """Describe what runs now, from the registry the daemon's own processes keep."""
+    def _activity(self, event: str | None = None, *, links: bool = False) -> dict[str, Any]:
+        """Describe what runs now, from the registry the daemon's own processes keep.
+
+        ``links`` adds the link of a login shown in a web browser. It is a credential, so only
+        ``status`` with ``links: true`` ever asks for it.
+        """
         sessions_now = []
         logins_now = []
         for name in sorted(self._sites):
@@ -880,7 +886,10 @@ class Daemon:
                     {"site": name, "since": since, "contained": True, "host": state.host}
                 )
             elif state.kind == "login":
-                logins_now.append({"site": name, "since": since})
+                entry: dict[str, Any] = {"site": name, "since": since}
+                if links and state.shown is not None:
+                    entry["remote"] = display.describe(state.shown)
+                logins_now.append(entry)
         bridges_now = [
             {"bridge": bridge.name, "since": bridge.since.strftime(_TIME_FORMAT)}
             for bridge in self._bridges.values()
@@ -1444,7 +1453,10 @@ class Daemon:
 
     async def _op_status(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         if "site" not in args:
-            return self._activity()
+            links = args.get("links", False)
+            if not isinstance(links, bool):
+                _fail("bad_request", '"links" must be true or false')
+            return self._activity(links=links)
         site = _site_arg(args)
         state = self._state(site)
         if state.kind != "session":

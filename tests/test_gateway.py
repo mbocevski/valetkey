@@ -183,6 +183,14 @@ class Rig:
         self.display = display
         self.clock = clock
         self.writers: list[asyncio.StreamWriter] = []
+        self.cookie: str | None = None
+        """The ``name=value`` the first page load set; sent with every request after sign_in."""
+
+    async def sign_in(self) -> None:
+        """Load the viewer page with the link, as the person's browser does, and keep the cookie."""
+        status, headers, _ = await self.request(f"/{TOKEN}/vnc.html")
+        assert status == 200
+        self.cookie = headers["set-cookie"].split(";")[0]
 
     async def close_connections(self) -> None:
         for writer in self.writers:
@@ -200,7 +208,7 @@ class Rig:
         return f"127.0.0.1:{self.gateway.port}"
 
     async def request(
-        self, path: str, *, method: str = "GET", headers: dict[str, str] | None = None
+        self, path: str, *, method: str = "GET", headers: dict[str, str | None] | None = None
     ) -> tuple[int, dict[str, str], bytes]:
         reader, writer = await self.open()
         lines = [f"{method} {path} HTTP/1.1", *self._headers(headers)]
@@ -211,8 +219,11 @@ class Rig:
         found = {k.lower(): v for k, _, v in (line.partition(": ") for line in header_lines)}
         return int(status_line.split()[1]), found, body
 
-    def _headers(self, headers: dict[str, str] | None) -> list[str]:
-        merged = {"Host": self.host} | (headers or {})
+    def _headers(self, headers: dict[str, str | None] | None) -> list[str]:
+        merged: dict[str, str | None] = {"Host": self.host}
+        if self.cookie is not None:
+            merged["Cookie"] = self.cookie
+        merged |= headers or {}
         return [f"{k}: {v}" for k, v in merged.items() if v is not None]
 
     async def connect(
@@ -242,6 +253,8 @@ class Rig:
 async def serving(
     root: Path,
     short_dir: Path,
+    *,
+    signed_in: bool = True,
     **options: Any,  # noqa: ANN401
 ) -> AsyncGenerator[Rig]:
     display = Display(short_dir / "vnc.sock")
@@ -251,6 +264,8 @@ async def serving(
     await server.start()
     rig = Rig(server, display, clock)
     try:
+        if signed_in:
+            await rig.sign_in()
         yield rig
     finally:
         await rig.close_connections()
@@ -671,5 +686,102 @@ def test_closing_the_gateway_ends_a_viewer_and_stops_listening(root: Path, short
             with pytest.raises(OSError):  # noqa: PT011 - nothing listens any more
                 await asyncio.open_connection("127.0.0.1", rig.gateway.port)
             await rig.gateway.close()  # safe to repeat
+
+    run(scenario())
+
+
+# -- the link works once, then the cookie is the credential -----------------------------------
+
+
+def test_the_first_page_load_spends_the_link_and_sets_a_cookie(root: Path, short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with serving(root, short_dir, signed_in=False) as rig:
+            status, headers, body = await rig.request(f"/{TOKEN}/vnc.html")
+            assert (status, body) == (200, b"<html>viewer</html>")
+            name, _, rest = headers["set-cookie"].partition("=")
+            value, *attributes = rest.split("; ")
+            assert name == gateway.COOKIE
+            assert len(base64.urlsafe_b64decode(value + "==")) == 24
+            assert value != TOKEN
+            assert sorted(attributes) == sorted(
+                ["Path=/" + TOKEN + "/", "HttpOnly", "SameSite=Strict"]
+            )
+            # The same link again, without the cookie, is refused as if it never worked.
+            for path in (f"/{TOKEN}/vnc.html", f"/{TOKEN}/", f"/{TOKEN}"):
+                assert (await rig.request(path))[0] == 404, path
+            # With the cookie the page can be loaded again, and sets nothing new.
+            status, headers, _ = await rig.request(
+                f"/{TOKEN}/vnc.html", headers={"Cookie": f"{name}={value}"}
+            )
+            assert status == 200
+            assert "set-cookie" not in headers
+
+    run(scenario())
+
+
+def test_nothing_but_the_page_answers_without_the_cookie(root: Path, short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with serving(root, short_dir, signed_in=False) as rig:
+            for path in (f"/{TOKEN}/app/ui.js", f"/{TOKEN}/app/data.bin", f"/{TOKEN}/websockify"):
+                assert (await rig.request(path))[0] == 404, path
+            status, *_ = await rig.connect()
+            assert status == 404
+            assert rig.display.connections == 0
+            # None of that spent the link.
+            assert (await rig.request(f"/{TOKEN}/vnc.html"))[0] == 200
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    "cookie",
+    [
+        f"{gateway.COOKIE}=wrong",
+        f"{gateway.COOKIE}=",
+        "other=value",
+        gateway.COOKIE,
+        "x; y=z",
+        None,
+    ],
+)
+def test_a_missing_or_wrong_cookie_is_refused_on_every_path(
+    root: Path, short_dir: Path, cookie: str | None
+) -> None:
+    async def scenario() -> None:
+        async with serving(root, short_dir) as rig:
+            headers: dict[str, str | None] = {"Cookie": cookie}
+            for path in (f"/{TOKEN}/vnc.html", f"/{TOKEN}/app/ui.js"):
+                assert (await rig.request(path, headers=headers))[0] == 404, path
+            assert (await rig.connect(headers=headers))[0] == 404
+
+    run(scenario())
+
+
+def test_the_cookie_among_other_cookies_is_found(root: Path, short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with serving(root, short_dir) as rig:
+            assert rig.cookie is not None
+            headers: dict[str, str | None] = {"Cookie": f"a=b; {rig.cookie}; c=d"}
+            assert (await rig.request(f"/{TOKEN}/app/ui.js", headers=headers))[0] == 200
+
+    run(scenario())
+
+
+def test_a_head_request_for_the_page_does_not_spend_the_link(root: Path, short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with serving(root, short_dir, signed_in=False) as rig:
+            status, headers, body = await rig.request(f"/{TOKEN}/vnc.html", method="HEAD")
+            assert (status, body) == (200, b"")
+            assert "set-cookie" not in headers
+            assert (await rig.request(f"/{TOKEN}/vnc.html"))[0] == 200
+
+    run(scenario())
+
+
+def test_a_wrong_token_with_the_right_cookie_is_still_a_404(root: Path, short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with serving(root, short_dir) as rig:
+            assert (await rig.request("/x" * 16 + "/vnc.html"))[0] == 404
+            assert (await rig.request(f"/{'x' * 32}/app/ui.js"))[0] == 404
 
     run(scenario())

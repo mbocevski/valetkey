@@ -254,8 +254,15 @@ for each laptop connected to take login windows. since is a UTC time like
 2026-10-26T09:00:00Z. contained is always true. host is the host of the page the
 browser was last reported at, never the whole address, which may carry a token.
 
+A login shown in a web browser has a link that works like a password: whoever
+opens it can type into the login window. The table prints it under the table,
+with the ssh command that makes it reachable. --json leaves it out unless
+--show-links is given, so a script that logs its input does not keep it.
+
 Parameters:
   --json: Print JSON instead of a table. [default: False]
+  --show-links: With --json, also print the link of a login shown in a web
+browser. [default: False]
 ```
 <!-- end: valetkey status --help -->
 
