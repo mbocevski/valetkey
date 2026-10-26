@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn
@@ -1303,7 +1304,21 @@ def test_a_daemon_that_loses_the_start_race_does_not_fail_the_bridge(xdg: Path) 
     run(scenario())
 
 
-def test_two_clients_starting_at_once_end_up_on_one_daemon(xdg: Path) -> None:
+def test_two_clients_starting_at_once_end_up_on_one_daemon(
+    xdg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Neither client may start its daemon before both have found that none is listening, or the
+    # second would find the first's and start nothing, and the race this test is about would
+    # depend on how fast a daemon starts.
+    both_probed = threading.Barrier(2, timeout=30)
+    spawn = Bridge._spawn  # noqa: SLF001
+
+    def spawn_together(self: Bridge) -> None:
+        both_probed.wait()
+        spawn(self)
+
+    monkeypatch.setattr(Bridge, "_spawn", spawn_together)
+
     async def scenario() -> None:
         first, second = Bridge(), Bridge()
         try:
@@ -1311,7 +1326,12 @@ def test_two_clients_starting_at_once_end_up_on_one_daemon(xdg: Path) -> None:
             assert one == two == {"sites": []}
             started = [b.started for b in (first, second) if b.started is not None]
             assert len(started) == 2
-            await asyncio.sleep(0.5)
+            # The daemon that lost the lock leaves once it has started and tried: how long that
+            # takes depends on the load, so wait for it to be gone, not for a time to pass.
+            deadline = time.monotonic() + 30
+            while sum(p.poll() is None for p in started) > 1:
+                assert time.monotonic() < deadline, "both daemons are still running"
+                await asyncio.sleep(0.05)
             alive = [p for p in started if p.poll() is None]
             assert len(alive) == 1
             assert [p.returncode for p in started if p.poll() is not None] == [1]
