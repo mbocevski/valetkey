@@ -277,7 +277,12 @@ def world() -> Iterator[World]:
                 _proxy(paths.proxy_socket, upstream) as running,
             ):
                 session = sessions.Session.start(
-                    roots, "demo", "http://allowed.test/", executable=str(wrapper), timeout=60
+                    roots,
+                    "demo",
+                    "http://allowed.test/",
+                    executable=str(wrapper),
+                    timeout=60,
+                    allow_ptrace=True,  # strace is the one program that needs it
                 )
                 current = World(session, running, upstream, host_server, trace)
                 try:

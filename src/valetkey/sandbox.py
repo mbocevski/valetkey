@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import valetkey
-from valetkey import sites
+from valetkey import seccomp, sites
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -198,6 +198,9 @@ class Sandbox:
     its policy from."""
     die_with_parent: bool = True
     """Kill the sandbox when the process that started it dies. See ``bwrap_argv``."""
+    allow_ptrace: bool = False
+    """Leave ``ptrace`` out of the syscall filter, for the tests that trace the browser with
+    ``strace``. Nothing but a test sets it."""
     wrapper: tuple[str, ...] = ()
     """A command that runs ``bwrap`` as its program, such as ``waypipe server --``. Empty means
     ``bwrap`` is started directly. Whatever it opens (a display socket, say) is outside the
@@ -293,18 +296,31 @@ def system_link_args(root: Path = Path("/")) -> list[str]:
     return args
 
 
-def bwrap_argv(
+def _opening(*, die_with_parent: bool, seccomp_fd: int | None) -> list[str]:
+    """Return the first arguments of a ``bwrap`` line: the namespaces, and what ends them."""
+    argv = ["bwrap", "--unshare-all", "--new-session", "--hostname", "valetkey"]
+    if die_with_parent:
+        argv.append("--die-with-parent")
+    if seccomp_fd is not None:
+        argv += ["--seccomp", str(seccomp_fd)]
+    return argv
+
+
+def bwrap_argv(  # noqa: PLR0913  # keywords tests use to build the same line anywhere
     sandbox: Sandbox,
     command: list[str],
     *,
     roots: tuple[Path, ...] | None = None,
     system_links: list[str] | None = None,
     interpreter_links: list[str] | None = None,
+    seccomp_fd: int | None = None,
 ) -> list[str]:
     """Return the full ``bwrap`` command line that runs ``command`` inside the namespace.
 
     ``roots`` (default ``python_roots()``), ``system_links`` and ``interpreter_links`` (both
     default to what the host has) exist so tests can build the same line on any machine.
+    ``seccomp_fd`` is a descriptor that holds the syscall filter (see :mod:`valetkey.seccomp`);
+    the caller keeps it open and passes it to the child.
 
     The sandbox is a PID namespace: when the first command exits, bubblewrap kills everything
     else inside. So a session starts one long-lived command (a shell that runs the forwarder,
@@ -316,9 +332,7 @@ def bwrap_argv(
     """
     etc_entries = sandbox.etc_entries or default_etc_entries()
     home = SANDBOX_HOME
-    argv = ["bwrap", "--unshare-all", "--new-session", "--hostname", "valetkey"]
-    if sandbox.die_with_parent:
-        argv.append("--die-with-parent")
+    argv = _opening(die_with_parent=sandbox.die_with_parent, seccomp_fd=seccomp_fd)
     argv += ["--ro-bind", "/usr", "/usr"]
     argv += system_links if system_links is not None else system_link_args()
     for name in etc_entries:
@@ -374,6 +388,7 @@ def isolated_call_argv(  # noqa: PLR0913  # each is a distinct thing the caller 
     driver_dir: Path,
     read_only: Sequence[Path] = (),
     system_links: list[str] | None = None,
+    seccomp_fd: int | None = None,
 ) -> list[str]:
     """Return a ``bwrap`` command line that runs one call of the browser driver without a network.
 
@@ -384,12 +399,17 @@ def isolated_call_argv(  # noqa: PLR0913  # each is a distinct thing the caller 
     person's files, and are killed when the call ends: the PID namespace goes with its first
     process, and ``--die-with-parent`` covers valetkey itself.
 
+    ``seccomp_fd`` holds the syscall filter, as for :func:`bwrap_argv`.
+
     ``read_only`` lists files the call reads that are not under ``/usr``: the driver's binary
     when it lives elsewhere, and its configuration file. ``environment`` is what the call gets,
     except for ``PATH`` and ``HOME``, which name the namespace's own.
     """
     result = ["bwrap", "--unshare-all", "--new-session", "--hostname", "valetkey"]
-    result += ["--die-with-parent", "--ro-bind", "/usr", "/usr"]
+    result += ["--die-with-parent"]
+    if seccomp_fd is not None:
+        result += ["--seccomp", str(seccomp_fd)]
+    result += ["--ro-bind", "/usr", "/usr"]
     result += system_links if system_links is not None else system_link_args()
     for name in default_etc_entries():
         result += ["--ro-bind", f"/etc/{name}", f"/etc/{name}"]
@@ -414,13 +434,19 @@ def start(sandbox: Sandbox, command: list[str]) -> subprocess.Popen[bytes]:
     it, and a reader of a pipe would not see end-of-file until the last of them exits.
     """
     sandbox.log_file.parent.mkdir(parents=True, exist_ok=True)
-    with sandbox.log_file.open("ab") as log:
-        return subprocess.Popen(  # noqa: S603  # argument list, no shell
-            [*sandbox.wrapper, *bwrap_argv(sandbox, command)],
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
+    filter_fd = seccomp.open_filter(allow_ptrace=sandbox.allow_ptrace)
+    try:
+        with sandbox.log_file.open("ab") as log:
+            return subprocess.Popen(  # noqa: S603  # argument list, no shell
+                [*sandbox.wrapper, *bwrap_argv(sandbox, command, seccomp_fd=filter_fd)],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                pass_fds=() if filter_fd is None else (filter_fd,),
+            )
+    finally:
+        if filter_fd is not None:
+            os.close(filter_fd)
 
 
 def bridge_command(proxy_socket: Path) -> list[str]:

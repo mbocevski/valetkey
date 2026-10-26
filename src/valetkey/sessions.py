@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import urlsplit
 
-from valetkey import procs, sandbox, sites
+from valetkey import procs, sandbox, seccomp, sites
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -459,8 +459,12 @@ class Session:
         binary: str = "agent-browser",
         timeout: float = DEFAULT_TIMEOUT,
         watch_browser: bool = False,
+        allow_ptrace: bool = False,
     ) -> Self:
         """Start the browser for ``site`` and load ``start_url``.
+
+        ``allow_ptrace`` leaves ``ptrace`` out of the syscall filter, for the tests that trace
+        the browser with ``strace``. Nothing but a test passes it.
 
         With ``watch_browser``, :meth:`is_alive` also looks for the browser's own process once
         the first page has loaded, so a browser that was killed on its own counts as gone.
@@ -494,6 +498,7 @@ class Session:
             runtime_dir=runtime,
             shared_dir=paths.driver_dir,
             policy_dir=sandbox.write_chrome_policy(paths.directory / "chrome-policy"),
+            allow_ptrace=allow_ptrace,
         )
         try:
             session._launch(box, ["/usr/bin/bash", "-c", script])
@@ -622,7 +627,8 @@ class Session:
             raise SessionError(message)
         argv, environment = call_command(self._binary, self.paths, self._runtime, *verb)
         self._require_driver()
-        argv = self._isolated(argv, environment)
+        filter_fd = seccomp.open_filter()
+        argv = self._isolated(argv, environment, filter_fd)
         try:
             result = subprocess.run(  # noqa: S603  # built by call_command, no shell
                 argv,
@@ -632,13 +638,19 @@ class Session:
                 check=False,
                 timeout=timeout or self._timeout,
                 stdin=subprocess.DEVNULL,
+                pass_fds=() if filter_fd is None else (filter_fd,),
             )
         except subprocess.TimeoutExpired as error:
             message = f"agent-browser {verb[0]} timed out"
             raise AgentBrowserError(message) from error
+        finally:
+            if filter_fd is not None:
+                os.close(filter_fd)
         return parse_response(result.stdout or "{}")
 
-    def _isolated(self, argv: list[str], environment: dict[str, str]) -> list[str]:
+    def _isolated(
+        self, argv: list[str], environment: dict[str, str], seccomp_fd: int | None
+    ) -> list[str]:
         """Wrap ``argv`` so that it runs without a network and ends with the call.
 
         :meth:`_require_driver` makes the sandbox's daemon the one this call talks to. If it
@@ -651,6 +663,7 @@ class Session:
             runtime_dir=self._runtime,
             driver_dir=self.paths.driver_dir,
             read_only=[Path(self._binary), self.paths.config_file],
+            seccomp_fd=seccomp_fd,
         )
 
     def _require_driver(self) -> None:
@@ -659,7 +672,8 @@ class Session:
         The sandbox can write the daemon's directory and kill the daemon. Without a daemon,
         the call below would start one on the host, and a browser with it, outside the sandbox
         and the proxy. So the call is made only when something is listening where the sandboxed
-        daemon listens. :data:`NO_HOST_BROWSER` covers the moment between this check and the call.
+        daemon listens. The throwaway namespace of :meth:`_isolated` covers the moment between
+        this check and the call.
         """
         if not self._driver_answers():
             message = "the browser's driver in the sandbox is gone; end the session and open again"

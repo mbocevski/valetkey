@@ -10,12 +10,13 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from environment import processes_with, unusable_reason
 from proxy_stub import ProxyStub, host_of_request
 
-from valetkey import sandbox, sites
+from valetkey import sandbox, seccomp, sites
 
 # --- pure functions -----------------------------------------------------------------------
 
@@ -401,13 +402,38 @@ def test_start_sends_output_to_the_log_file_and_not_to_a_pipe(
         return "process"
 
     monkeypatch.setattr(sandbox.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(sandbox.seccomp, "open_filter", lambda **_: None)
     box = make_sandbox(tmp_path)
     assert sandbox.start(box, ["true"]) == "process"
     assert seen["argv"] == sandbox.bwrap_argv(box, ["true"])
+    assert seen["pass_fds"] == ()
     assert seen["stdin"] == subprocess.DEVNULL
     assert seen["stderr"] == subprocess.STDOUT
     assert getattr(seen["stdout"], "name", None) == str(box.log_file)
     assert box.log_file.exists()
+
+
+def test_start_hands_the_filter_to_bwrap_and_closes_its_own_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_popen(argv: list[str], **kwargs: Any) -> str:  # noqa: ANN401 - Popen's own keywords
+        (descriptor,) = kwargs["pass_fds"]
+        assert argv[argv.index("--seccomp") + 1] == str(descriptor)
+        seen["program"] = os.read(descriptor, 4096)  # the child reads it from the start
+        seen["descriptor"] = descriptor
+        return "process"
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(sandbox.seccomp, "available", lambda *_: True)
+    box = make_sandbox(tmp_path)
+    sandbox.start(box, ["true"])
+    assert seen["program"] == seccomp.program()
+    with pytest.raises(OSError, match="Bad file descriptor"):
+        os.fstat(seen["descriptor"])
+    sandbox.start(replace(box, allow_ptrace=True), ["true"])
+    assert seen["program"] == seccomp.program(allow_ptrace=True)
 
 
 def test_start_runs_bwrap_as_the_program_of_a_wrapper(
@@ -417,6 +443,7 @@ def test_start_runs_bwrap_as_the_program_of_a_wrapper(
     monkeypatch.setattr(
         sandbox.subprocess, "Popen", lambda argv, **_: seen.append(argv) or "process"
     )
+    monkeypatch.setattr(sandbox.seccomp, "open_filter", lambda **_: None)
     box = replace(make_sandbox(tmp_path), wrapper=("setpriv", "--pdeathsig", "SIGTERM", "waypipe"))
     sandbox.start(box, ["true"])
     sandbox.start(replace(box, wrapper=()), ["true"])
@@ -471,6 +498,7 @@ def run_python(box: sandbox.Sandbox, code: str, *args: str) -> tuple[int, str]:
 _INSIDE_PROBE = """
 import errno, json, os, socket
 from pathlib import Path
+from typing import Any
 out = {}
 out["env"] = sorted(os.environ)
 out["missing"] = {}
@@ -829,6 +857,7 @@ def test_the_proxy_socket_cannot_be_removed_or_replaced_from_inside(box: sandbox
     code = """
 import errno, os, sys
 from pathlib import Path
+from typing import Any
 path = Path(sys.argv[1])
 results = {}
 
@@ -876,6 +905,7 @@ def test_the_browser_sees_and_writes_only_its_download_folders(box: sandbox.Sand
     code = """
 import os, sys
 from pathlib import Path
+from typing import Any
 delivered = Path(sys.argv[1])
 print("sees", sorted(entry.name for entry in delivered.iterdir()))
 for action in (
@@ -924,3 +954,40 @@ for name in ("RLIMIT_NOFILE", "RLIMIT_NPROC"):
     assert f"RLIMIT_NPROC ({sandbox.MAX_PROCESSES}, {sandbox.MAX_PROCESSES})" in log
     assert "raised\n" not in log.replace("cannot be raised", "")
     assert log.count("cannot be raised") == 2
+
+
+_FILTER_PROBE = """
+import ctypes, errno, os
+libc = ctypes.CDLL(None, use_errno=True)
+lines = open("/proc/self/status").read().splitlines()
+print("Seccomp:", next(line for line in lines if line.startswith("Seccomp:")).split()[1])
+for name, number in (("keyctl", 250), ("bpf", 321), ("userfaultfd", 323), ("perf_event_open", 298),
+                     ("mount", 165), ("process_vm_readv", 310), ("ptrace", 101)):
+    ctypes.set_errno(0)
+    result = libc.syscall(number, 0, 0, 0, 0, 0, 0)
+    print(name, result, errno.errorcode.get(ctypes.get_errno()))
+ctypes.set_errno(0)
+print("getpid", libc.syscall(39) == os.getpid())
+"""
+
+
+@integration
+@needs_namespaces
+def test_the_filter_holds_inside_the_namespace(box: sandbox.Sandbox) -> None:
+    status, log = run_python(box, _FILTER_PROBE)
+    assert status == 0, log
+    assert "Seccomp: 2" in log
+    for name in ("keyctl", "bpf", "userfaultfd", "perf_event_open", "mount", "process_vm_readv"):
+        assert f"{name} -1 EPERM" in log
+    assert "ptrace -1 EPERM" in log
+    assert "getpid True" in log  # the calls the browser makes are untouched
+
+
+@integration
+@needs_namespaces
+def test_ptrace_is_possible_only_when_the_option_is_set(box: sandbox.Sandbox) -> None:
+    status, log = run_python(replace(box, allow_ptrace=True), _FILTER_PROBE)
+    assert status == 0, log
+    assert "Seccomp: 2" in log
+    assert "keyctl -1 EPERM" in log
+    assert "ptrace -1 EPERM" not in log  # not refused by the filter (the kernel answers)

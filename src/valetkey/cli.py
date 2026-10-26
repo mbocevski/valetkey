@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,7 @@ from valetkey import (
     mcp_server,
     procs,
     sandbox,
+    seccomp,
     sessions,
     sites,
 )
@@ -893,6 +895,8 @@ class System:
     """Whether the config turns on showing a login with no screen in a browser."""
     viewer: Callable[[], Path] = display.novnc_root
     """The directory of noVNC viewer files; raises when they are not installed."""
+    machine: Callable[[], str] = platform.machine
+    """The CPU architecture, which decides whether the syscall filter applies."""
     roots: sites.Roots = field(default_factory=sites.roots_from_env)
     unit_dirs: tuple[Path, ...] = field(
         default_factory=lambda: (unit_directory(sites.roots_from_env()), *SYSTEM_UNIT_DIRS)
@@ -1035,6 +1039,18 @@ def check_remote_login(system: System) -> list[Check]:
     return [Check("remote-login", "ok", "a login with no screen is shown in a browser")]
 
 
+def check_seccomp(system: System) -> Check:
+    """Say whether the sandbox gets its syscall filter, which is built for x86_64 only."""
+    machine = system.machine()
+    if seccomp.available(machine):
+        count = len(seccomp.DENIED)
+        return Check(
+            "seccomp", "ok", f"the sandbox refuses {count} system calls a browser has no use for"
+        )
+    detail = f"no syscall filter for {machine or 'this CPU'}; the sandbox runs without one"
+    return Check("seccomp", "warn", detail)
+
+
 def check_config(system: System) -> list[Check]:
     """Check ``config.json``, if there is one: it names a program, so it must be safe to trust."""
     try:
@@ -1079,6 +1095,7 @@ def run_checks(system: System) -> list[Check]:
         check_display(system),
         *check_security_context(system),
         *check_remote_login(system),
+        check_seccomp(system),
         *check_config(system),
         *check_units(system),
     ]
@@ -1097,8 +1114,9 @@ def doctor(
     user namespaces, Chromium, agent-browser 0.39 or newer, and XDG_RUNTIME_DIR. A missing
     Wayland display is a warning, because only logging in needs one, and so is a compositor
     without security-context support, where the login window is not restricted, and an
-    agent-browser newer than 0.39.2, the version valetkey was tested with. The state of the
-    systemd units is shown for information. A `config.json` that others can write to is ignored and
+    agent-browser newer than 0.39.2, the version valetkey was tested with, and so is a CPU other
+    than x86_64, where the sandbox has no syscall filter. The state of the systemd units is shown
+    for information. A `config.json` that others can write to is ignored and
     fails. The exit status is 1 when a required check fails. With
     --json, each check is an object with the keys check, status (ok, fail, warn or info) and
     detail.

@@ -77,7 +77,7 @@ def _no_driver_probe(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
     if request.node.get_closest_marker("integration"):
         return
     monkeypatch.setattr(sessions.Session, "_driver_answers", lambda _self: True)
-    monkeypatch.setattr(sessions.Session, "_isolated", lambda _self, argv, _env: argv)
+    monkeypatch.setattr(sessions.Session, "_isolated", lambda _self, argv, _env, _fd: argv)
 
 
 def listen_as_the_driver(session: sessions.Session) -> socket.socket:
@@ -369,6 +369,35 @@ def test_a_call_runs_without_a_network_and_ends_with_the_call(
         argv.index("--bind") : argv.index("--bind") + 2
     ]
     assert env["AGENT_BROWSER_NAMESPACE"] == "demo"
+
+
+@pytest.mark.parametrize("filtered", [True, False])
+def test_a_call_carries_the_syscall_filter_when_there_is_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, filtered: bool
+) -> None:
+    monkeypatch.setattr(sessions.Session, "_isolated", REAL_ISOLATED)
+    if not filtered:
+        monkeypatch.setattr(sessions.seccomp, "open_filter", lambda **_: None)
+    seen: dict[str, Any] = {}
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:  # noqa: ANN401
+        seen["argv"], seen["pass_fds"] = argv, kwargs["pass_fds"]
+        if filtered:
+            (descriptor,) = kwargs["pass_fds"]
+            seen["descriptor"] = descriptor
+            seen["program"] = os.read(descriptor, 4096)
+        return subprocess.CompletedProcess(argv, 0, answer({}), "")
+
+    monkeypatch.setattr(sessions.subprocess, "run", run)
+    make_session(tmp_path).current_url()
+    if filtered:
+        assert seen["argv"][seen["argv"].index("--seccomp") + 1] == str(seen["descriptor"])
+        assert seen["program"] == sessions.seccomp.program()
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(seen["descriptor"])  # our copy is closed once the call has been made
+    else:
+        assert "--seccomp" not in seen["argv"]
+        assert seen["pass_fds"] == ()
 
 
 def test_close_does_not_run_agent_browser_without_a_driver(

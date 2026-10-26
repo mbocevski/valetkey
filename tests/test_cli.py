@@ -858,6 +858,7 @@ class FakeSystem:
         self.display: Path | cli.login.DisplayError = Path("/run/user/1000/wayland-1")
         self.offered: dict[str, int] | WaylandError = {"wl_compositor": 6, MANAGER: 1}
         self.units = tmp_path / "units"
+        self.cpu = "x86_64"
         self.roots = sites.Roots(tmp_path / "cfg", tmp_path / "state", None)
         self.system_units: tuple[Path, ...] = ()
         self.calls: list[list[str]] = []
@@ -899,6 +900,7 @@ class FakeSystem:
             offered=self.interfaces,
             remote_logins=lambda: self.remote,
             viewer=self.viewer_files,
+            machine=lambda: self.cpu,
             roots=self.roots,
             unit_dirs=(self.units, *self.system_units),
         )
@@ -918,6 +920,7 @@ def test_doctor_all_good(tmp_path: Path) -> None:
         "runtime-dir": ("ok", "XDG_RUNTIME_DIR=/run/user/1000"),
         "display": ("ok", "Wayland display /run/user/1000/wayland-1"),
         "security-context": ("ok", "the Wayland compositor restricts the login window"),
+        "seccomp": ("ok", "the sandbox refuses 30 system calls a browser has no use for"),
         "units": ("info", "systemd units not installed; run `valetkey install-units`"),
         "socket": ("info", "valetkeyd.socket is inactive"),
     }
@@ -925,6 +928,17 @@ def test_doctor_all_good(tmp_path: Path) -> None:
     assert probe[0] == "/usr/bin/bwrap"
     assert probe[-1] == "/usr/bin/true"
     assert all(flag in probe for flag in ("--ro-bind", "--dev", "--proc"))
+
+
+@pytest.mark.parametrize(("cpu", "named"), [("aarch64", "aarch64"), ("", "this CPU")])
+def test_doctor_warns_when_the_sandbox_has_no_syscall_filter(
+    tmp_path: Path, cpu: str, named: str
+) -> None:
+    fake = FakeSystem(tmp_path, cpu=cpu)
+    assert results(fake)["seccomp"] == (
+        "warn",
+        f"no syscall filter for {named}; the sandbox runs without one",
+    )
 
 
 def write_config(fake: FakeSystem, text: str, mode: int) -> None:
@@ -1138,6 +1152,7 @@ def test_doctor_json_shape(
         "runtime-dir",
         "display",
         "security-context",
+        "seccomp",
         "units",
         "socket",
     ]

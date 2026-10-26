@@ -8,6 +8,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Added
 
+- The browser's sandbox refuses 30 system calls a browser has no use for, such as `keyctl`, `bpf` and `mount`, on x86_64; `valetkey doctor` says when it cannot.
 - `browser_login` on a machine with no screen can start a private display and return a link to a noVNC page, with the `ssh -L` command to reach it, when `remote_logins` is on in the config.
 - The `valetkey` command, which prints its version and help.
 - The `valetkey sites` command, which lists your sites, with `--json` for scripts.
