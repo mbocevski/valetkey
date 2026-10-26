@@ -2,6 +2,7 @@
 
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 import conventional
@@ -165,7 +166,30 @@ def test_runs_valetkey_at_a_fixed_width() -> None:
     assert all(line == line.rstrip() for line in help_text.splitlines())
 
 
-def test_facts_on_this_repository() -> None:
+def test_facts_on_this_repository(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The check runs `valetkey ... --help` for every generated block, one process after another.
+    # Each distinct command is the real thing, run once, but together: the answers are the same.
+    commands = {("--help",)}
+    for path in readme_check.documents():
+        commands.update(
+            tuple(found["args"].split()) for found in readme_check.BLOCK.finditer(path.read_text())
+        )
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ordered = sorted(commands)
+        outputs = dict(
+            zip(
+                ordered,
+                pool.map(lambda c: readme_check.run_valetkey(list(c)), ordered),
+                strict=True,
+            )
+        )
+
+    def answer(args: list[str]) -> str:
+        return outputs[tuple(args)]
+
+    check_blocks = readme_check.check_blocks
+    monkeypatch.setattr(readme_check, "run_valetkey", answer)
+    monkeypatch.setattr(readme_check, "check_blocks", lambda text: check_blocks(text, answer))
     assert readme_check.facts(fix=False) == 0
 
 
