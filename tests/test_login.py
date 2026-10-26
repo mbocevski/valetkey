@@ -1185,12 +1185,12 @@ def test_a_sign_in_provider_that_showed_its_form_is_allowed(sway: Sway, roots: s
 
     result = run(scenario(), 150)
     assert result.allow == ("idp.test", "site.test")
-    assert result.passed_through == ()
+    assert result.excluded == ()
 
 
 @integration
 @needs_typing
-def test_a_host_the_login_was_only_sent_through_is_not_allowed(
+def test_a_host_the_login_was_only_sent_through_is_allowed_too(
     sway: Sway, roots: sites.Roots
 ) -> None:
     async def scenario() -> learn.Classification:
@@ -1200,9 +1200,8 @@ def test_a_host_the_login_was_only_sent_through_is_not_allowed(
             )
 
     result = run(scenario(), 150)
-    assert result.allow == ("site.test",)
-    assert result.passed_through == ("evil.example",)
-    assert "evil.example" in result.excluded
+    assert result.allow == ("evil.example", "site.test")
+    assert result.excluded == ()
 
 
 # -- a window on a laptop, over a bridge ---------------------------------------------------

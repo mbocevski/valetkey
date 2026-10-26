@@ -6,17 +6,15 @@ After a person logs in, two lists say what the login reached:
 * the hosts the recording proxy saw, for any reason, and
 * the hosts of the pages the browser navigated to, read from the login profile's history.
 
-:func:`classify` splits them. The site's own domain is allowed. So is the registrable domain of
-any other host the proxy saw that has the same owner by name (:func:`same_owner`), which is how a
-site's CDN and image hosts load; the proxy sees only host names, so that is all it can go by. So is
-any other host that showed the person a page: one that ended a redirect chain and was open for at
-least :data:`SHOWN_MS` (an SSO provider's sign-in page, for example). A host the login only passed
-through, one that redirected at once or was left again within moments, is not allowed, because
-nothing in the history tells a sign-in provider that redirects from a tracker or an address a page
-was sent through. A host that only loaded in the background, such as an image, script or beacon,
-is left out too. :func:`merge` folds the result into the site's existing policy without dropping
-hosts the person approved earlier, and :func:`summary` describes it, naming every third party it
-allowed, every host it passed through and the ones the pages used, and counting ads and tracking.
+:func:`classify` splits them. The site's own domain is allowed. So is every other host the login
+reached, as itself, whether the proxy saw it, it showed a page or it only redirected: a site's CDN,
+its sign-in provider and the provider's own hosts are all part of what the login used, and a
+session that lost one would lose its sign-in. The exceptions are the hosts that look like ads or
+tracking (:mod:`valetkey.trackers`), which are left out and counted. Only this login counts: the
+history is read from the visits made since the login began, so an older visit cannot add a host.
+:func:`merge` folds the result into the site's existing policy without dropping hosts the person
+approved earlier and without allowing one they denied, and :func:`summary` describes it, naming the
+hosts it allowed in groups and counting the ads and tracking it left out.
 
 Chromium facts this module relies on, checked against Chromium 156.0.8078.47 by logging in
 headless to a local page that redirects with HTTP 302 and reading ``<profile>/Default/History``:
@@ -91,8 +89,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SIDE_FILES = ("-wal", "-journal")
-_MAX_NAMED = 4
-_SHOWN_WHEN_TRIMMED = 3
 MAX_BYTES = 64 * 1024 * 1024
 """The most a history file (or one of its side files) may hold: 64 MiB. Chromium's grows with
 use, but a login's profile is new and small."""
@@ -157,21 +153,19 @@ type Query = tuple[str, tuple[int, ...]]
 class Classification:
     """Hosts sorted by what the login did with them.
 
-    ``allow`` holds the site's registrable domain (covering its subdomains) and the exact hosts
-    of other sites that showed the person a page. ``excluded`` holds the exact hosts that only
-    loaded in the background or that the login only passed through. Both are sorted.
+    ``allow`` holds the site's registrable domain (covering its subdomains) and the exact hosts of
+    everything else the login used. ``excluded`` holds the exact hosts that look like ads or
+    tracking. Both are sorted.
     """
 
     allow: tuple[str, ...]
     excluded: tuple[str, ...]
-    passed_through: tuple[str, ...] = ()
-    """The exact hosts of other sites that the login only passed through. They are in
-    ``excluded`` too, and are named apart so the person can be told about them."""
     owned: tuple[str, ...] = ()
-    """The registrable domains, apart from the site's own, that the login allowed because the site's
-    owner has them (see :func:`same_owner`). They are in ``allow`` too."""
+    """The hosts in ``allow``, apart from the site's own domain, that have its owner by name (see
+    :func:`same_owner`). The summary names them with the site's own domains."""
     tracking: tuple[str, ...] = ()
-    """The hosts in ``excluded`` that look like ads or tracking (see :mod:`valetkey.trackers`)."""
+    """The hosts in ``excluded`` that look like ads or tracking (see :mod:`valetkey.trackers`).
+    That is all of them, now; the field stays so that the summary reads the same way."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,40 +413,29 @@ def classify(
 ) -> Classification:
     """Sort the hosts a login reached into ``allow`` and ``excluded``.
 
-    The registrable domain of ``start_url`` is always allowed. A host under it is covered by it.
-    So is the registrable domain of any other host the login reached that has the same owner
-    (see :func:`same_owner`), named in ``owned``: a site's own CDN is not a third party. Any other
-    host that showed the person a page (``shown_hosts``) is allowed as itself, even if
-    the proxy never saw it. Any other host that was only seen, or that the login only passed
-    through (``passed_hosts``), is excluded as itself; the passed-through ones are also named in
-    ``passed_through``. An IP address is never covered by a domain, so it follows the same rules as
-    a third party. A host that an allowed host covers, or that covers an allowed host, is not
-    listed as excluded, because an excluded entry would override the allowed one.
-    Entries that are not plausible hosts are ignored.
+    The registrable domain of ``start_url`` is always allowed, and a host under it is covered by
+    it. Every other host the login reached is allowed as itself: one the proxy saw
+    (``seen_hosts``), and one the browser navigated to, whether it showed a page (``shown_hosts``)
+    or only redirected (``passed_hosts``). The exceptions are the hosts that look like ads or
+    tracking (see :mod:`valetkey.trackers`), which are excluded as themselves and counted in
+    ``tracking``, and anything under the site's own domain, which is never excluded. The hosts that
+    have the site's owner by name (see :func:`same_owner`) are named in ``owned``, for the
+    summary. An IP address is never covered by a domain, so it follows the rules of any other
+    host. A host that another allowed host covers is not listed apart. An excluded host is dropped
+    if it would block an allowed one. Entries that are not plausible hosts are ignored.
     """
     domain = sites.registrable_domain(sites.host_of(start_url), suffixes)
-    shown = _hosts(shown_hosts)
-    allow = {domain}
-    allow.update(host for host in shown if not sites.host_matches(host, [domain]))
-    passed = _hosts(passed_hosts) - shown
-    owned = {
-        sites.registrable_domain(host, suffixes)
-        for host in _hosts(seen_hosts) | passed
-        if same_owner(host, domain, suffixes) and not sites.host_matches(host, allow)
-    }
-    allow |= owned
-    passed -= {host for host in passed if sites.host_matches(host, allow)}
-    excluded = {
-        host
-        for host in _hosts(seen_hosts) | passed
-        if not (sites.host_matches(host, allow) or sites.excluded_conflicts(host, allow))
-    }
+    reached = _hosts(seen_hosts) | _hosts(shown_hosts) | _hosts(passed_hosts)
+    others = {host for host in reached if not sites.host_matches(host, [domain])}
+    tracking = {host for host in others if trackers.is_tracking(host)}
+    allow = {domain} | (others - tracking)
+    allow = {host for host in allow if not sites.host_matches(host, allow - {host})}
+    excluded = {host for host in tracking if not sites.excluded_conflicts(host, allow)}
     return Classification(
         allow=tuple(sorted(allow)),
         excluded=tuple(sorted(excluded)),
-        passed_through=tuple(sorted(passed & excluded)),
-        owned=tuple(sorted(owned)),
-        tracking=tuple(sorted(host for host in excluded if trackers.is_tracking(host))),
+        owned=tuple(sorted(h for h in allow - {domain} if same_owner(h, domain, suffixes))),
+        tracking=tuple(sorted(excluded)),
     )
 
 
@@ -521,65 +504,35 @@ def _named(hosts: Iterable[str]) -> str:
 
 
 def summary(policy: sites.Policy, classification: Classification) -> str:
-    """Describe a saved login: what sessions may reach, what was allowed on the way and what not.
+    """Describe a saved login: what sessions may reach, in groups, and what was left out.
 
-    Allowed hosts are named, the site's own domain first; with more than four, the first three
-    are named and the rest counted. Every other site this login allowed is named, with how to
-    remove one, because nothing proves a page the person saw was one they meant to trust. Hosts
-    the login only passed through are named too, with how to allow one if signing in needs it.
-    Other domains of the site's owner are named as allowed. The excluded hosts that only loaded in
-    the background are sorted by their names (see :mod:`valetkey.trackers`): the ones the pages
-    used are named, up to twenty, with how to allow one, and the ads and tracking are counted.
+    The hosts this login allowed are named in two groups: the site's own domains (its registrable
+    domain and the hosts that have its owner by name), and the other services the pages used.
+    Past twenty names the rest are counted. The `valetkey deny` command is named, for any the
+    person does not want. A host that a denied entry blocks is named apart, with how to allow it.
+    The ads and tracking hosts that were left out are counted, never named.
     """
     own = sites.registrable_domain(sites.host_of(policy.start))
-    allowed = sorted(policy.allow, key=lambda host: (not sites.host_matches(host, [own]), host))
-    if len(allowed) > _MAX_NAMED:
-        rest = len(allowed) - _SHOWN_WHEN_TRIMMED
-        named = f"{', '.join(allowed[:_SHOWN_WHEN_TRIMMED])} and {rest} more"
-    elif len(allowed) > 1:
-        named = f"{', '.join(allowed[:-1])} and {allowed[-1]}"
-    else:
-        named = allowed[0] if allowed else "no hosts"
-    text = f"Saved your {policy.site} login. Sessions will be limited to {named}."
-    third = [
-        host
-        for host in classification.allow
-        if host in policy.allow
-        and host not in classification.owned
-        and not sites.host_matches(host, [own])
-    ]
-    if third:
-        text += (
-            f" Other sites this login allowed: {_named(third)}. Run "
-            f"`valetkey deny {policy.site} HOST` for any you do not recognise."
-        )
-    owned = [host for host in classification.owned if host in policy.allow]
-    if owned:
-        text += f" Also allowed, because they share the site's name: {_named(owned)}."
-    passed = [host for host in classification.passed_through if host in policy.excluded]
-    if passed:
-        text += (
-            f" Passed through but not allowed, because they only redirected: {_named(passed)}. "
-            f"Run `valetkey allow {policy.site} HOST` if signing in needs one."
-        )
+    text = (
+        f"Saved your {policy.site} login. Sessions will be limited to the hosts it used, "
+        "apart from ads and tracking."
+    )
+    new = [host for host in classification.allow if host in policy.allow]
+    mine = [host for host in new if sites.host_matches(host, [own]) or host in classification.owned]
+    services = [host for host in new if host not in mine]
+    if mine:
+        text += f" The site's own domains: {_named(mine)}."
+    if services:
+        text += f" Other services the pages used: {_named(services)}."
+    if services or len(mine) > 1:
+        text += f" Run `valetkey deny {policy.site} HOST` for any you do not want."
     held = [host for host in classification.allow if host not in policy.allow]
     if held:
         text += (
             f" Not allowed, because they are on the denied list: {_named(held)}. Run "
             f"`valetkey allow {policy.site} HOST` to allow one."
         )
-    left_out = [
-        host
-        for host in classification.excluded
-        if host in policy.excluded and host not in classification.passed_through
-    ]
-    tracking = [host for host in left_out if host in classification.tracking]
-    used = [host for host in left_out if host not in classification.tracking]
-    if used:
-        text += (
-            f" Left out, because the pages used them (CDNs, services): {_named(used)}. "
-            f"Run `valetkey allow {policy.site} HOST` for any the site needs."
-        )
+    tracking = [host for host in classification.tracking if host in policy.excluded]
     if tracking:
         noun = "host" if len(tracking) == 1 else "hosts"
         text += f" Left out {len(tracking)} ads and tracking {noun}."

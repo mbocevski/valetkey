@@ -31,16 +31,13 @@ The SSH and GPG agents, the Docker socket, the session bus and the rest of your 
 
 A host is added to a site's policy only when a person says yes. Three things can change a policy:
 
-- Logging in. The site's own domain is allowed, with its subdomains. So are its owner's other
-  domains (see [what a login allows](#what-a-login-allows)). Any other host that showed you a
-  page, such as a sign-in provider's form, is allowed as that exact host. That means a page that
-  ended a redirect chain and stayed open for at least two seconds. A host the login only passed
-  through, because it redirected at once, is left out. So is a host the page only loaded in the
-  background. Both are listed as excluded. Only this login counts: pages the profile visited at an
-  earlier login or session are not read again, so a host you denied does not come back.
-- You, with `valetkey allow` and `valetkey deny`. The login's summary names every other site it
-  allowed, and every host it passed through, so you can deny or allow them. The browser's history
-  cannot tell a provider's page from a page made to look like one, so check the names.
+- Logging in. The site's own domain is allowed, with its subdomains. So is every other host the
+  login used, such as a sign-in provider and its CDN, unless it looks like ads or tracking (see
+  [what a login allows](#what-a-login-allows)). Only this login counts: pages the profile visited at
+  an earlier login or session are not read again.
+- You, with `valetkey allow` and `valetkey deny`. The login's summary names the hosts it allowed,
+  so you can deny any you do not want. The proxy cannot tell a provider from a page made to look
+  like one, so check the names.
 - The agent's `browser_allow`, which only asks. You answer in the client's own interface, in a
   notification, or through the approval command, and no tool takes "the person said yes" from the agent. See
   [MCP clients](mcp.md).
@@ -52,26 +49,23 @@ fill your screen with questions about arbitrary hosts.
 
 ## What a login allows
 
+Signing in goes through more than the site: a provider, its CDN, a token exchange. A session that
+lost one of those hosts would lose its sign-in. So a login allows every host its proxy recorded
+and every host the browser navigated to, each as itself. The exceptions are hosts that look like
+ads or tracking, which it leaves out and counts.
+
+That costs some trust. The proxy sees only host names, because HTTPS is opaque to it, so it cannot
+tell a provider from a page that a site or an ad sent the login through. The summary names every
+host in two groups, the site's own domains and the other services the pages used. Check the names,
+and run `valetkey deny` for any you do not want.
+
 A site's policy keeps two lists of blocked hosts. `excluded` is what the last login left out, and
-the next login builds it again, so a host left out once can be allowed later. `denied` is what
-you turned down with `valetkey deny`. A login never changes it and never allows a host it blocks.
-A policy written before `denied` existed has its excluded entries read as denied, because nothing
-says which ones you chose. The summary names such hosts, and `valetkey allow` lifts them.
+the next login builds it again. `denied` is what you turned down with `valetkey deny`. A login
+never changes it and never allows a host it blocks; `valetkey allow` lifts it. A policy written
+before `denied` existed has none, and its excluded hosts are built again by the next login.
 
-A site loads its pages from more than one domain, such as `sitex.se`, `sitex.com` and
-`sitex.eu`. A login allows the registrable domain of every host it reached that has the same owner
-by name. That is the same registrable domain, or the same name under another suffix. A name under
-three characters never matches across suffixes, and neither does an address.
-
-The test is the host name alone. The proxy sees no path, header or kind of request, because
-HTTPS is opaque to it, so it cannot tell which page asked for a host. A domain someone else
-registered with the same name would pass, so the summary names these domains. A domain you denied
-is not allowed again this way.
-
-The summary sorts the other hosts the login left out. Hosts the pages used (CDNs, services) are
-named, so the agent can offer them to you. Ads and tracking hosts are only counted. That sorting
-reads the host name against a short list in the source and names such as `ads` or `analytics`. It
-changes what you are told and nothing else.
+The sorting of ads and tracking reads the host name against a short list in the source and names
+such as `ads` or `analytics`. It never includes a sign-in provider, a CDN or a font service.
 
 ## Private networks
 

@@ -958,7 +958,7 @@ def test_a_login_learns_a_policy_and_reports_it_once(roots: sites.Roots) -> None
             seen = [
                 SeenHost("newsite.test", 5),
                 SeenHost("login.okta.test", 2),
-                SeenHost("o1.sentry.test", 1),
+                SeenHost("o1.ingest.sentry.io", 1),
             ]
             history = profile / "Default" / "History"
             history.parent.mkdir(parents=True)
@@ -968,7 +968,7 @@ def test_a_login_learns_a_policy_and_reports_it_once(roots: sites.Roots) -> None
             policy = sites.load_policy(roots, "newsite")
             assert policy.start == "https://newsite.test/signin"
             assert policy.allow == ("login.okta.test", "newsite.test")
-            assert policy.excluded == ("o1.sentry.test",)
+            assert policy.excluded == ("o1.ingest.sentry.io",)
             assert policy.login_pages == ()  # this history has no form submissions to learn from
             assert policy.learned == NOW
             listing = await c.call("sites")
@@ -1021,8 +1021,8 @@ def test_a_login_merges_into_an_existing_policy(roots: sites.Roots) -> None:
             await window.close_window([SeenHost("cdn.other.test", 1)], roots.state / "p")
             await eventually(lambda: rig.daemon._sites["sitex"].kind == "idle")  # noqa: SLF001
             policy = sites.load_policy(roots, "sitex")
-            assert policy.allow == ("approved.test", "sitex.test")
-            assert policy.excluded == ("cdn.other.test",)
+            assert policy.allow == ("approved.test", "cdn.other.test", "sitex.test")
+            assert policy.excluded == ()
             assert policy.denied == ("old.test",)
 
     run(scenario())
@@ -1141,7 +1141,7 @@ def test_a_login_with_no_recorded_start_saves_nothing_rather_than_everything(
     run(scenario())
 
 
-def test_a_login_names_what_it_allowed_and_what_it_only_passed_through(roots: sites.Roots) -> None:
+def test_a_login_allows_what_it_used_except_trackers_and_names_it(roots: sites.Roots) -> None:
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("login", target="https://newsite.test/")
@@ -1158,22 +1158,25 @@ def test_a_login_names_what_it_allowed_and_what_it_only_passed_through(roots: si
                     (learn.chrome_time(NOW) + 1, 0x80000001),
                 )
                 database.commit()
-            seen = [SeenHost("newsite.test", 5), SeenHost("tracker.test", 1)]
+            seen = [SeenHost("newsite.test", 5), SeenHost("static.idpcdn.test", 1)]
             await window.close_window(seen, profile)
             await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
             policy = sites.load_policy(roots, "newsite")
-            assert policy.allow == ("login.okta.test", "newsite.test")
+            assert policy.allow == ("login.okta.test", "newsite.test", "static.idpcdn.test")
             assert policy.excluded == ("tracker.test",)
             (entry,) = (await c.call("sites"))["sites"]
-            assert "Other sites this login allowed: login.okta.test." in entry["summary"]
+            assert "The site's own domains: newsite.test." in entry["summary"]
+            assert (
+                "Other services the pages used: login.okta.test, static.idpcdn.test."
+                in entry["summary"]
+            )
             assert "valetkey deny newsite HOST" in entry["summary"]
-            assert "only redirected: tracker.test." in entry["summary"]
-            assert "valetkey allow newsite HOST" in entry["summary"]
-
-    run(scenario())
+            assert "Left out 1 ads and tracking host." in entry["summary"]
 
 
-def test_a_login_allows_the_cdn_domains_of_the_site_and_sorts_the_rest(roots: sites.Roots) -> None:
+def test_a_login_allows_the_cdn_hosts_of_the_site_and_counts_the_trackers(
+    roots: sites.Roots,
+) -> None:
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("login", target="https://www.shop.test/")
@@ -1195,12 +1198,22 @@ def test_a_login_allows_the_cdn_domains_of_the_site_and_sorts_the_rest(roots: si
             await window.close_window(seen, profile)
             await eventually(lambda: rig.daemon._sites["shop"].kind == "idle")  # noqa: SLF001
             policy = sites.load_policy(roots, "shop")
-            assert policy.allow == ("shop.example", "shop.invalid", "shop.test")
-            assert policy.excluded == ("fonts.cdn.test", "www.google-analytics.com")
+            assert policy.allow == (
+                "cdn.shop.example",
+                "fonts.cdn.test",
+                "images.shop.invalid",
+                "shop.test",
+            )
+            assert policy.excluded == ("www.google-analytics.com",)
             (entry,) = (await c.call("sites"))["sites"]
-            assert "share the site's name: shop.example, shop.invalid." in entry["summary"]
-            assert "(CDNs, services): fonts.cdn.test." in entry["summary"]
+            assert (
+                "The site's own domains: cdn.shop.example, images.shop.invalid, shop.test."
+                in (entry["summary"])
+            )
+            assert "Other services the pages used: fonts.cdn.test." in entry["summary"]
             assert "Left out 1 ads and tracking host." in entry["summary"]
+
+    run(scenario())
 
 
 # -- saving a picture or a file ---------------------------------------------------------------
@@ -4615,7 +4628,7 @@ def test_a_login_adds_an_account_that_starts_where_the_site_does(roots: sites.Ro
             assert (window.site, window.start) == ("sitex:work", "https://sitex.test/")
             await window.close_window([SeenHost("cdn.other.test", 1)], roots.state / "p")
             await eventually(lambda: rig.daemon._sites["sitex:work"].kind == "idle")  # noqa: SLF001
-            assert sites.load_policy(roots, "sitex:work").allow == ("sitex.test",)
+            assert sites.load_policy(roots, "sitex:work").allow == ("cdn.other.test", "sitex.test")
             assert sites.load_policy(roots, "sitex").excluded == ()
             assert (await c.call("login", target="sitex:work"))["site"] == "sitex:work"
 

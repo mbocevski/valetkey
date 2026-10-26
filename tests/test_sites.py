@@ -995,12 +995,12 @@ def test_no_stand_in_leaves_the_error_as_it_was(
 # -- denied hosts --------------------------------------------------------------------------
 
 
-def test_a_file_from_before_denied_reads_its_excluded_entries_as_denied(roots: Roots) -> None:
+def test_a_file_from_before_denied_keeps_its_excluded_entries_as_left_out(roots: Roots) -> None:
     write_policy_file(roots, "sitex", LEGACY)
     loaded = load_policy(roots, "sitex")
-    assert (loaded.excluded, loaded.denied) == ((), ("o123.ingest.sentry.io",))
+    assert (loaded.excluded, loaded.denied) == (("o123.ingest.sentry.io",), ())
     assert not allows(loaded, "o123.ingest.sentry.io")
-    assert '"denied": [\n    "o123.ingest.sentry.io"\n  ]' in policy_json(loaded)
+    assert '"denied": []' in policy_json(loaded)
     save_policy(roots, loaded)
     assert load_policy(roots, "sitex") == loaded
 

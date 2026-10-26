@@ -1,27 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tell the hosts that serve ads and tracking from the ones a page needs to work.
 
-A login records every host the browser contacts, and a modern site contacts dozens. After the
-site's own hosts are set aside, what is left is either something the page uses to work (a CDN,
-a fonts or maps service, a payment frame) or something that watches the visitor (an ad network, an
-analytics script, a tracking pixel). valetkey allows neither, but it reports them apart, so the
-person, and the agent, can allow the first kind in one step and ignore the second.
-
-This is a guess made from the host name alone, and it only sorts a list for reading. It never
-allows or blocks anything. It has two parts:
+A login records every host the browser contacts, and a modern site contacts dozens. It allows all
+of them except the ones that only advertise or watch the visitor (an ad network, an analytics
+script, a tracking pixel): those it leaves out and counts. The test is a guess made from the host
+name alone, and it has two parts:
 
 * :data:`TRACKER_DOMAINS`, a short list of the registrable domains of well-known ad, analytics,
   tag-manager, session-replay and error-reporting services. It is written by hand, not copied
   from a block list, so it is small, stable and easy to audit. It names services that exist only
-  to watch or advertise, and none that a page may need to work, so a host on it is never
-  something to allow for a page's sake.
+  to watch or advertise, and none that a page may need to work: no identity provider, no CDN, no
+  social sign-in, no font or payment service.
 * :data:`TRACKING_LABELS`, a pattern for host names that say what they are: a label such as
   ``ads``, ``analytics``, ``pixel``, ``telemetry`` or ``track2``, as in ``ads.example.com``. It
   catches the many small services the list cannot name, and the names are honest, because a host
   that calls itself ``analytics`` is one.
 
-A host that is neither is reported as used by the pages, which is the safer mistake: the person
-sees a CDN named and may allow it, and an unlisted tracker named among them costs a look.
+The cost of a mistake is small either way. A tracker the list misses is allowed, as any host the
+page used would be. A host wrongly taken for a tracker is left out and counted, and
+``valetkey allow`` lets it in.
 """
 
 import re
@@ -42,7 +39,6 @@ TRACKER_DOMAINS: frozenset[str] = frozenset(
         "criteo.net",
         "demdex.net",
         "doubleclick.net",
-        "facebook.net",
         "fullstory.com",
         "google-analytics.com",
         "googleadservices.com",

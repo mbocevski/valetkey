@@ -104,7 +104,7 @@ def test_redirect_chain_through_an_sso_provider(tmp_path: Path) -> None:
     )
     hosts = all_hosts(path)
     result = learn.classify(START, ["app.sitex.com", "login.okta.com", "okta.com"], hosts)
-    assert result.allow == ("login.okta.com", "sitex.com")
+    assert result.allow == ("okta.com", "sitex.com")
     assert result.excluded == ()
 
 
@@ -122,15 +122,24 @@ def test_navigation_hosts_the_proxy_never_saw_still_count() -> None:
     assert result.allow == ("login.okta.com", "sitex.com")
 
 
-def test_beacons_seen_by_the_proxy_are_excluded(tmp_path: Path) -> None:
+def test_beacons_seen_by_the_proxy_are_excluded_and_other_hosts_are_allowed(
+    tmp_path: Path,
+) -> None:
     path = history(tmp_path, [("https://app.sitex.com/login", TYPED)])
-    seen = ["app.sitex.com", "t.tracker.example", "cdn.metrics.io", "t.tracker.example"]
+    seen = [
+        "app.sitex.com",
+        "t.tracker.example",
+        "cdn.metrics.io",
+        "t.tracker.example",
+        "cdn.example",
+    ]
     result = learn.classify(START, seen, all_hosts(path))
-    assert result.allow == ("sitex.com",)
+    assert result.allow == ("cdn.example", "sitex.com")
     assert result.excluded == ("cdn.metrics.io", "t.tracker.example")
+    assert result.tracking == result.excluded
 
 
-def test_subframe_only_hosts_are_excluded(tmp_path: Path) -> None:
+def test_subframe_only_hosts_follow_the_same_rule(tmp_path: Path) -> None:
     path = history(
         tmp_path,
         [
@@ -143,7 +152,8 @@ def test_subframe_only_hosts_are_excluded(tmp_path: Path) -> None:
     hosts = all_hosts(path)
     assert hosts == {"app.sitex.com"}
     result = learn.classify(START, ["ads.example", "widgets.example"], hosts)
-    assert result.excluded == ("ads.example", "widgets.example")
+    assert result.allow == ("sitex.com", "widgets.example")
+    assert result.excluded == ("ads.example",)
 
 
 def test_odd_urls_in_history_are_skipped(tmp_path: Path) -> None:
@@ -168,33 +178,33 @@ def test_odd_urls_in_history_are_skipped(tmp_path: Path) -> None:
 
 def test_ip_literals_are_third_parties_and_exact() -> None:
     result = learn.classify(START, ["192.0.2.7", "198.51.100.1", "[2001:db8::1]"], ["192.0.2.7"])
-    assert result.allow == ("192.0.2.7", "sitex.com")
-    assert result.excluded == ("198.51.100.1", "2001:db8::1")
+    assert result.allow == ("192.0.2.7", "198.51.100.1", "2001:db8::1", "sitex.com")
+    assert result.excluded == ()
 
 
 def test_ip_start_url_is_covered_only_by_itself() -> None:
     result = learn.classify("http://192.0.2.7:3000/", ["192.0.2.7", "192.0.2.8"], [])
-    assert result.allow == ("192.0.2.7",)
-    assert result.excluded == ("192.0.2.8",)
+    assert result.allow == ("192.0.2.7", "192.0.2.8")
+    assert result.excluded == ()
 
 
 def test_two_level_suffixes_and_custom_suffixes() -> None:
     result = learn.classify("https://app.sitex.co.uk/", ["x.sitex.co.uk", "other.co.uk"], [])
-    assert result == learn.Classification(allow=("sitex.co.uk",), excluded=("other.co.uk",))
+    assert result == learn.Classification(allow=("other.co.uk", "sitex.co.uk"), excluded=())
     custom = learn.classify("https://app.sitex.test.example/", [], [], suffixes=frozenset())
     assert custom.allow == ("test.example",)
 
 
-def test_a_background_host_under_an_allowed_provider_is_not_excluded() -> None:
+def test_a_host_under_an_allowed_provider_is_not_listed_apart() -> None:
     result = learn.classify(START, ["static.login.okta.com", "login.okta.com"], ["login.okta.com"])
     assert result.allow == ("login.okta.com", "sitex.com")
     assert result.excluded == ()
 
 
-def test_a_background_parent_of_an_allowed_provider_is_not_excluded() -> None:
+def test_the_parent_of_an_allowed_provider_host_covers_it() -> None:
     seen = ["accounts.google.com", "google.com", "ads.example"]
     result = learn.classify(START, seen, ["accounts.google.com"])
-    assert result.allow == ("accounts.google.com", "sitex.com")
+    assert result.allow == ("google.com", "sitex.com")
     assert result.excluded == ("ads.example",)
 
 
@@ -246,10 +256,11 @@ def test_invalid_hosts_are_ignored() -> None:
 
 
 def test_classify_is_sorted_and_deterministic() -> None:
-    first = learn.classify(START, ["b.example", "a.example", "c.example"], ["z.sso.example"])
-    second = learn.classify(START, ["c.example", "b.example", "a.example"], ["z.sso.example"])
+    first = learn.classify(START, ["b.example", "a.example", "ads.c.example"], ["z.sso.example"])
+    second = learn.classify(START, ["ads.c.example", "b.example", "a.example"], ["z.sso.example"])
     assert first == second
-    assert first.excluded == ("a.example", "b.example", "c.example")
+    assert first.allow == ("a.example", "b.example", "sitex.com", "z.sso.example")
+    assert first.excluded == ("ads.c.example",)
 
 
 def test_missing_history_gives_no_hosts(tmp_path: Path) -> None:
@@ -349,47 +360,46 @@ def test_merge_names_the_site_and_converts_the_time() -> None:
     )
 
 
+SAVED = (
+    "Saved your sitex login. Sessions will be limited to the hosts it used, "
+    "apart from ads and tracking."
+)
+
+
 def line(allow: tuple[str, ...], excluded: tuple[str, ...] = (), **changes: object) -> str:
-    result = learn.Classification(allow, excluded)
+    result = learn.Classification(allow, excluded, tracking=excluded)
     return learn.summary(policy(allow=allow, excluded=excluded, **changes), result)
 
 
-def test_summary_names_every_host_up_to_four() -> None:
-    assert line(("sitex.com",)) == "Saved your sitex login. Sessions will be limited to sitex.com."
-    assert line(("login.okta.com", "sitex.com"), ("a.example", "b.example")) == (
-        "Saved your sitex login. Sessions will be limited to sitex.com and login.okta.com. "
-        "Other sites this login allowed: login.okta.com. "
-        "Run `valetkey deny sitex HOST` for any you do not recognise. "
-        "Left out, because the pages used them (CDNs, services): a.example, b.example. "
-        "Run `valetkey allow sitex HOST` for any the site needs."
-    )
-    assert line(("a.example", "b.example", "sitex.com", "z.example")).startswith(
-        "Saved your sitex login. Sessions will be limited to sitex.com, a.example, b.example and "
-        "z.example."
+def test_summary_names_the_hosts_in_two_groups() -> None:
+    head = SAVED
+    assert line(("sitex.com",)) == head + " The site's own domains: sitex.com."
+    assert line(("login.okta.com", "sitex.com"), ("ads.example", "t.tracker.example")) == (
+        head + " The site's own domains: sitex.com. Other services the pages used: login.okta.com. "
+        "Run `valetkey deny sitex HOST` for any you do not want. Left out 2 ads and tracking hosts."
     )
 
 
-def test_summary_trims_a_long_list() -> None:
-    allow = ("a.example", "b.example", "c.example", "d.example", "sitex.com")
-    assert line(allow).startswith(
-        "Saved your sitex login. Sessions will be limited to sitex.com, a.example, "
-        "b.example and 2 more. Other sites this login allowed: a.example, b.example, c.example, "
-        "d.example."
-    )
+def test_summary_stops_naming_after_twenty_hosts() -> None:
+    allow = ("sitex.com", *(f"h{n:02d}.example" for n in range(25)))
+    text = line(allow)
+    assert "Other services the pages used: h00.example, h01.example," in text
+    assert "h19.example and 5 more." in text
+    assert "h20.example" not in text
 
 
-def test_summary_counts_one_host_and_ignores_older_exclusions() -> None:
-    result = learn.Classification(("sitex.com",), ("new.example", "approved.example"))
-    saved = policy(allow=("sitex.com",), excluded=("new.example", "old.example"))
-    assert learn.summary(saved, result).endswith(
-        "Left out, because the pages used them (CDNs, services): new.example. "
-        "Run `valetkey allow sitex HOST` for any the site needs."
+def test_summary_counts_one_tracking_host_and_ignores_older_exclusions() -> None:
+    result = learn.Classification(
+        ("sitex.com",), ("ads.example", "ads2.example"), tracking=("ads.example",)
     )
+    saved = policy(allow=("sitex.com",), excluded=("ads.example", "old.example"))
+    assert learn.summary(saved, result).endswith(" Left out 1 ads and tracking host.")
 
 
 def test_summary_with_nothing_allowed() -> None:
     saved = policy(allow=(), excluded=())
-    assert "limited to no hosts." in learn.summary(saved, learn.Classification((), ()))
+    text = learn.summary(saved, learn.Classification((), ()))
+    assert text == SAVED
 
 
 @pytest.mark.integration
@@ -935,31 +945,28 @@ def test_the_login_pages_and_the_last_page_are_of_this_login_too(tmp_path: Path)
     assert learn.login_pages(path, "https://sitex.com/", since=BEGAN) == ("sitex.com/signin",)
 
 
-def test_summary_names_the_other_sites_it_allowed_and_how_to_remove_one() -> None:
+def test_summary_names_the_other_services_and_how_to_remove_one() -> None:
     text = line(("idp.corp.test", "sitex.com"))
-    assert " Other sites this login allowed: idp.corp.test. " in text
-    assert "Run `valetkey deny sitex HOST` for any you do not recognise." in text
-    assert "Passed through" not in text
-    assert "Other sites" not in line(("sitex.com", "www.sitex.com"))
+    assert " Other services the pages used: idp.corp.test. " in text
+    assert "Run `valetkey deny sitex HOST` for any you do not want." in text
+    assert "Other services" not in line(("sitex.com", "www.sitex.com"))
+    assert "Run" not in line(("sitex.com",))
 
 
-def test_summary_names_the_hosts_the_login_only_passed_through() -> None:
+def test_summary_names_the_owners_other_domains_with_the_sites_own() -> None:
     result = learn.Classification(
-        ("sitex.com",), ("tracker.test", "evil.example"), ("evil.example", "tracker.test")
+        ("cdn.sitex.org", "idp.corp.test", "sitex.com"), (), owned=("cdn.sitex.org",)
     )
-    saved = policy(allow=("sitex.com",), excluded=("tracker.test", "evil.example"))
+    saved = policy(allow=result.allow)
     text = learn.summary(saved, result)
-    assert text.endswith(
-        " Passed through but not allowed, because they only redirected: evil.example, "
-        "tracker.test. Run `valetkey allow sitex HOST` if signing in needs one."
-    )
-    assert "Left out" not in text  # they are not counted twice
+    assert " The site's own domains: cdn.sitex.org, sitex.com. " in text
+    assert " Other services the pages used: idp.corp.test. " in text
 
 
-def test_summary_names_only_the_passed_through_hosts_that_are_still_excluded() -> None:
-    result = learn.Classification(("sitex.com",), ("tracker.test",), ("tracker.test",))
-    allowed_since = policy(allow=("sitex.com", "tracker.test"), excluded=())
-    assert "Passed through" not in learn.summary(allowed_since, result)
+def test_summary_counts_only_the_tracking_hosts_the_policy_still_excludes() -> None:
+    result = learn.Classification(("sitex.com",), ("ads.example",), tracking=("ads.example",))
+    allowed_since = policy(allow=("sitex.com", "ads.example"), excluded=())
+    assert "Left out" not in learn.summary(allowed_since, result)
 
 
 def test_summary_quotes_a_host_that_is_not_a_host_name_and_stops_at_twenty() -> None:
@@ -1048,19 +1055,19 @@ FLOWS: dict[str, list[tuple[int, int, int, int, str]]] = {
 }
 
 # For each flow: the third-party hosts the rule allows, and those it only passes through.
+# Every host a flow navigated to is allowed, however long its page was open, except a tracker.
+# The summary names them all, so the person can deny one.
 EXPECTED: dict[str, tuple[set[str], set[str]]] = {
     "a_direct_form": (set(), set()),
     "b_oidc_idp_form": ({"idp.test"}, set()),
-    "b2_idp_redirect_only": (set(), {"idp.test"}),
+    "b2_idp_redirect_only": ({"idp.test"}, set()),
     "b3_saml_post_back": ({"idp.test"}, set()),
     "b4_idp_chooser_then_form": ({"idp.test"}, set()),
     "c_tracker_server_bounce": (set(), {"tracker.test"}),
     "c2_tracker_client_bounce": (set(), {"tracker.test"}),
-    "d1_evil_after_login_js": (set(), {"evil.example"}),
-    "d2_evil_visible_page": (set(), {"evil.example"}),
-    "d3_evil_server_bounce": (set(), {"evil.example"}),
-    # A page made to look used, shown for three seconds before it moves on, is not told apart
-    # from a sign-in page. The summary names it for the person for this reason.
+    "d1_evil_after_login_js": ({"evil.example"}, set()),
+    "d2_evil_visible_page": ({"evil.example"}, set()),
+    "d3_evil_server_bounce": ({"evil.example"}, set()),
     "d4_evil_shown_3s_then_script": ({"evil.example"}, set()),
 }
 
@@ -1091,18 +1098,17 @@ def flow_history(tmp_path: Path, rows: list[tuple[int, int, int, int, str]]) -> 
 
 
 @pytest.mark.parametrize("flow", sorted(FLOWS))
-def test_a_login_allows_a_provider_that_showed_a_page_and_not_one_it_passed_through(
+def test_a_login_allows_every_host_it_navigated_to_except_trackers(
     tmp_path: Path, flow: str
 ) -> None:
     path = flow_history(tmp_path, FLOWS[flow])
     found = learn.navigation(path, since=BEGAN)
     seen = [urlsplit(url).hostname or "" for *_, url in FLOWS[flow]]
     result = learn.classify("http://site.test/", seen, found.shown, found.passed)
-    allowed, passed = EXPECTED[flow]
+    allowed, trackers_seen = EXPECTED[flow]
     assert set(result.allow) == {"site.test", *allowed}
-    assert set(result.passed_through) == passed
-    assert passed <= set(result.excluded)
-    assert not passed & set(result.allow)
+    assert set(result.excluded) == trackers_seen
+    assert not trackers_seen & set(result.allow)
 
 
 def test_a_page_has_to_be_open_for_two_seconds_and_end_its_chain() -> None:
@@ -1368,7 +1374,7 @@ def test_a_short_label_is_not_enough_to_be_the_same_owner() -> None:
     assert learn.same_owner("abc.com", "abc.se")
 
 
-def test_a_login_allows_the_domains_the_site_owner_has() -> None:
+def test_a_login_allows_every_host_it_used_and_groups_the_site_owners_apart() -> None:
     seen = [
         "www.sitex.se",
         "cdn.sitex.com",
@@ -1376,50 +1382,65 @@ def test_a_login_allows_the_domains_the_site_owner_has() -> None:
         "media.sitex.eu",
         "cf-images.sitex.eu",
         "login.sitex.eu",
+        "ok9static.oktacdn.com",
+        "login.okta.com",
         "fonts.gstatic.com",
         "www.google-analytics.com",
         "ads.vendor.example",
         "10.0.0.1",
     ]
     result = learn.classify(SITEX, seen, [])
-    assert result.allow == ("sitex.com", "sitex.eu", "sitex.se")
-    assert result.owned == ("sitex.com", "sitex.eu")
-    assert result.excluded == (
+    assert result.allow == (
         "10.0.0.1",
-        "ads.vendor.example",
+        "cdn.sitex.com",
+        "cf-images.sitex.eu",
+        "sitex.se",
         "fonts.gstatic.com",
-        "www.google-analytics.com",
+        "images2.sitex.eu",
+        "login.sitex.eu",
+        "login.okta.com",
+        "media.sitex.eu",
+        "ok9static.oktacdn.com",
     )
-    assert result.tracking == ("ads.vendor.example", "www.google-analytics.com")
+    assert result.owned == (
+        "cdn.sitex.com",
+        "cf-images.sitex.eu",
+        "images2.sitex.eu",
+        "login.sitex.eu",
+        "media.sitex.eu",
+    )
+    assert result.excluded == ("ads.vendor.example", "www.google-analytics.com")
+    assert result.tracking == result.excluded
 
 
-def test_a_host_that_only_redirected_through_the_owners_domain_is_allowed_too() -> None:
+def test_a_host_that_only_redirected_is_allowed_unless_it_is_a_tracker() -> None:
     result = learn.classify(SITEX, [], [], ["sso.sitex.eu", "tracker.example"])
-    assert result.allow == ("sitex.eu", "sitex.se")
-    assert result.passed_through == ("tracker.example",)
+    assert result.allow == ("sitex.se", "sso.sitex.eu")
+    assert result.excluded == ("tracker.example",)
 
 
-def test_a_host_the_person_denied_stays_denied_when_it_is_the_owners() -> None:
+def test_a_host_the_person_denied_stays_denied_even_when_it_is_the_owners() -> None:
     result = learn.classify(SITEX, ["cdn.sitex.com", "cdn.sitex.eu"], [])
     before = policy(site="sitex", start=SITEX, allow=("sitex.se",), denied=("sitex.com",))
     saved = learn.merge(before, result, SITEX, NOW)
-    assert saved.allow == ("sitex.eu", "sitex.se")
+    assert saved.allow == ("cdn.sitex.eu", "sitex.se")
     assert saved.denied == ("sitex.com",)
+    assert not sites.allows(saved, "cdn.sitex.com")
     text = learn.summary(saved, result)
-    assert "Also allowed, because they share the site's name: sitex.eu." in text
-    assert "Not allowed, because they are on the denied list: sitex.com." in text
+    assert " The site's own domains: cdn.sitex.eu, sitex.se." in text
+    assert "Not allowed, because they are on the denied list: cdn.sitex.com." in text
 
 
-def test_an_exclusion_under_an_owned_domain_is_a_carve_out_that_stays() -> None:
+def test_a_denied_host_under_an_allowed_one_is_a_carve_out_that_stays() -> None:
     result = learn.classify(SITEX, ["cdn.sitex.com"], [])
     before = policy(site="sitex", start=SITEX, allow=("sitex.se",), denied=("cdn.sitex.com",))
     saved = learn.merge(before, result, SITEX, NOW)
-    assert saved.allow == ("sitex.com", "sitex.se")
+    assert saved.allow == ("sitex.se",)
     assert saved.denied == ("cdn.sitex.com",)
     assert not sites.allows(saved, "cdn.sitex.com")
 
 
-def test_the_summary_sorts_what_was_left_out() -> None:
+def test_the_summary_groups_the_hosts_and_counts_the_tracking() -> None:
     seen = [
         "cdn.sitex.com",
         "fonts.gstatic.com",
@@ -1432,10 +1453,10 @@ def test_the_summary_sorts_what_was_left_out() -> None:
     saved = learn.merge(None, result, SITEX, NOW, site="sitex")
     text = learn.summary(saved, result)
     assert text == (
-        "Saved your sitex login. Sessions will be limited to sitex.se and sitex.com. "
-        "Also allowed, because they share the site's name: sitex.com. "
-        "Left out, because the pages used them (CDNs, services): fonts.gstatic.com, js.stripe.com. "
-        "Run `valetkey allow sitex HOST` for any the site needs. "
+        "Saved your sitex login. Sessions will be limited to the hosts it used, apart from "
+        "ads and tracking. The site's own domains: cdn.sitex.com, sitex.se. "
+        "Other services the pages used: fonts.gstatic.com, js.stripe.com. "
+        "Run `valetkey deny sitex HOST` for any you do not want. "
         "Left out 3 ads and tracking hosts."
     )
 
@@ -1452,6 +1473,23 @@ def test_the_summary_sorts_what_was_left_out() -> None:
         ("analytics.example.co.uk", True),
         ("cdn.example.com", False),
         ("fonts.gstatic.com", False),
+        ("login.okta.com", False),
+        ("ok9static.oktacdn.com", False),
+        ("dev-123.okta.com", False),
+        ("tenant.auth0.com", False),
+        ("cdn.auth0.com", False),
+        ("login.microsoftonline.com", False),
+        ("aadcdn.msauth.net", False),
+        ("login.live.com", False),
+        ("accounts.google.com", False),
+        ("ssl.gstatic.com", False),
+        ("d111111abcdef8.cloudfront.net", False),
+        ("a248.e.akamai.net", False),
+        ("static.akamaized.net", False),
+        ("global.fastly.net", False),
+        ("connect.facebook.net", False),
+        ("www.linkedin.com", False),
+        ("js.stripe.com", False),
         ("adsense-help.example.com", False),
         ("badge.example.com", False),
         ("ads.com", True),

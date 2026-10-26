@@ -568,9 +568,7 @@ class Policy:
     the pages used that it did not allow); a login builds it again each time. ``denied`` lists
     hosts the person turned down, with ``valetkey deny``; a login never changes it and never
     allows a host it blocks. A host under an entry of either list is refused even when an
-    ``allow`` entry also covers it. A policy file written before ``denied`` existed has none, and
-    its ``excluded`` entries become ``denied`` when it is read, because nothing says which of them
-    the person chose.
+    ``allow`` entry also covers it. A policy file written before ``denied`` existed has none.
     ``learned`` is when the lists were last built, in UTC with whole seconds, or ``None``.
     ``login_pages`` are the pages (as :func:`page_key` writes them, ``host/path``) a form was
     submitted from during the login, other than the start page and the page the login ended
@@ -764,8 +762,8 @@ def load_policy(roots: Roots, site: str) -> Policy:
 
     The file must be a JSON object with the keys ``site``, ``start``, ``allow``, ``excluded``
     and ``learned``, and may also have ``denied``, ``login_pages`` and ``private_networks``. A
-    file without ``denied`` is one from before it existed: its ``excluded`` entries are read as
-    ``denied``, the safe reading, and ``excluded`` is empty until a login fills it. Missing keys and
+    file without ``denied`` is one from before it existed: it has none, and its ``excluded``
+    entries stay what a login left out, built again by the next login. Missing keys and
     unknown keys are both errors, and ``site`` must equal the file name.
 
     Raises:
@@ -789,14 +787,12 @@ def load_policy(roots: Roots, site: str) -> Policy:
         if data["site"] != site:
             msg = f"site is {data['site']!r} but the file is named for {site!r}"
             raise PolicyError(msg)
-        excluded = _hosts(data, "excluded")
-        denied = _hosts(data, "denied") if "denied" in data else excluded
         return Policy(
             site=_text(data, "site"),
             start=_text(data, "start"),
             allow=_hosts(data, "allow"),
-            excluded=excluded if "denied" in data else (),
-            denied=denied,
+            excluded=_hosts(data, "excluded"),
+            denied=_hosts(data, "denied") if "denied" in data else (),
             learned=_learned(data["learned"]),
             login_pages=_hosts(data, "login_pages") if "login_pages" in data else (),
             private_networks=(
