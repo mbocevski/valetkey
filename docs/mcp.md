@@ -116,6 +116,20 @@ With neither, nobody can be asked, and the agent tells you to run `valetkey allo
 - `not_eligible`: the host cannot be asked about, either because it was not refused for this site
   or because its name is allowed but it resolves to a private address. The message says which.
 
+## A client that cannot show questions
+
+MCP lets a client show you a question or a link; the feature is called elicitation. Some clients
+do not declare it, and valetkey checks what the client declared instead of assuming.
+
+- To ask for a host, the daemon runs your `approve_command` if you set one. If not,
+  `browser_allow` returns `could_not_ask` with the exact `valetkey allow SITE HOST` command
+  (SITE names the account, such as `sitex:work`), and the agent tells you to run it. Nothing is
+  allowed until you do, or the command says yes.
+- For a login in a web browser, the client cannot show you the link, and the link never goes to
+  the agent. The result of `browser_login` tells the agent to ask you to run `valetkey status` on
+  that machine, which prints the link and the `ssh -L` line. See [remote logins](remote.md).
+- A login on your own screen or laptop needs neither.
+
 ## Private networks
 
 A host that resolves to a private address is refused even when its name is allowed. This is true of
