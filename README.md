@@ -227,9 +227,9 @@ daemon keeps running so several clients can share it.
 The tools are `browser_sites`, `browser_login`, `browser_open`, `browser_snapshot`,
 `browser_click`, `browser_type`, `browser_navigate`, `browser_downloads`, `browser_screenshot` and
 `browser_close`. `browser_click` finds its element again when it clicks and can check an `expect`ed
-outcome. Downloads never replace an older file. Nothing runs scripts, changes launch options or edits a
-site's hosts. When a page needs a host that is not
-allowed, you decide with `valetkey allow SITE HOST`.
+outcome. `browser_open` says when a saved login has expired. Nothing runs scripts, changes launch
+options or edits a site's hosts. A host that is not allowed is for you to decide, with
+`valetkey allow SITE HOST`.
 
 <!-- begin: valetkey mcp --help -->
 ```text

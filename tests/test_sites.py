@@ -553,10 +553,10 @@ def good(**changes: object) -> str:
     [
         ("", "Expecting value"),
         ("{", "Expecting"),
-        ("[]", "exactly the keys"),
-        ("null", "exactly the keys"),
-        ('{"site": "sitex"}', "exactly the keys"),
-        (good(extra=1), "exactly the keys"),
+        ("[]", "expected an object with the keys"),
+        ("null", "expected an object with the keys"),
+        ('{"site": "sitex"}', "expected an object with the keys"),
+        (good(extra=1), "expected an object with the keys"),
         (good(site="other"), "named for"),
         (good(site=5), "named for"),
         (good(start=5), "start must be a string"),
@@ -603,3 +603,80 @@ def test_module_exports_are_importable() -> None:
 )
 def test_excluded_conflicts(excluded: str, allow: list[str], *, expected: bool) -> None:
     assert sites.excluded_conflicts(excluded, allow) is expected
+
+
+# -- pages and login pages -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "key"),
+    [
+        ("https://SiteX.com/", "sitex.com/"),
+        ("https://sitex.com", "sitex.com/"),
+        ("http://sitex.com:8080/login?next=/a#frag", "sitex.com/login"),
+        ("https://user:pw@sitex.com/a/b/", "sitex.com/a/b"),
+        ("https://sitex.com/a//b", "sitex.com/a//b"),
+        ("https://sitex.com./x", "sitex.com/x"),
+        ("https://[::1]/x", "::1/x"),
+        ("ftp://sitex.com/x", None),
+        ("about:blank", None),
+        ("chrome-error://chromewebdata/", None),
+        ("https:///x", None),
+        ("https://exa mple.com/", None),
+        ("http://[::1/", None),
+        ("", None),
+    ],
+)
+def test_page_key(url: str, key: str | None) -> None:
+    assert sites.page_key(url) == key
+
+
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        ("sitex.com/", True),
+        ("sitex.com/login", True),
+        ("login.okta.com/signin/v2/identifier", True),
+        ("sitex.com", False),
+        ("sitex.com/login/", False),
+        ("sitex.com/login?x=1", False),
+        ("sitex.com/login#top", False),
+        ("sitex.com/a b", False),
+        ("sitex.com//x", False),
+        ("Sitex.com/login", False),
+        ("/login", False),
+        ("", False),
+        ("sitex.com/\nx", False),
+    ],
+)
+def test_is_page_key(value: str, valid: bool) -> None:  # noqa: FBT001
+    assert sites.is_page_key(value) is valid
+
+
+def test_login_pages_round_trip_and_are_left_out_when_there_are_none(roots: Roots) -> None:
+    plain = policy()
+    assert "login_pages" not in sites.policy_json(plain)
+    with_pages = policy(login_pages=("sitex.com/login", "login.okta.com/signin"))
+    save_policy(roots, with_pages)
+    assert load_policy(roots, "sitex").login_pages == ("sitex.com/login", "login.okta.com/signin")
+    assert json.loads(sites.policy_json(with_pages))["login_pages"] == [
+        "sitex.com/login",
+        "login.okta.com/signin",
+    ]
+
+
+def test_a_policy_file_from_before_login_pages_still_loads(roots: Roots) -> None:
+    write_policy_file(roots, "sitex", HAND_WRITTEN)
+    assert load_policy(roots, "sitex").login_pages == ()
+
+
+@pytest.mark.parametrize("pages", [("sitex.com",), ("sitex.com/login?x=1",), ("",), (5,)])
+def test_bad_login_pages_are_rejected(pages: tuple[object, ...]) -> None:
+    with pytest.raises(ValueError, match="host/path"):
+        policy(login_pages=pages)
+
+
+def test_login_pages_must_be_a_list_of_strings(roots: Roots) -> None:
+    write_policy_file(roots, "sitex", good(login_pages="sitex.com/login"))
+    with pytest.raises(PolicyError, match="login_pages must be a list of strings"):
+        load_policy(roots, "sitex")

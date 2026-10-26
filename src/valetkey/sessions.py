@@ -644,6 +644,14 @@ class Session:
         self._call("press", "Control+Home")
         self._call("press", "Delete")
 
+    def password_fields(self) -> int:
+        """Count the password fields on the page, visible or not.
+
+        The accessibility tree does not say which text box is a password field, so this asks the
+        browser to count ``input[type=password]``.
+        """
+        return int(self._call("get", "count", "input[type=password]").get("count") or 0)
+
     def clear_requests(self) -> None:
         """Forget the network requests logged so far, so the next count starts from here."""
         self._call("network", "requests", "--clear")

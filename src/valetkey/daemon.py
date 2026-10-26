@@ -86,6 +86,7 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import struct
 from collections import Counter
 from dataclasses import dataclass, field
@@ -93,7 +94,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 from urllib.parse import urlsplit
 
-from valetkey import clicks, client, downloads, learn, login, sandbox, sessions, sites
+from valetkey import clicks, client, downloads, expiry, learn, login, sandbox, sessions, sites
 from valetkey.client import MAX_LINE_BYTES, DaemonError
 from valetkey.proxy import Mode, Proxy
 
@@ -150,6 +151,9 @@ class BrowserSession(Protocol):
 
     def click(self, ref: str) -> None:
         """Click ``ref``."""
+
+    def password_fields(self) -> int:
+        """Count the password fields on the page."""
 
     def clear_requests(self) -> None:
         """Forget the logged network requests."""
@@ -774,6 +778,7 @@ class Daemon:
                     "state": state.kind,
                     "start": policy.start if policy else state.start,
                     "allow": list(policy.allow) if policy else [],
+                    "excluded": list(policy.excluded) if policy else [],
                     "learned": policy.learned.strftime("%Y-%m-%dT%H:%M:%SZ")
                     if policy and policy.learned
                     else None,
@@ -839,13 +844,20 @@ class Daemon:
                     learn.navigation_hosts, profile / "Default" / "History"
                 )
                 classification = learn.classify(start, [h.host for h in seen], navigated)
+                pages: tuple[str, ...] = ()
+                with contextlib.suppress(sqlite3.DatabaseError):  # the extra is optional
+                    pages = await asyncio.to_thread(
+                        learn.login_pages, profile / "Default" / "History", start
+                    )
                 try:
                     existing: sites.Policy | None = await asyncio.to_thread(
                         sites.load_policy, self.roots, state.name
                     )
                 except FileNotFoundError:
                     existing = None
-                policy = learn.merge(existing, classification, start, self._now(), state.name)
+                policy = learn.merge(
+                    existing, classification, start, self._now(), site=state.name, pages=pages
+                )
                 await asyncio.to_thread(sites.save_policy, self.roots, policy)
             except Exception as error:
                 logger.exception("could not save the login for %s", state.name)
@@ -876,21 +888,32 @@ class Daemon:
             if state.kind == "session" and not (state.session and state.session.is_alive()):
                 await self._end(state)
             reused = state.kind == "session"
-            if not reused:
-                await self._begin_session(state)
+            policy = None if reused else await self._begin_session(state)
             session = cast("BrowserSession", state.session)
-            if not reused:
+            if policy is not None:
                 # The opener sees the start-up refusals, but not the background ones.
                 connection.cursors[site] = (state.generation, 0, 0)
                 url, title = session.first_page.url, session.first_page.title
             else:
                 url, title = await asyncio.to_thread(session.current_url), ""
             result = self._envelope(connection, state, url)
+            if policy is not None:
+                reason = await asyncio.to_thread(
+                    expiry.login_expired, policy, url, session.password_fields
+                )
+                if reason is not None:
+                    # A session on a sign-in page is no use, and would block logging in again.
+                    await self._end(state)
+                    result["login_expired"] = True
+                    result["message"] = (
+                        f"The saved login for {site} has expired: {reason}. Log in to {site} "
+                        "again, then open it again."
+                    )
         result["reused"] = reused
         result["page"] = {"title": untrusted(title)}
         return result
 
-    async def _begin_session(self, state: _Site) -> None:
+    async def _begin_session(self, state: _Site) -> sites.Policy:
         policy = await self._load_policy(state.name)
         paths = sessions.session_paths(self.roots, state.name)
         await asyncio.to_thread(make_private_dirs, paths.proxy_socket.parent)
@@ -916,6 +939,7 @@ class Daemon:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
         self._end_startup_burst(state, proxy)
+        return policy
 
     def _end_startup_burst(self, state: _Site, proxy: Proxy) -> None:
         """Mark the background refusals made so far as start-up noise, after the grace period."""

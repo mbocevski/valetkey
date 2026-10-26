@@ -206,6 +206,7 @@ class FakeSession:
         self.on_open: Callable[[], None] | None = None
         self.abort_with: Path | None = None
         self.attached = 0
+        self.passwords = 0
         self.attach_error: Exception | None = None
         self.active = 0
         self.most_active = 0
@@ -253,6 +254,10 @@ class FakeSession:
     def press_enter(self) -> None:
         self._use("press_enter")
 
+    def password_fields(self) -> int:
+        self.calls.append(("password_fields",))
+        return self.passwords
+
     def clear_requests(self) -> None:
         self.calls.append(("clear_requests",))
 
@@ -290,6 +295,8 @@ class Factory:
         self.fail: Exception | None = None
         self.delay = 0.0
         self.during_start: Callable[[Path], None] | None = None
+        self.landing: str | None = None
+        self.passwords = 0
 
     def __call__(
         self, _roots: sites.Roots, site: str, url: str, proxy_socket: Path
@@ -300,7 +307,8 @@ class Factory:
         time.sleep(self.delay)
         if self.fail is not None:
             raise self.fail
-        session = FakeSession(url)
+        session = FakeSession(self.landing or url)
+        session.passwords = self.passwords
         self.made.append(session)
         return session
 
@@ -876,6 +884,7 @@ def test_a_login_learns_a_policy_and_reports_it_once(roots: sites.Roots) -> None
                     "state": "login",
                     "start": "https://newsite.test/signin",
                     "allow": [],
+                    "excluded": [],
                     "learned": None,
                     "summary": None,
                 }
@@ -901,6 +910,7 @@ def test_a_login_learns_a_policy_and_reports_it_once(roots: sites.Roots) -> None
             assert policy.start == "https://newsite.test/signin"
             assert policy.allow == ("login.okta.test", "newsite.test")
             assert policy.excluded == ("o1.sentry.test",)
+            assert policy.login_pages == ()  # this history has no form submissions to learn from
             assert policy.learned == NOW
             listing = await c.call("sites")
             (entry,) = listing["sites"]
@@ -1523,6 +1533,110 @@ def test_the_daemon_command_uses_a_socket_from_systemd(short_dir: Path) -> None:
                 process.wait()
             if process.stderr is not None:
                 process.stderr.close()
+
+
+def add_login_site(roots: sites.Roots, *pages: str) -> None:
+    sites.save_policy(
+        roots,
+        sites.Policy("sitex", "https://sitex.test/", ("sitex.test",), login_pages=pages),
+    )
+
+
+def test_a_start_url_that_ends_on_a_recorded_login_page_means_the_login_expired(
+    roots: sites.Roots,
+) -> None:
+    add_login_site(roots, "sitex.test/login")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            rig.factory.landing = "https://sitex.test/login?next=%2F"
+            result = await c.call("open", site="sitex")
+            assert result["login_expired"] is True
+            assert "has expired" in result["message"]
+            assert "sitex" in result["message"]
+            assert result["url"] == "https://sitex.test/login?next=%2F"
+            assert result["site"] == "sitex"
+            # The useless session is gone, so logging in again is not blocked by it.
+            assert rig.factory.made[0].closed == 1
+            assert (await c.call("status", site="sitex"))["state"] == "idle"
+            assert (await c.call("login", target="sitex"))["window"] == "open"
+
+    run(scenario())
+
+
+def test_a_redirect_to_a_password_page_means_the_login_expired(roots: sites.Roots) -> None:
+    add_login_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            rig.factory.landing = "https://sso.sitex.test/enter"
+            rig.factory.passwords = 1
+            result = await c.call("open", site="sitex")
+            assert result["login_expired"] is True
+            assert "password field" in result["message"]
+            assert (await c.call("status", site="sitex"))["state"] == "idle"
+
+    run(scenario())
+
+
+def test_a_working_login_is_never_reported_as_expired(roots: sites.Roots) -> None:
+    add_login_site(roots, "sitex.test/login")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            # A redirect inside the site to a normal page.
+            rig.factory.landing = "https://sitex.test/welcome"
+            normal = await c.call("open", site="sitex")
+            assert "login_expired" not in normal
+            assert (await c.call("status", site="sitex"))["state"] == "session"
+            await c.call("close", site="sitex")
+            # No redirect at all, on a start page that has a login box.
+            rig.factory.landing = None
+            rig.factory.passwords = 1
+            public = await c.call("open", site="sitex")
+            assert "login_expired" not in public
+            assert "password_fields" not in [call[0] for call in rig.factory.made[1].calls]
+            # Joining a running session checks nothing.
+            rig.factory.made[1].url = "https://sitex.test/login"
+            async with await rig.connect() as other:
+                joined = await other.call("open", site="sitex")
+            assert joined["reused"] is True
+            assert "login_expired" not in joined
+
+    run(scenario())
+
+
+def test_a_login_records_where_forms_were_submitted_from(roots: sites.Roots) -> None:
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("login", target="https://newsite.test/")
+            (window,) = rig.logins.windows
+            profile = roots.state / "profile"
+            (profile / "Default").mkdir(parents=True)
+            database = sqlite3.connect(profile / "Default" / "History")
+            database.executescript(
+                "CREATE TABLE urls(id INTEGER PRIMARY KEY, url TEXT);"
+                "CREATE TABLE visits(id INTEGER PRIMARY KEY, url INTEGER, visit_time INTEGER,"
+                " from_visit INTEGER, transition INTEGER);"
+            )
+            steps = [
+                ("https://newsite.test/", 1, None),
+                ("https://newsite.test/login", 1, 1),
+                ("https://newsite.test/app", 7, 2),
+            ]
+            for number, (url, transition, origin) in enumerate(steps, start=1):
+                database.execute("INSERT INTO urls VALUES (?, ?)", (number, url))
+                database.execute(
+                    "INSERT INTO visits VALUES (?, ?, ?, ?, ?)",
+                    (number, number, number, origin, transition),
+                )
+            database.commit()
+            database.close()
+            await window.close_window([SeenHost("newsite.test", 3)], profile)
+            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            assert sites.load_policy(roots, "newsite").login_pages == ("newsite.test/login",)
+
+    run(scenario())
 
 
 def test_a_verified_click_through_the_daemon(

@@ -376,3 +376,119 @@ def test_real_chromium_history_has_the_columns_the_query_reads(tmp_path: Path) -
     if not path.is_file():
         pytest.skip("this Chromium wrote no history")
     assert isinstance(learn.navigation_hosts(path), set)
+
+
+# -- the pages a login submitted a form from -----------------------------------------------
+
+FORM_SUBMIT = 7
+type Step = tuple[str, int, int | None]
+"""A visit: the URL, the transition, and the 1-based number of the visit it came from."""
+
+
+def history_of_steps(tmp_path: Path, steps: list[Step]) -> Path:
+    path = tmp_path / "History"
+    database = build(path, [(url, transition) for url, transition, _ in steps])
+    for number, (_, _, origin) in enumerate(steps, start=1):
+        database.execute("UPDATE visits SET from_visit = ? WHERE id = ?", (origin, number))
+    database.commit()
+    database.close()
+    return path
+
+
+def test_the_login_page_is_where_the_form_was_submitted_from(tmp_path: Path) -> None:
+    path = history_of_steps(
+        tmp_path,
+        [
+            ("https://sitex.com/", TYPED | CHAIN_START, None),
+            ("https://sitex.com/login?next=%2F", TYPED | CHAIN_END | SERVER_REDIRECT, 1),
+            ("https://sitex.com/app", FORM_SUBMIT | CHAIN_START | CHAIN_END, 2),
+        ],
+    )
+    assert learn.login_pages(path, "https://sitex.com/") == ("sitex.com/login",)
+
+
+def test_every_page_of_a_sign_in_flow_counts_but_not_the_pages_around_it(tmp_path: Path) -> None:
+    path = history_of_steps(
+        tmp_path,
+        [
+            ("https://sitex.com/", TYPED, None),
+            ("https://login.okta.com/signin?x=1#top", LINK, 1),
+            ("https://login.okta.com/mfa/", FORM_SUBMIT, 2),
+            ("https://login.okta.com/done", FORM_SUBMIT, 3),
+            ("https://sitex.com/callback?code=abc", LINK, 4),
+            ("https://sitex.com/app/", LINK, 5),
+        ],
+    )
+    assert learn.login_pages(path, "https://sitex.com/") == (
+        "login.okta.com/mfa",
+        "login.okta.com/signin",
+    )
+
+
+def test_the_start_page_and_the_final_page_are_never_login_pages(tmp_path: Path) -> None:
+    path = history_of_steps(
+        tmp_path,
+        [
+            ("https://sitex.com/", TYPED, None),
+            ("https://sitex.com/login", LINK, 1),
+            ("https://sitex.com/app", FORM_SUBMIT, 1),
+            ("https://sitex.com/app", LINK, 3),
+            ("https://sitex.com/search?q=x", FORM_SUBMIT, 4),
+            ("https://sitex.com/app", LINK, 5),
+        ],
+    )
+    # "/" held a form and so did "/app", the page the login ended on; neither can be a login page.
+    assert learn.login_pages(path, "https://sitex.com/") == ()
+
+
+def test_a_form_in_a_frame_is_not_a_login_page(tmp_path: Path) -> None:
+    path = history_of_steps(
+        tmp_path,
+        [
+            ("https://sitex.com/", TYPED, None),
+            ("https://ads.example.com/frame", AUTO_SUBFRAME, 1),
+            ("https://sitex.com/thanks", FORM_SUBMIT, 2),
+            ("https://sitex.com/app", LINK, 3),
+        ],
+    )
+    assert learn.login_pages(path, "https://sitex.com/") == ()
+
+
+def test_pages_that_are_not_web_pages_are_ignored(tmp_path: Path) -> None:
+    path = history_of_steps(
+        tmp_path,
+        [
+            ("https://sitex.com/", TYPED, None),
+            ("chrome://settings/", LINK, 1),
+            ("https://sitex.com/app", FORM_SUBMIT, 2),
+        ],
+    )
+    assert learn.login_pages(path, "https://sitex.com/") == ()
+
+
+def test_no_history_means_no_login_pages(tmp_path: Path) -> None:
+    assert learn.login_pages(tmp_path / "missing", "https://sitex.com/") == ()
+    assert learn.login_pages(history_of_steps(tmp_path, []), "https://sitex.com/") == ()
+
+
+def test_a_history_without_visit_origins_is_an_error(tmp_path: Path) -> None:
+    path = tmp_path / "History"
+    database = sqlite3.connect(path)
+    database.executescript(
+        "CREATE TABLE urls(id INTEGER PRIMARY KEY, url TEXT);"
+        "CREATE TABLE visits(id INTEGER PRIMARY KEY, url INTEGER, visit_time INTEGER,"
+        " transition INTEGER);"
+    )
+    database.close()
+    with pytest.raises(sqlite3.DatabaseError):
+        learn.login_pages(path, "https://sitex.com/")
+
+
+def test_merge_records_the_login_pages_and_keeps_old_ones_when_there_are_none() -> None:
+    new = learn.Classification(("sitex.com",), ())
+    first = learn.merge(None, new, START, NOW, pages=["sitex.com/login", "sitex.com/login"])
+    assert first.login_pages == ("sitex.com/login",)
+    kept = learn.merge(first, new, START, NOW)
+    assert kept.login_pages == ("sitex.com/login",)
+    replaced = learn.merge(first, new, START, NOW, pages=["login.okta.com/signin"])
+    assert replaced.login_pages == ("login.okta.com/signin",)

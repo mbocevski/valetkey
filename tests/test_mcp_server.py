@@ -175,23 +175,49 @@ def test_error_text() -> None:
     assert "Refused" not in mcp_server.error_text(DaemonError("x", "y", {"refused": []}))
 
 
+def listing(**changes: Any) -> dict[str, Any]:  # noqa: ANN401
+    return {
+        "site": "a",
+        "state": "idle",
+        "start": "https://a.test/",
+        "allow": ["a.test"],
+        "excluded": [],
+        "learned": "2026-10-25T21:40:00Z",
+        "summary": None,
+    } | changes
+
+
 def test_sites_text() -> None:
     assert "No sites yet" in mcp_server.sites_text([])
     text = mcp_server.sites_text(
         [
-            {
-                "site": "a",
-                "state": "idle",
-                "start": "https://a.test/",
-                "allow": ["a.test"],
-                "summary": "Saved.",
-            },
-            {"site": "b", "state": "login", "start": "", "allow": [], "summary": None},
+            listing(summary="Saved.", excluded=["t.test"]),
+            listing(site="b", state="login", start="", allow=[], learned=None),
+            listing(site="c", state="session"),
         ]
     )
-    assert "- a: idle; starts at https://a.test/\n  May reach: a.test\n  Last login: Saved." in text
-    assert "- b: login; starts at unknown\n  May reach: nothing learned yet" in text
+    assert (
+        "- a: no session; starts at https://a.test/\n"
+        "  Logged in: 2026-10-25 21:40 UTC\n"
+        "  May reach (1): a.test\n"
+        "  Left out (1): t.test\n"
+        "  Last login: Saved."
+    ) in text
+    assert (
+        "- b: login window open; starts at unknown\n  Logged in: never\n"
+        "  May reach: nothing learned yet"
+    ) in text
+    assert "- c: session running;" in text
     assert text.count("Last login") == 1
+    assert text.count("Left out") == 1
+
+
+def test_long_host_lists_are_cut_short() -> None:
+    hosts = [f"h{n}.test" for n in range(9)]
+    text = mcp_server.sites_text([listing(allow=hosts, excluded=hosts[:3])])
+    assert "  May reach (9): h0.test, h1.test, h2.test and 6 more" in text
+    assert "  Left out (3): h0.test, h1.test, h2.test\n" in text + "\n"
+    assert "h3.test" not in text
 
 
 # -- a fake daemon -------------------------------------------------------------------------
@@ -758,6 +784,34 @@ def test_type_can_press_enter(short_dir: Path) -> None:
             assert text_of(plain).endswith("Done.")
             assert text_of(sent).endswith("Done. Pressed Enter.")
             assert [r["args"]["submit"] for r in fake.requests] == [False, True]
+
+    run(scenario())
+
+
+def test_an_expired_login_leads_the_result_with_what_to_do(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["open"] = lambda _a: (
+                ENVELOPE
+                | {
+                    "reused": False,
+                    "page": {"title": {"untrusted": True, "text": "Sign in"}},
+                    "login_expired": True,
+                    "message": "The saved login for sitex has expired: because.",
+                    "url": "https://sitex.test/login",
+                }
+            )
+            result = await mcp.call_tool("browser_open", {"site": "sitex"})
+            assert not result.is_error
+            text = text_of(result)
+            assert text.startswith(
+                "The saved login for sitex has expired. Call browser_login for sitex, "
+                "without asking first, then call browser_open again."
+            )
+            assert "URL: https://sitex.test/login" in text
+            tools = {t.name: t.description or "" for t in (await mcp.list_tools()).tools}
+            assert "saved login has expired" in tools["browser_open"]
+            assert "without asking first" in tools["browser_open"]
 
     run(scenario())
 

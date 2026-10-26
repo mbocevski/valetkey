@@ -304,15 +304,37 @@ def error_text(error: DaemonError) -> str:
     return text
 
 
+_STATES = {"idle": "no session", "login": "login window open", "session": "session running"}
+_SHOWN_HOSTS = 3
+
+
+def _hosts_line(label: str, hosts: list[str]) -> str:
+    """List a few hosts, then how many more there are."""
+    shown = ", ".join(hosts[:_SHOWN_HOSTS])
+    more = len(hosts) - _SHOWN_HOSTS
+    return f"  {label} ({len(hosts)}): {shown}" + (f" and {more} more" if more > 0 else "")
+
+
 def sites_text(listing: list[dict[str, Any]]) -> str:
-    """Describe the known sites, one block each, with the last login summary where there is one."""
+    """Describe the known sites: state, last login, hosts it may reach, hosts left out.
+
+    Long host lists are cut to the first few. The summary of the last login is included when
+    there is one that has not been reported yet.
+    """
     if not listing:
         return "No sites yet. Ask the person which site to log in to, then call browser_login."
     blocks = []
     for entry in listing:
-        allowed = ", ".join(entry["allow"]) or "nothing learned yet"
-        lines = [f"- {entry['site']}: {entry['state']}; starts at {entry['start'] or 'unknown'}"]
-        lines.append(f"  May reach: {allowed}")
+        state = _STATES.get(entry["state"], entry["state"])
+        lines = [f"- {entry['site']}: {state}; starts at {entry['start'] or 'unknown'}"]
+        learned = (entry.get("learned") or "").replace("T", " ").removesuffix(":00Z")
+        lines.append(f"  Logged in: {learned + ' UTC' if learned else 'never'}")
+        if entry["allow"]:
+            lines.append(_hosts_line("May reach", entry["allow"]))
+        else:
+            lines.append("  May reach: nothing learned yet")
+        if entry.get("excluded"):
+            lines.append(_hosts_line("Left out", entry["excluded"]))
         if entry.get("summary"):
             lines.append(f"  Last login: {entry['summary']}")
         blocks.append("\n".join(lines))
@@ -443,8 +465,9 @@ class Bridge:
 
 DESCRIPTIONS = {
     "browser_sites": (
-        "List the sites the person has set up: each one's state, the hosts it may reach, and "
-        "what the last login learned (shown once). Start here."
+        "List the sites the person has set up: each one's state (no session, login window open "
+        "or session running), when they last logged in, the hosts it may reach and the ones "
+        "left out, and what the last login learned (shown once). Start here."
     ),
     "browser_login": (
         "Open a login window on the person's own screen so they can sign in to a site. Returns "
@@ -455,7 +478,9 @@ DESCRIPTIONS = {
         "Start the signed-in browser for a site, or join the one already running, and load its "
         "start page. Every other browser tool needs this first. The browser can reach only the "
         "hosts the site allows. If hosts are refused, tell the person (they can run "
-        "`valetkey allow SITE HOST`) and never try to work around it."
+        "`valetkey allow SITE HOST`) and never try to work around it. If the result says the "
+        "saved login has expired, call browser_login for that site without asking first, then "
+        "call browser_open again."
     ),
     "browser_snapshot": (
         "Read the page: a text tree of what is on it, with references (e1, e2, ...) for the "
@@ -525,7 +550,13 @@ class _Tools:
 
     async def browser_open(self, site: SITE) -> str:
         result = await self._ask("open", site=site)
-        parts = [envelope_text(result)]
+        parts = []
+        if result.get("login_expired"):
+            parts.append(
+                f"The saved login for {site} has expired. Call browser_login for {site}, "
+                "without asking first, then call browser_open again."
+            )
+        parts.append(envelope_text(result))
         if result.get("reused"):
             parts.append("The site's browser was already running; you joined it.")
         parts.append(page_content(untrusted_text(result["page"]["title"])))

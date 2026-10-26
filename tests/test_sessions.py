@@ -364,6 +364,18 @@ def test_attachments_counts_only_successful_attachment_responses(
     assert session.attachments() == 0
 
 
+def test_password_fields_asks_the_browser_to_count_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = FakeRun(answer({"count": 2, "selector": "input[type=password]"}))
+    monkeypatch.setattr(sessions.subprocess, "run", run)
+    session = make_session(tmp_path)
+    assert session.password_fields() == 2
+    assert [argv[2:] for argv, _ in run.calls] == [["get", "count", "input[type=password]"]]
+    monkeypatch.setattr(sessions.subprocess, "run", FakeRun(answer({})))
+    assert session.password_fields() == 0
+
+
 def test_start_leaves_a_fresh_private_incoming_folder(tmp_path: Path) -> None:
     roots = make_roots(tmp_path)
     paths = sessions.session_paths(roots, "demo")
@@ -524,7 +536,7 @@ def test_the_session_has_no_eval_or_passthrough() -> None:
     public = {n for n in dir(sessions.Session) if not n.startswith("_")}
     assert public == {
         "start", "is_alive", "close", "open", "snapshot", "outline", "click", "fill", "press_enter",
-        "current_url", "screenshot", "clear_requests", "attachments",
+        "current_url", "screenshot", "clear_requests", "attachments", "password_fields",
     }  # fmt: skip
 
 

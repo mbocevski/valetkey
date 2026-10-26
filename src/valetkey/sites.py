@@ -46,6 +46,7 @@ _HOST_RE = re.compile(
 _LEARNED_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 _LEARNED_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _POLICY_KEYS = ("site", "start", "allow", "excluded", "learned")
+_OPTIONAL_POLICY_KEYS = ("login_pages",)
 
 # Suffixes made of two labels under which people register their own name (``example.co.uk``).
 # This is a small stand-in for the public suffix list: a host under any other suffix is taken to
@@ -174,6 +175,37 @@ def host_of(value: str) -> str:
         msg = f"cannot read a host from {value!r}"
         raise ValueError(msg)
     return host
+
+
+def page_key(url: str) -> str | None:
+    """Return ``host/path`` for an HTTP or HTTPS ``url``, or ``None`` for anything else.
+
+    The host is normalized, and the query, the fragment, the port, any credentials and a
+    trailing slash on the path are left out, so two URLs of the same page compare equal. The
+    root path is ``/``.
+    """
+    try:
+        parts = urlsplit(url)
+        host = normalize_host(parts.hostname or "")
+    except ValueError:
+        return None
+    if parts.scheme not in {"http", "https"} or not is_plausible_host(host):
+        return None
+    path = parts.path.rstrip("/") or "/"
+    return f"{host}{path}" if path != "/" else f"{host}/"
+
+
+def is_page_key(value: str) -> bool:
+    """Tell whether ``value`` is what :func:`page_key` returns."""
+    host, slash, path = value.partition("/")
+    return bool(
+        slash
+        and is_plausible_host(host)
+        and value.isprintable()
+        and not any(c in value for c in "?# ")
+        and (path == "" or not path.endswith("/"))
+        and "//" not in value
+    )
 
 
 def registrable_domain(host: str, suffixes: frozenset[str] = TWO_LEVEL_SUFFIXES) -> str:
@@ -346,6 +378,10 @@ class Policy:
     ``excluded`` lists hosts that were seen and judged not needed (trackers, error reporting); a
     host under an excluded entry is refused even when an ``allow`` entry also covers it.
     ``learned`` is when the lists were last built, in UTC with whole seconds, or ``None``.
+    ``login_pages`` are the pages (as :func:`page_key` writes them, ``host/path``) a form was
+    submitted from during the login, other than the start page and the page the login ended
+    on. A start URL that ends on one of them means the login has expired. It is optional, and a
+    policy written before it existed has none.
 
     Construction validates every field and raises ``ValueError`` on a bad one.
     """
@@ -355,6 +391,7 @@ class Policy:
     allow: tuple[str, ...]
     excluded: tuple[str, ...] = ()
     learned: datetime | None = None
+    login_pages: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate the fields."""
@@ -371,6 +408,10 @@ class Policy:
         if learned is not None and (learned.utcoffset() != timedelta(0) or learned.microsecond):
             msg = "learned must be a UTC time with whole seconds"
             raise ValueError(msg)
+        for page in self.login_pages:
+            if not (isinstance(page, str) and is_page_key(page)):
+                msg = f"not a page like host/path, without query or fragment: {page!r}"
+                raise ValueError(msg)
 
 
 def _validate_start(start: str) -> None:
@@ -441,9 +482,9 @@ def allows(policy: Policy, host: str) -> bool:
 def load_policy(roots: Roots, site: str) -> Policy:
     """Read and validate ``site``'s policy file.
 
-    The file must be a JSON object with exactly the keys ``site``, ``start``, ``allow``,
-    ``excluded`` and ``learned``. Missing keys and unknown keys are both errors, and ``site``
-    must equal the file name.
+    The file must be a JSON object with the keys ``site``, ``start``, ``allow``, ``excluded``
+    and ``learned``, and may also have ``login_pages``. Missing keys and unknown keys are both
+    errors, and ``site`` must equal the file name.
 
     Raises:
         FileNotFoundError: when the site has no policy file.
@@ -454,8 +495,14 @@ def load_policy(roots: Roots, site: str) -> Policy:
     text = path.read_text(encoding="utf-8")
     try:
         data = json.loads(text)
-        if not isinstance(data, dict) or set(data) != set(_POLICY_KEYS):
-            msg = f"expected an object with exactly the keys {', '.join(_POLICY_KEYS)}"
+        keys = set(data) if isinstance(data, dict) else set()
+        if not isinstance(data, dict) or not (
+            set(_POLICY_KEYS) <= keys <= {*_POLICY_KEYS, *_OPTIONAL_POLICY_KEYS}
+        ):
+            msg = (
+                f"expected an object with the keys {', '.join(_POLICY_KEYS)} "
+                f"and perhaps {', '.join(_OPTIONAL_POLICY_KEYS)}"
+            )
             raise PolicyError(msg)
         if data["site"] != site:
             msg = f"site is {data['site']!r} but the file is named for {site!r}"
@@ -466,6 +513,7 @@ def load_policy(roots: Roots, site: str) -> Policy:
             allow=_hosts(data, "allow"),
             excluded=_hosts(data, "excluded"),
             learned=_learned(data["learned"]),
+            login_pages=_hosts(data, "login_pages") if "login_pages" in data else (),
         )
     except ValueError as exc:
         msg = f"{path}: {exc}"
@@ -507,6 +555,8 @@ def policy_json(policy: Policy) -> str:
         "excluded": list(policy.excluded),
         "learned": None if learned is None else learned.strftime(_LEARNED_FORMAT),
     }
+    if policy.login_pages:
+        data["login_pages"] = list(policy.login_pages)
     return json.dumps(data, indent=2) + "\n"
 
 

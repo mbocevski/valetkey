@@ -35,7 +35,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from valetkey import sites
@@ -54,6 +54,18 @@ _QUERY = (
 )
 
 
+# A form submission is core type 7; the visit it came from is the page that held the form.
+_FORM_ORIGINS = (
+    "SELECT p.url FROM visits AS v JOIN visits AS f ON f.id = v.from_visit "
+    "JOIN urls AS p ON p.id = f.url "
+    "WHERE (v.transition & 255) = 7 AND (f.transition & 255) NOT IN (3, 4)"
+)
+_LAST_PAGE = (
+    "SELECT u.url FROM visits AS v JOIN urls AS u ON u.id = v.url "
+    "WHERE (v.transition & 255) NOT IN (3, 4) ORDER BY v.visit_time DESC, v.id DESC LIMIT 1"
+)
+
+
 @dataclass(frozen=True, slots=True)
 class Classification:
     """Hosts sorted by what the login did with them.
@@ -67,21 +79,12 @@ class Classification:
     excluded: tuple[str, ...]
 
 
-def navigation_hosts(history_path: Path) -> set[str]:
-    """Return the hosts of the top-level pages a profile's history recorded.
+def _query_history(history_path: Path, *queries: str) -> list[list[tuple[Any, ...]]]:
+    """Run ``queries`` on a copy of the history database and return their rows.
 
-    A visit counts unless it is a subframe load, so each hop of a redirect chain counts. Only
-    ``http`` and ``https`` pages count. The database is copied, with its ``-wal`` and
-    ``-journal`` files, to a temporary directory and opened read-only there, so a browser that
-    still holds the live file is never disturbed. A missing file gives an empty set: the profile
-    has no history yet.
-
-    Raises:
-        sqlite3.DatabaseError: when the file is not a Chromium history database.
-
+    The database is copied, with its ``-wal`` and ``-journal`` files, to a temporary directory
+    and opened read-only there, so a browser that still holds the live file is never disturbed.
     """
-    if not history_path.is_file():
-        return set()
     with tempfile.TemporaryDirectory(prefix="valetkey-history-") as scratch:
         copy = Path(scratch) / "History"
         shutil.copyfile(history_path, copy)
@@ -90,13 +93,52 @@ def navigation_hosts(history_path: Path) -> set[str]:
             if source.is_file():
                 shutil.copyfile(source, copy.with_name(copy.name + side))
         with contextlib.closing(sqlite3.connect(f"{copy.as_uri()}?mode=ro", uri=True)) as database:
-            urls = [row[0] for row in database.execute(_QUERY)]
+            return [list(database.execute(query)) for query in queries]
+
+
+def navigation_hosts(history_path: Path) -> set[str]:
+    """Return the hosts of the top-level pages a profile's history recorded.
+
+    A visit counts unless it is a subframe load, so each hop of a redirect chain counts. Only
+    ``http`` and ``https`` pages count. A missing file gives an empty set: the profile has no
+    history yet.
+
+    Raises:
+        sqlite3.DatabaseError: when the file is not a Chromium history database.
+
+    """
+    if not history_path.is_file():
+        return set()
     hosts: set[str] = set()
-    for url in urls:
+    for (url,) in _query_history(history_path, _QUERY)[0]:
         if urlsplit(url or "").scheme in {"http", "https"}:
             with contextlib.suppress(ValueError):
                 hosts.add(sites.host_of(url))
     return hosts
+
+
+def login_pages(history_path: Path, start_url: str) -> tuple[str, ...]:
+    """Return the pages a form was submitted from during a login, as ``host/path`` keys.
+
+    These are the pages where credentials, or a second factor, were entered: the page a
+    form-submit navigation came from. That is a navigation Chromium marks as a form submission
+    (core type 7), and its ``from_visit`` is the visit of the page that held the form. Sign-in
+    pages are the only top-level pages that reliably have this in common across sites.
+
+    Two pages are left out. The start page, because a start URL that is not redirected ends on
+    itself and must not look like a login page. And the page the login ended on (the last
+    top-level visit), which is where a signed-in person lands. A missing file gives ``()``.
+
+    Raises:
+        sqlite3.DatabaseError: when the file is not a Chromium history database.
+
+    """
+    if not history_path.is_file():
+        return ()
+    origins, last = _query_history(history_path, _FORM_ORIGINS, _LAST_PAGE)
+    skipped = {sites.page_key(start_url), *(sites.page_key(url or "") for (url,) in last)}
+    keys = {sites.page_key(url or "") for (url,) in origins}
+    return tuple(sorted(key for key in keys - skipped if key is not None))
 
 
 def classify(
@@ -135,12 +177,14 @@ def _hosts(values: Iterable[str]) -> set[str]:
     return found
 
 
-def merge(
+def merge(  # noqa: PLR0913  # the last two are keyword-only extras with defaults
     existing: sites.Policy | None,
     classification: Classification,
     start_url: str,
     now: datetime,
+    *,
     site: str | None = None,
+    pages: Iterable[str] = (),
 ) -> sites.Policy:
     """Fold ``classification`` into ``existing``, keeping everything already approved.
 
@@ -149,7 +193,9 @@ def merge(
     :func:`valetkey.sites.excluded_conflicts`). An excluded host under an allowed domain stays: the
     person carved it out with ``valetkey deny``. ``start`` becomes ``start_url`` and ``learned``
     becomes ``now`` in UTC, rounded down to whole seconds (``now`` must carry a time zone). The
-    site name is ``existing``'s, else ``site``, else one derived from ``start_url``.
+    site name is ``existing``'s, else ``site``, else one derived from ``start_url``. ``pages`` are
+    the login pages this login recorded (see :func:`login_pages`); they replace the old ones, and
+    if none were recorded the old ones are kept.
     """
     old_allow = existing.allow if existing else ()
     old_excluded = existing.excluded if existing else ()
@@ -168,6 +214,7 @@ def merge(
         allow=allow,
         excluded=excluded,
         learned=now.astimezone(UTC).replace(microsecond=0),
+        login_pages=tuple(sorted(set(pages))) or (existing.login_pages if existing else ()),
     )
 
 
