@@ -709,8 +709,12 @@ def test_valetkey_executable_is_absolute_and_unresolved(tmp_path: Path) -> None:
     assert cli.valetkey_executable(lambda _name: "bin/valetkey") == str(
         Path("bin/valetkey").absolute()
     )
-    with pytest.raises(cli.CommandError, match="not on PATH"):
+    with pytest.raises(cli.CommandError, match="not on PATH") as info:
         cli.valetkey_executable(lambda _name: None)
+    # The routes the README gives, and not a package that nobody has published.
+    assert "makepkg -si" in str(info.value)
+    assert "uv tool install ." in str(info.value)
+    assert "uv tool install valetkey" not in str(info.value)
 
 
 @pytest.fixture
@@ -816,6 +820,7 @@ def test_install_units_needs_valetkey_on_the_path(
     status, _, err = run(capsys, "install-units")
     assert status == 1
     assert "not on PATH" in err
+    assert "uv tool install ." in err
 
 
 def test_install_units_uses_the_program_found_on_the_path(

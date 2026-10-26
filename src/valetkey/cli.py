@@ -680,7 +680,10 @@ def valetkey_executable(which: Callable[[str], str | None] = shutil.which) -> st
     """
     found = which("valetkey")
     if found is None:
-        message = "valetkey is not on PATH; install it with `uv tool install valetkey` first"
+        message = (
+            "valetkey is not on PATH; install it first, from the Arch package "
+            "(`makepkg -si` in packaging/arch) or with `uv tool install .` in a checkout"
+        )
         raise CommandError(message)
     return str(Path(found).absolute())
 

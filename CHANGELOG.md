@@ -48,6 +48,7 @@ Changes that affect users of valetkey. The format follows
 ### Fixed
 
 - An expired login is now noticed when its sign-in form posts to a redirect, as most single sign-on providers do. A callback is no longer taken for a sign-in page.
+- `valetkey install-units` names the Arch package and `uv tool install .` when `valetkey` is not on your `PATH`, instead of a package that is not published.
 - `valetkey bridge` never forwards your ssh agent or X11 to the server, whatever your ssh configuration says.
 - A login no longer allows hosts that the browser profile visited before it began, so a host removed with `valetkey deny` does not come back at the next login.
 - The daemon's service and each browser sandbox now have limits on open files, tasks and memory, so a runaway browser cannot take down your session.
