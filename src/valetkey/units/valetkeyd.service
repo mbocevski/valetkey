@@ -19,6 +19,17 @@ RuntimeDirectory=valetkey agent-browser
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 
+# Limits for the daemon and every browser it starts, which all live in this service's group of
+# processes. One idle session was measured at 18 processes, 183 threads, 454 file descriptors and
+# about 1 GiB; busy pages need several times that, and five open sites several times again. The
+# limits are far above that and exist so that a browser that loops, forks or allocates cannot
+# take the user's session down with it. The daemon holds a few descriptors per connection
+# and caps the connections itself, so the descriptor limit is only room.
+LimitNOFILE=65536
+TasksMax=8192
+MemoryHigh=50%
+MemoryMax=75%
+
 # Hardening. The browsers run in bubblewrap sandboxes, which need unprivileged user
 # namespaces and a /proc mount, so the directives that would block either are left out.
 NoNewPrivileges=yes

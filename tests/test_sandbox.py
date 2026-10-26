@@ -160,7 +160,12 @@ def test_argv_unshares_everything_and_ends_with_the_command(tmp_path: Path) -> N
     for flag in ("--unshare-all", "--new-session", "--die-with-parent", "--clearenv"):
         assert flag in argv
     assert "--share-net" not in argv
-    assert argv[-4:] == ["--chdir", sandbox.SANDBOX_HOME, "chromium", "--headless=new"]
+    chdir = argv.index("--chdir")
+    assert argv[chdir : chdir + 2] == ["--chdir", sandbox.SANDBOX_HOME]
+    assert argv[chdir + 2 : chdir + 4] == ["/usr/bin/sh", "-c"]
+    assert argv[chdir + 5 :] == ["sh", "chromium", "--headless=new"]
+    assert f"ulimit -n {sandbox.MAX_OPEN_FILES}" in argv[chdir + 4]
+    assert f"ulimit -u {sandbox.MAX_PROCESSES}" in argv[chdir + 4]
 
 
 def test_argv_has_no_display_by_default(tmp_path: Path) -> None:
@@ -423,6 +428,11 @@ def test_start_runs_bwrap_as_the_program_of_a_wrapper(
         *sandbox.bwrap_argv(box, ["true"]),
     ]
     assert seen[1][0] == "bwrap"
+    # The limits are set by the command inside the namespace, so they hold behind a wrapper too.
+    for argv in seen:
+        limits = next(arg for arg in argv if arg.startswith("ulimit -n"))
+        assert argv.index(limits) > argv.index("bwrap")
+        assert argv[-2:] == ["sh", "true"]
     # The wrapper is not part of the namespace's own command line.
     assert sandbox.bwrap_argv(box, ["true"]) == sandbox.bwrap_argv(
         replace(box, wrapper=()), ["true"]
@@ -890,3 +900,27 @@ for action in (
     assert (delivered / "invoice.txt").read_text() == "delivered"
     assert (delivered / ".incoming" / "a.bin").is_file()
     assert (delivered / ".shots" / "s.png").is_file()
+
+
+@integration
+@needs_namespaces
+def test_the_sandbox_limits_descriptors_and_tasks_and_they_cannot_be_raised(
+    box: sandbox.Sandbox,
+) -> None:
+    code = """
+import resource
+for name in ("RLIMIT_NOFILE", "RLIMIT_NPROC"):
+    limit = getattr(resource, name)
+    print(name, resource.getrlimit(limit))
+    try:
+        resource.setrlimit(limit, (1 << 20, 1 << 20))
+        print(name, "raised")
+    except (ValueError, OSError) as error:
+        print(name, "cannot be raised:", type(error).__name__)
+"""
+    status, log = run_python(box, code)
+    assert status == 0, log
+    assert f"RLIMIT_NOFILE ({sandbox.MAX_OPEN_FILES}, {sandbox.MAX_OPEN_FILES})" in log
+    assert f"RLIMIT_NPROC ({sandbox.MAX_PROCESSES}, {sandbox.MAX_PROCESSES})" in log
+    assert "raised\n" not in log.replace("cannot be raised", "")
+    assert log.count("cannot be raised") == 2

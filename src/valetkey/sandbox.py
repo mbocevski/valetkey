@@ -37,6 +37,14 @@ PROXY_ADDRESS = "127.0.0.1:3128"
 SANDBOX_HOME = "/home/valetkey"
 """The throwaway home directory inside the namespace (a tmpfs, empty at every start)."""
 
+MAX_OPEN_FILES = 8192
+MAX_PROCESSES = 4096
+"""The most file descriptors and tasks (threads count) the sandbox may have, as soft and hard
+limits, so nothing inside can raise them. One idle session was measured at 454 descriptors and
+183 threads in all its processes, and 152 descriptors in its busiest one; a heavy page needs
+several times that. The sandbox is a user namespace of its own, so the task limit counts only
+what runs inside it."""
+
 _SYSTEM_PATHS = ("/bin", "/sbin", "/lib", "/lib64")
 """Top-level paths that are symlinks into ``/usr`` on merged-usr systems."""
 
@@ -352,7 +360,9 @@ def bwrap_argv(
         environment["WAYLAND_DISPLAY"] = wayland_name
     for name, value in environment.items():
         argv += ["--setenv", name, value]
-    argv += ["--chdir", home, *command]
+    # The shell adds SHLVL to the environment of what it starts; the last command removes it.
+    limits = f'ulimit -n {MAX_OPEN_FILES} && ulimit -u {MAX_PROCESSES} && exec env -u SHLVL "$@"'
+    argv += ["--chdir", home, "/usr/bin/sh", "-c", limits, "sh", *command]
     return argv
 
 
