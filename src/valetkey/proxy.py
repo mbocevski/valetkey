@@ -66,6 +66,9 @@ MAX_SEEN_HOSTS = 5000
 CONNECT_PORT = 443
 HTTP_PORT = 80
 _CHUNK = 64 * 1024
+_ACCEPT_TURNS = 5
+"""Event loop turns a just-accepted connection needs to reach its handler: the accept, the
+transport, the protocol's connection_made, then the handler task's first step."""
 _PLAIN_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"})
 _DROPPED_HEADERS = frozenset({b"host", b"connection", b"proxy-connection", b"keep-alive"})
 PRIVATE_ADDRESS = "resolves to a private address"
@@ -362,6 +365,7 @@ class Proxy:
         self._seen: dict[str, int] = {}
         self._listening: tuple[asyncio.Server, Path] | None = None
         self._tasks: set[asyncio.Task[None]] = set()
+        self._closing = False
 
     @property
     def mode(self) -> Mode:
@@ -415,6 +419,7 @@ class Proxy:
         if self._listening is not None:
             msg = "the proxy is already started"
             raise RuntimeError(msg)
+        self._closing = False
         server = await asyncio.start_unix_server(
             self._handle, path=socket_path, limit=MAX_HEAD_BYTES
         )
@@ -427,11 +432,19 @@ class Proxy:
         if listening is None:
             return
         server, socket_path = listening
-        server.close()
+        # Close the server last. A connection accepted just before this point is still on its way
+        # to getting a transport, and a transport made after the server closed fails inside
+        # asyncio and leaves its socket open. So let such connections arrive, turn each away,
+        # end the ones in flight, and only then stop listening.
+        self._closing = True
+        for _ in range(_ACCEPT_TURNS):
+            await asyncio.sleep(0)
         tasks = list(self._tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        server.close_clients()
+        server.close()
         await server.wait_closed()
         await asyncio.to_thread(socket_path.unlink, missing_ok=True)
 
@@ -448,6 +461,8 @@ class Proxy:
         task = cast("asyncio.Task[None]", asyncio.current_task())
         self._tasks.add(task)
         try:
+            if self._closing:
+                return  # arrived while the proxy was closing
             await self._serve(reader, writer)
         except RequestError as error:
             await _respond(writer, error.status, error.message)

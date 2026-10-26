@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import contextlib
+import gc
 import logging
 import socket
 import stat
+import sys
+import warnings
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
@@ -1197,3 +1200,95 @@ def test_a_new_range_applies_to_the_running_proxy(sock: Path) -> None:
             assert [status_of(r) for r in (first, second, third)] == [403, 200, 403]
 
     run(scenario())
+
+
+# -- closing ---------------------------------------------------------------------------------
+
+
+def unclosed_after(scenario: Awaitable[None]) -> list[str]:
+    """Run ``scenario`` on a loop of its own and return what was left open, as warnings.
+
+    The loop is closed and the garbage collected before looking, because an unclosed socket or
+    transport is only reported when it is dropped. That report arrives either as a warning or
+    through the hook for errors the interpreter cannot raise, so both are caught.
+    """
+    found: list[str] = []
+    previous = sys.unraisablehook
+    sys.unraisablehook = lambda hook: found.append(f"{hook.exc_type.__name__}: {hook.exc_value}")
+    try:
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            asyncio.run(asyncio.wait_for(scenario, 20))
+            gc.collect()
+        found += [str(w.message) for w in seen if issubclass(w.category, ResourceWarning)]
+    finally:
+        sys.unraisablehook = previous
+    return found
+
+
+@pytest.mark.parametrize("turns", range(8))
+def test_closing_leaves_nothing_open_whatever_stage_a_connection_has_reached(
+    sock: Path, turns: int
+) -> None:
+    """A connection can be accepted but not yet handled when the proxy closes; none leaks."""
+
+    async def scenario() -> None:
+        proxy = Proxy(POLICY)
+        await proxy.start(sock)
+        clients = []
+        for _ in range(3):
+            client = socket.socket(socket.AF_UNIX)
+            client.settimeout(0)  # non-blocking
+            await asyncio.get_running_loop().sock_connect(client, str(sock))
+            clients.append(client)
+        for _ in range(turns):
+            await asyncio.sleep(0)
+        await proxy.close()
+        for client in clients:
+            client.close()
+
+    assert unclosed_after(scenario()) == []
+
+
+def test_a_browser_that_dies_in_the_middle_of_a_tunnel_leaves_nothing_open(sock: Path) -> None:
+    async def scenario() -> None:
+        async with running(sock) as (proxy, upstream):
+            tunnels = []
+            for _ in range(3):
+                reader, writer = await asyncio.open_unix_connection(sock)
+                writer.write(connect_request("sitex.test:443"))
+                assert status_of(await reader.readuntil(b"\r\n\r\n")) == 200
+                tunnels.append((reader, writer))
+            half = await asyncio.open_unix_connection(sock)  # a request head that never ends
+            half[1].write(b"CONNECT sitex.te")
+            await half[1].drain()
+            # The browser dies: its end of every connection goes away at once, and the session
+            # that owned it closes the proxy in the same moment.
+            for _reader, writer in (*tunnels, half):
+                writer.transport.abort()
+            await proxy.close()
+            assert upstream.connections == 3
+
+    assert unclosed_after(scenario()) == []
+
+
+def test_a_proxy_that_was_closed_can_serve_again(sock: Path) -> None:
+    async def scenario() -> None:
+        proxy = Proxy(POLICY, resolver=_local_resolver, connector=_refusing_connector)
+        await proxy.start(sock)
+        await proxy.close()
+        await proxy.start(sock)
+        try:
+            assert status_of(await send(sock, connect_request("evil.test:443"))) == 403
+        finally:
+            await proxy.close()
+
+    run(scenario())
+
+
+async def _local_resolver(_host: str, _port: int) -> list[str]:
+    return ["127.0.0.1"]
+
+
+async def _refusing_connector(_address: str, _port: int) -> proxy_module.Streams:
+    raise OSError
