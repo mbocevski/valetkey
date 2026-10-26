@@ -1072,6 +1072,75 @@ def test_a_second_daemon_does_not_take_over_the_socket(roots: sites.Roots) -> No
     run(scenario())
 
 
+def test_daemons_starting_together_leave_exactly_one_owner(roots: sites.Roots) -> None:
+    async def scenario() -> None:
+        first, second = daemon.Daemon(roots), daemon.Daemon(roots)
+        outcomes = await asyncio.gather(first.start(), second.start(), return_exceptions=True)
+        try:
+            failures = [o for o in outcomes if isinstance(o, daemon.AlreadyRunningError)]
+            assert len(failures) == 1
+            assert sum(o is None for o in outcomes) == 1
+            assert await client.is_running(client.socket_path(roots))
+        finally:
+            await first.shutdown()
+            await second.shutdown()
+        # The lock goes with the winner, so the path can be taken again.
+        third = daemon.Daemon(roots)
+        await third.start()
+        await third.shutdown()
+
+    run(scenario())
+
+
+def test_a_listener_that_holds_the_path_is_left_alone(roots: sites.Roots) -> None:
+    """A socket systemd holds has no lock behind it; whatever answers there must stay."""
+
+    async def scenario() -> None:
+        path = client.socket_path(roots)
+        daemon.make_private_dirs(path.parent)
+        accepted: list[int] = []
+
+        async def stand_in(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            accepted.append(1)
+            writer.close()
+
+        holder = await asyncio.start_unix_server(stand_in, path=str(path))
+        inode = path.stat().st_ino
+        try:
+            with pytest.raises(daemon.AlreadyRunningError, match="already running"):
+                await daemon.Daemon(roots).start()
+            assert path.stat().st_ino == inode
+            await eventually(
+                lambda: bool(accepted)
+            )  # the probe did connect, which is what wakes the systemd service
+            async with await client.Client.connect(path) as c:
+                with pytest.raises(DaemonError):
+                    await c.call("sites")
+        finally:
+            holder.close()
+            await holder.wait_closed()
+        # The refused start gave its lock back.
+        retry = daemon.Daemon(roots)
+        await retry.start()
+        await retry.shutdown()
+
+    run(scenario())
+
+
+def test_a_failed_bind_gives_the_lock_back(roots: sites.Roots) -> None:
+    async def scenario() -> None:
+        path = client.socket_path(roots)
+        daemon.make_private_dirs(path)  # a directory where the socket should go
+        with pytest.raises(OSError, match="in use"):
+            await daemon.Daemon(roots).start()
+        path.rmdir()
+        retry = daemon.Daemon(roots)
+        await retry.start()
+        await retry.shutdown()
+
+    run(scenario())
+
+
 def test_a_stale_socket_file_is_replaced(roots: sites.Roots) -> None:
     async def scenario() -> None:
         path = client.socket_path(roots)

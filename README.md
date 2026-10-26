@@ -9,8 +9,8 @@ anywhere else.
 
 ## Status
 
-Early development. The browser itself is not usable yet. The `valetkey` command can list sites and
-change which hosts each one may reach.
+Early development. An MCP client can already open a logged-in site and use it. The `valetkey`
+command can list sites and change which hosts each one may reach.
 
 ## Install
 
@@ -41,6 +41,7 @@ Commands:
   doctor: Check that this machine can run valetkey.
   forget: Delete a site's policy, login profile and downloads.
   install-units: Write the systemd user units that run the valetkey daemon.
+  mcp: Serve the browser tools to an MCP client over standard input and output.
   sites: List the sites valetkey knows.
   --help, -h: Display this message and exit.
   --version: Display application version.
@@ -162,6 +163,35 @@ Parameters:
   --json: Print a JSON array instead of lines. [default: False]
 ```
 <!-- end: valetkey doctor --help -->
+
+### Use it from an MCP client
+
+Add `valetkey mcp` to the client as a stdio server. In clients that read a JSON config:
+
+```json
+{"mcpServers": {"valetkey": {"command": "valetkey", "args": ["mcp"]}}}
+```
+
+Clients with a command line can add it the same way, with `valetkey mcp` as the command. With the
+systemd socket from Install enabled, the daemon starts on the first connection and `valetkey mcp`
+never has to start it. Without the socket, `valetkey mcp` starts `valetkey daemon` itself, and the
+daemon keeps running so several clients can share it.
+
+The tools are `browser_sites`, `browser_login`, `browser_open`, `browser_snapshot`,
+`browser_click`, `browser_type`, `browser_navigate`, `browser_screenshot` and `browser_close`.
+There is no way to run scripts, change launch options or edit a site's hosts. When a page needs
+a host that is not allowed, the client is told, and you decide with `valetkey allow SITE HOST`.
+
+<!-- begin: valetkey mcp --help -->
+```text
+Usage: valetkey mcp
+
+Serve the browser tools to an MCP client over standard input and output.
+
+Point an MCP client at this command. It starts valetkeyd if that is not running
+yet.
+```
+<!-- end: valetkey mcp --help -->
 
 ## How it will work
 

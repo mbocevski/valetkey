@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from valetkey import __version__, cli, daemon, sites
+from valetkey import __version__, cli, daemon, mcp_server, sites
 from valetkey.cli import main
 
 if TYPE_CHECKING:
@@ -1049,3 +1049,10 @@ def test_bubblewrap_still_works_under_the_service_hardening() -> None:
     ]  # fmt: skip
     result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=60)  # noqa: S603
     assert result.returncode == 0, result.stderr
+
+
+def test_mcp_command_serves_over_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
+    served: list[bool] = []
+    monkeypatch.setattr(mcp_server, "serve", lambda: served.append(True))
+    assert main(["mcp"]) == 0
+    assert served == [True]

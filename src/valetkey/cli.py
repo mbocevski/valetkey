@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Annotated
 
 from cyclopts import App, Parameter
 
-from valetkey import __version__, daemon, login, sandbox, sessions, sites
+from valetkey import __version__, daemon, login, mcp_server, sandbox, sessions, sites
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -334,6 +334,16 @@ def forget(site: str, *, yes: Annotated[bool, Parameter(name="--yes", negative="
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
     _say(f"Forgot {site}.")
+    return 0
+
+
+@app.command(name="mcp")
+def run_mcp() -> int:
+    """Serve the browser tools to an MCP client over standard input and output.
+
+    Point an MCP client at this command. It starts valetkeyd if that is not running yet.
+    """
+    mcp_server.serve()
     return 0
 
 

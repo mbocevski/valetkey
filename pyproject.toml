@@ -21,6 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "cyclopts>=5.3.0",
+    "mcp>=2.3.0",
 ]
 
 [project.scripts]

@@ -48,6 +48,7 @@ sandbox's die-with-parent rule (see :mod:`valetkey.sessions`); a login does the 
 
 import asyncio
 import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -260,6 +261,25 @@ def activated_socket(
     return inherited
 
 
+def _take_lock(socket_path: Path) -> int:
+    """Lock ``<socket>.lock`` for this process and return its descriptor.
+
+    Raises:
+        AlreadyRunningError: when another process holds the lock.
+
+    """
+    descriptor = os.open(
+        socket_path.with_name(socket_path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(descriptor)
+        message = f"valetkeyd is already running on {socket_path}"
+        raise AlreadyRunningError(message) from None
+    return descriptor
+
+
 def peer_uid(connection: socket.socket) -> int:
     """Return the user id of the process at the other end of a Unix socket (``SO_PEERCRED``)."""
     credentials = connection.getsockopt(
@@ -277,7 +297,7 @@ def make_private_dirs(path: Path) -> None:
     """Create ``path`` and its missing parents with mode ``0700``."""
     missing = [path, *path.parents]
     for directory in reversed([d for d in missing if not d.exists()]):
-        directory.mkdir(mode=0o700)
+        directory.mkdir(mode=0o700, exist_ok=True)
         directory.chmod(0o700)
 
 
@@ -340,6 +360,7 @@ class Daemon:
         self._connections: set[asyncio.Task[None]] = set()
         self._server: asyncio.Server | None = None
         self._socket_path: Path | None = None
+        self._lock_fd: int | None = None
         self._ops: dict[str, Callable[[_Connection, dict[str, Any]], Awaitable[dict[str, Any]]]] = {
             "sites": self._op_sites,
             "open": self._op_open,
@@ -363,8 +384,14 @@ class Daemon:
         alone. Otherwise the socket is bound at ``path`` (default:
         :func:`valetkey.client.socket_path`) with mode ``0600``.
 
+        Only one daemon may own a socket path. A lock file next to the socket decides which of
+        several that start at once wins, so a loser fails at once instead of replacing the
+        winner's socket. The lock does not cover a socket that systemd holds, because a daemon
+        started by systemd takes no lock, so the winner also checks that nothing answers on the
+        path (connecting to the systemd socket starts its daemon, which then answers).
+
         Raises:
-            AlreadyRunningError: when a daemon already answers on that path.
+            AlreadyRunningError: when another daemon holds that path or listens on it.
 
         """
         inherited = activated_socket(os.environ, os.getpid())
@@ -377,14 +404,25 @@ class Daemon:
             return
         target = path or client.socket_path(self.roots)
         await asyncio.to_thread(make_private_dirs, target.parent)
+        self._lock_fd = await asyncio.to_thread(_take_lock, target)
         if await client.is_running(target):
+            self._release_lock()
             message = f"valetkeyd is already running on {target}"
             raise AlreadyRunningError(message)
-        self._server = await asyncio.start_unix_server(
-            self._serve_connection, path=target, limit=MAX_LINE_BYTES
-        )
-        self._socket_path = target
-        await asyncio.to_thread(target.chmod, 0o600)
+        try:
+            self._server = await asyncio.start_unix_server(
+                self._serve_connection, path=target, limit=MAX_LINE_BYTES
+            )
+            self._socket_path = target
+            await asyncio.to_thread(target.chmod, 0o600)
+        except BaseException:
+            self._release_lock()
+            raise
+
+    def _release_lock(self) -> None:
+        if self._lock_fd is not None:
+            os.close(self._lock_fd)
+            self._lock_fd = None
 
     async def shutdown(self) -> None:
         """Stop serving, end every session and login, and remove the socket file."""
@@ -400,6 +438,7 @@ class Daemon:
             self._server = None
         if self._socket_path is not None:
             await asyncio.to_thread(self._socket_path.unlink, missing_ok=True)
+        self._release_lock()  # after the socket file is gone
 
     async def _shutdown_site(self, state: _Site) -> None:
         async with state.lock:
