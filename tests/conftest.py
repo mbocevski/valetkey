@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,6 +24,26 @@ def short_dir() -> Iterator[Path]:
     """A short temporary directory: Unix socket paths are limited to about 100 bytes."""
     with tempfile.TemporaryDirectory(prefix="vk-") as directory:
         yield Path(directory)
+
+
+@pytest.fixture(scope="session")
+def runtime_base() -> Iterator[str]:
+    """A directory that holds the runtime directories of the tests, removed after the last one."""
+    directory = tempfile.mkdtemp(prefix="vk-")
+    yield directory
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def runtime_dir(monkeypatch: pytest.MonkeyPatch, runtime_base: str) -> None:
+    """Give every test a ``$XDG_RUNTIME_DIR`` of its own when the machine has none.
+
+    A login session sets it and a container or a service often does not. The tests that need it
+    gone delete it themselves. Nothing is removed per test, because a test may have replaced
+    ``os.scandir``, which ``shutil.rmtree`` needs, by the time its fixtures are torn down.
+    """
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        monkeypatch.setenv("XDG_RUNTIME_DIR", tempfile.mkdtemp(prefix="r", dir=runtime_base))
 
 
 @pytest.fixture(autouse=True)
