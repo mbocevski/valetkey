@@ -60,7 +60,9 @@ they were last learned and whether a login profile exists. Add `--json` for a sc
 
 `valetkey allow SITE HOST` lets a site reach another host and its subdomains, and removes any
 excluded entry that would block it. `valetkey deny SITE HOST` takes a host away. When a wider
-allowed entry still covers it, the host is also excluded so it stays blocked.
+allowed entry still covers it, the host is also excluded so it stays blocked. Tool results mention
+requests Chrome makes on its own, such as update checks, separately; allow the host if a page
+needs it.
 
 `valetkey forget SITE` deletes the site's policy, login profile and downloads after asking. It
 refuses while the site's browser is open.

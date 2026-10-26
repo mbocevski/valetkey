@@ -29,9 +29,15 @@ profile.
   it reached are classified and merged into the site's policy.
 
 Every response about a session carries an envelope: ``site``, ``contained: true``, the page's
-``url``, and ``refused``, the hosts the proxy refused since this client last asked about the
-site. Text that came from a web page is wrapped as ``{"untrusted": true, "text": ...}``, so a
-client can tell it from anything the daemon says itself.
+``url``, ``refused``, the hosts the proxy refused since this client last asked about the
+site, and ``background_refused``, ``[{host, count}]`` for the refusals of hosts the browser
+contacts on its own (see :data:`valetkey.sandbox.BACKGROUND_HOSTS`) since then. Those are kept
+apart so that they never read as a host the page needs. Today that is only the browser's
+updater, which asks for something in the first moments of every session, so refusals made in
+the first :data:`STARTUP_GRACE` seconds are left out.
+
+Text that came from a web page is wrapped as ``{"untrusted": true, "text": ...}``, so a client
+can tell it from anything the daemon says itself.
 
 **Errors** are ``{code, message}``: ``bad_request``, ``request_too_large``, ``unknown_op``,
 ``unknown_site``, ``unknown_ref``, ``target_not_found``, ``target_ambiguous``,
@@ -63,6 +69,7 @@ import shutil
 import signal
 import socket
 import struct
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
@@ -82,6 +89,8 @@ SD_LISTEN_FDS_START = 3
 STATES = ("idle", "login", "session")
 _ACTIVATION_VARIABLES = ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES")
 _NEWEST = 2**62
+STARTUP_GRACE = 3.0
+"""Seconds after a session starts during which its background refusals are not reported."""
 """A cursor beyond any refusal, to ask the proxy where its history ends."""
 _NOT_JSON = "the request is not valid JSON"
 _ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
@@ -332,6 +341,8 @@ class _Site:
     window: LoginWindow | None = None
     watcher: asyncio.Task[None] | None = None
     generation: int = 0
+    quiet_floor: int | None = None
+    """Newest background refusal of the start-up burst; ``None`` while the burst is going on."""
     start: str = ""
     summary: str | None = None
 
@@ -340,7 +351,7 @@ class _Site:
 class _Connection:
     """One client connection. Refusal cursors and the last snapshot are kept here, per site."""
 
-    cursors: dict[str, tuple[int, int]] = field(default_factory=dict)
+    cursors: dict[str, tuple[int, int, int]] = field(default_factory=dict)
     refs: dict[str, tuple[int, dict[str, tuple[str, str]]]] = field(default_factory=dict)
     """For each site, the session generation and the ``{ref: (role, name)}`` of the snapshot
     this client last received. A click by reference means the element it was in that snapshot."""
@@ -352,8 +363,8 @@ class Daemon:
     The keyword arguments replace the parts that need a real browser or a real display, for
     tests: ``session_factory`` starts a session for a site,
     ``login_starter`` is :func:`valetkey.login.start_login`, ``proxy_options`` are extra
-    keyword arguments for each session's :class:`valetkey.proxy.Proxy`, and ``peer_uid`` reads a
-    connection's user id.
+    keyword arguments for each session's :class:`valetkey.proxy.Proxy`, ``startup_grace`` is
+    :data:`STARTUP_GRACE`, and ``peer_uid`` reads a connection's user id.
     """
 
     def __init__(  # noqa: PLR0913 - each is a seam the tests replace
@@ -363,6 +374,7 @@ class Daemon:
         session_factory: SessionFactory | None = None,
         login_starter: LoginStarter = login.start_login,
         proxy_options: Mapping[str, Any] | None = None,
+        startup_grace: float = STARTUP_GRACE,
         peer_uid: PeerUid = peer_uid,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -371,6 +383,7 @@ class Daemon:
         self._session_factory = session_factory or start_session
         self._login_starter = login_starter
         self._proxy_options = dict(proxy_options or {})
+        self._startup_grace = startup_grace
         self._peer_uid = peer_uid
         self._now = now
         self._uid = os.getuid()
@@ -652,7 +665,8 @@ class Daemon:
                 await self._begin_session(state)
             session = cast("BrowserSession", state.session)
             if not reused:
-                connection.cursors[site] = (state.generation, 0)  # the opener sees startup refusals
+                # The opener sees the start-up refusals, but not the background ones.
+                connection.cursors[site] = (state.generation, 0, 0)
                 url, title = session.first_page.url, session.first_page.title
             else:
                 url, title = await asyncio.to_thread(session.current_url), ""
@@ -680,6 +694,21 @@ class Daemon:
         state.session, state.proxy, state.kind = session, proxy, "session"
         state.start = policy.start
         state.generation += 1
+        self._end_startup_burst(state, proxy)
+
+    def _end_startup_burst(self, state: _Site, proxy: Proxy) -> None:
+        """Mark the background refusals made so far as start-up noise, after the grace period."""
+        generation = state.generation
+        state.quiet_floor = None
+
+        def mark() -> None:
+            if state.proxy is proxy and state.generation == generation:
+                state.quiet_floor = proxy.quiet_refused_since(_NEWEST)[1]
+
+        if self._startup_grace > 0:
+            asyncio.get_running_loop().call_later(self._startup_grace, mark)
+        else:
+            mark()
 
     async def _end(self, state: _Site) -> None:
         """Stop whatever the site is doing and make it idle. The caller holds ``state.lock``."""
@@ -827,11 +856,26 @@ class Daemon:
         proxy = cast("Proxy", state.proxy)
         known = connection.cursors.get(state.name)
         if known is None or known[0] != state.generation:
-            known = (state.generation, proxy.refused_since(_NEWEST)[1])
+            known = (
+                state.generation,
+                proxy.refused_since(_NEWEST)[1],
+                proxy.quiet_refused_since(_NEWEST)[1],
+            )
         entries, cursor = proxy.refused_since(known[1])
-        connection.cursors[state.name] = (state.generation, cursor)
+        quiet, quiet_cursor = proxy.quiet_refused_since(known[2])
+        connection.cursors[state.name] = (state.generation, cursor, quiet_cursor)
         refused = [refused_entry(entry) for entry in entries]
-        return {"site": state.name, "contained": True, "url": url, "refused": refused}
+        floor = state.quiet_floor
+        # Until the start-up burst is over nothing is reported, and what it held never is.
+        background = [] if floor is None else [r.host for r in quiet if r.seq > floor]
+        counts = Counter(background)
+        return {
+            "site": state.name,
+            "contained": True,
+            "url": url,
+            "refused": refused,
+            "background_refused": [{"host": h, "count": n} for h, n in counts.items()],
+        }
 
 
 def start_session(

@@ -403,6 +403,7 @@ def test_a_session_from_open_to_close(roots: sites.Roots) -> None:
                 "contained": True,
                 "url": "https://sitex.test/",
                 "refused": [],
+                "background_refused": [],
                 "reused": False,
                 "page": {"title": {"untrusted": True, "text": "Start"}},
             }
@@ -463,6 +464,111 @@ def test_a_session_from_open_to_close(roots: sites.Roots) -> None:
 
 def session_socket(roots: sites.Roots, site: str) -> Path:
     return sessions.session_paths(roots, site).proxy_socket
+
+
+# -- background refusals -------------------------------------------------------------------
+
+
+def test_background_refusals_after_the_startup_burst_are_reported_once_per_client(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots, startup_grace=0) as rig, await rig.connect() as c:
+            # Chrome's burst while the session starts, before the first page is reported.
+
+            def burst(socket_path: Path) -> None:
+                for host in ("update.googleapis.com",) * 3:
+                    refuse_via_proxy(socket_path, host)
+
+            rig.factory.during_start = burst
+            opened = await c.call("open", site="sitex")
+            assert opened["background_refused"] == []
+            assert opened["refused"] == []  # quiet ones never join the reported refusals
+            assert (await c.call("snapshot", site="sitex"))["background_refused"] == []
+            other = await rig.connect()
+            assert (await other.call("snapshot", site="sitex"))["background_refused"] == []
+            # Later, the page itself asks for some of them.
+            proxy = session_socket(roots, "sitex")
+            for host in ("update.googleapis.com", "update.googleapis.com", "evil.test"):
+                await asyncio.to_thread(refuse_via_proxy, proxy, host)
+            first = await other.call("snapshot", site="sitex")
+            assert first["background_refused"] == [{"host": "update.googleapis.com", "count": 2}]
+            assert [r["host"] for r in first["refused"]] == ["evil.test"]
+            assert (await other.call("snapshot", site="sitex"))["background_refused"] == []
+            # The first client has not been told yet, and is told once.
+            told = await c.call("snapshot", site="sitex")
+            assert told["background_refused"] == first["background_refused"]
+            assert (await c.call("snapshot", site="sitex"))["background_refused"] == []
+            await other.close()
+
+    run(scenario())
+
+
+def test_a_client_that_joins_starts_after_the_background_refusals_so_far(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots, startup_grace=0) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            await asyncio.to_thread(
+                refuse_via_proxy, session_socket(roots, "sitex"), "update.googleapis.com"
+            )
+            async with await rig.connect() as late:
+                joined = await late.call("open", site="sitex")
+                assert joined["reused"] is True
+                assert joined["background_refused"] == []
+            assert (await c.call("snapshot", site="sitex"))["background_refused"] == [
+                {"host": "update.googleapis.com", "count": 1}
+            ]
+
+    run(scenario())
+
+
+def test_background_refusals_in_the_grace_period_are_start_up_noise(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots, startup_grace=0.4) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            proxy = session_socket(roots, "sitex")
+            await asyncio.to_thread(refuse_via_proxy, proxy, "update.googleapis.com")  # a straggler
+            assert (await c.call("snapshot", site="sitex"))["background_refused"] == []
+            await asyncio.sleep(0.6)  # past the grace period, with nobody having asked meanwhile
+            assert (await c.call("snapshot", site="sitex"))["background_refused"] == []
+            await asyncio.to_thread(refuse_via_proxy, proxy, "update.googleapis.com")
+            assert (await c.call("snapshot", site="sitex"))["background_refused"] == [
+                {"host": "update.googleapis.com", "count": 1}
+            ]
+
+    run(scenario())
+
+
+def test_an_ended_sessions_grace_timer_does_not_decide_for_its_successor(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots, startup_grace=0.4) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            await c.call("close", site="sitex")
+            await asyncio.sleep(0.2)
+            await c.call("open", site="sitex")  # its own grace period ends 0.4 s from now
+            await asyncio.sleep(0.3)  # the first session's timer has fired by now
+            proxy = session_socket(roots, "sitex")
+            await asyncio.to_thread(refuse_via_proxy, proxy, "update.googleapis.com")
+            assert (await c.call("snapshot", site="sitex"))["background_refused"] == []
+            await asyncio.sleep(0.4)
+            await asyncio.to_thread(refuse_via_proxy, proxy, "update.googleapis.com")
+            assert (await c.call("snapshot", site="sitex"))["background_refused"] == [
+                {"host": "update.googleapis.com", "count": 1}
+            ]
+
+    run(scenario())
 
 
 def test_closing_removes_the_proxy_and_the_session_directory(roots: sites.Roots) -> None:

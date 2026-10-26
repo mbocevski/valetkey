@@ -96,6 +96,34 @@ def test_installed_chrome_major_runs_the_executable(tmp_path: Path) -> None:
     assert sandbox.installed_chrome_major(str(fake)) == 142
 
 
+def test_only_the_updater_is_left_as_background_noise() -> None:
+    # The new tab page and the AI-mode check are stopped by policy, so a refused
+    # www.google.com is a page asking for it.
+    assert {"update.googleapis.com"} == sandbox.BACKGROUND_HOSTS
+    assert sandbox.CHROME_POLICY == {"DefaultSearchProviderEnabled": False}
+
+
+def test_write_chrome_policy(tmp_path: Path) -> None:
+    directory = sandbox.write_chrome_policy(tmp_path / "policy")
+    assert directory == tmp_path / "policy"
+    written = (directory / "managed" / "valetkey.json").read_text()
+    assert json.loads(written) == sandbox.CHROME_POLICY
+    assert sandbox.write_chrome_policy(directory) == directory  # again is fine
+
+
+def test_the_policy_is_bound_read_only_where_chromium_and_chrome_read_it(tmp_path: Path) -> None:
+    box = make_sandbox(tmp_path)
+    plain = sandbox.bwrap_argv(box, ["true"], roots=(), system_links=[], interpreter_links=[])
+    assert not any("policies" in arg for arg in plain)
+    with_policy = replace(box, policy_dir=tmp_path / "policy")
+    argv = sandbox.bwrap_argv(
+        with_policy, ["true"], roots=(), system_links=[], interpreter_links=[]
+    )
+    ro = pairs(argv, "--ro-bind")
+    assert (str(tmp_path / "policy"), "/etc/chromium/policies") in ro
+    assert (str(tmp_path / "policy"), "/etc/opt/chrome/policies") in ro
+
+
 def test_chrome_flags_hold_the_containment_and_quiet_flags() -> None:
     flags = sandbox.chrome_flags(156)
     assert "--proxy-server=http://127.0.0.1:3128" in flags
@@ -639,16 +667,21 @@ finally:
 def test_chromium_loads_a_page_through_the_bridge(box: sandbox.Sandbox) -> None:
     flags = sandbox.chrome_flags(sandbox.installed_chrome_major())
     bridge = sandbox.bridge_command(box.proxy_socket)
+    policy = sandbox.write_chrome_policy(box.profile_dir.parent / "policy")
     with ProxyStub(box.proxy_socket) as stub:
         status, log = run_python(
-            box, _CHROMIUM_DRIVER, json.dumps(flags), json.dumps(bridge), str(box.profile_dir)
+            replace(box, policy_dir=policy),
+            _CHROMIUM_DRIVER,
+            json.dumps(flags),
+            json.dumps(bridge),
+            str(box.profile_dir),
         )
     assert status == 0, log
     assert "proxied page" in log
     request = next(r for r in stub.requests if r.startswith("GET http://site.test/ HTTP/1.1"))
     assert "Chrome/" in request
     assert "HeadlessChrome" not in request
-    # Chrome contacts the page's host and nothing else, bar the startup requests no flag stops.
+    # With the policy, Chrome contacts the page's host and nothing else, bar the updater.
     assert {host_of_request(r) for r in stub.requests} - sandbox.BACKGROUND_HOSTS == {"site.test"}
 
 
@@ -672,3 +705,22 @@ def test_a_uv_style_interpreter_runs_inside_the_namespace(
     )
     assert status == 0, log
     assert log.split() == sorted([alias.name, real.name, venv.name])
+
+
+@integration
+@needs_namespaces
+def test_the_browser_finds_its_policy_inside_the_namespace(box: sandbox.Sandbox) -> None:
+    policy = sandbox.write_chrome_policy(box.profile_dir.parent / "policy")
+    inside = replace(box, policy_dir=policy)
+    code = (
+        "import json\n"
+        "for root in ('/etc/chromium', '/etc/opt/chrome'):\n"
+        "    print(json.load(open(root + '/policies/managed/valetkey.json')))\n"
+        "try:\n"
+        "    open('/etc/chromium/policies/managed/other.json', 'w')\n"
+        "except OSError as error:\n"
+        "    print(error.strerror)\n"
+    )
+    status, log = run_python(inside, code)
+    assert status == 0, log
+    assert log.splitlines() == [str(sandbox.CHROME_POLICY)] * 2 + ["Read-only file system"]

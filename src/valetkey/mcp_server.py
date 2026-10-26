@@ -130,6 +130,22 @@ def refused_line(refused: Sequence[dict[str, Any]]) -> str:
     return f"Refused hosts: {listed}\n{_REFUSAL_ADVICE}"
 
 
+def background_line(background: Sequence[dict[str, Any]]) -> str:
+    """Describe the refused background requests of an answer, or return ``""`` when there are none.
+
+    These are hosts Chrome contacts on its own. They are mentioned quietly, because most pages
+    do not need them.
+    """
+    if not background:
+        return ""
+    listed = ", ".join(f"{entry['host']} ({entry['count']})" for entry in background)
+    return (
+        f"Background requests refused: {listed}. Chrome makes these on its own; if the page "
+        "looks broken and needs that host, tell the person, who can run "
+        "`valetkey allow SITE HOST`."
+    )
+
+
 def not_loaded_note(result: dict[str, Any]) -> str:
     """Return a sentence saying the page did not load, or ``""``.
 
@@ -146,18 +162,21 @@ def not_loaded_note(result: dict[str, Any]) -> str:
 
 
 def envelope_text(result: dict[str, Any]) -> str:
-    """Return the lines every session answer starts with: the site, the URL and the refusals.
+    """Return the lines every session answer starts with.
 
-    A note that the page did not load comes first when the URL's host was refused.
+    Those are the site, the URL, the refused hosts and, when there are any, a quiet line about
+    refused background requests. A note that the page did not load comes first when the URL's
+    host was refused.
     """
     url = result.get("url") or "(none)"
-    return not_loaded_note(result) + "\n".join(
-        [
-            f"Site: {result['site']} (contained: it can reach only the hosts this site allows)",
-            f"URL: {url}",
-            refused_line(result.get("refused", [])),
-        ]
-    )
+    lines = [
+        f"Site: {result['site']} (contained: it can reach only the hosts this site allows)",
+        f"URL: {url}",
+        refused_line(result.get("refused", [])),
+    ]
+    if background := background_line(result.get("background_refused", [])):
+        lines.append(background)
+    return not_loaded_note(result) + "\n".join(lines)
 
 
 def _quoted(text: str) -> str:

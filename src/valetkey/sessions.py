@@ -447,6 +447,7 @@ class Session:
             log_file=paths.log_file,
             runtime_dir=runtime,
             shared_dir=paths.driver_dir,
+            policy_dir=sandbox.write_chrome_policy(paths.directory / "chrome-policy"),
         )
         try:
             session._launch(box, ["/usr/bin/bash", "-c", script])
@@ -520,6 +521,7 @@ class Session:
         if self._thread is not None:
             self._thread.join(10)
         shutil.rmtree(self.paths.driver_dir, ignore_errors=True)
+        shutil.rmtree(self.paths.directory / "chrome-policy", ignore_errors=True)
         for leftover in (self.paths.log_file, self.paths.config_file):
             leftover.unlink(missing_ok=True)
         # The proxy's own directory goes only if the proxy is already gone from it.

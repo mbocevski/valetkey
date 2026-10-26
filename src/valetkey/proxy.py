@@ -290,8 +290,9 @@ class Proxy:
       ignored.
     * ``quiet_hosts`` are hosts the browser contacts on its own, such as its updater. They are
       matched exactly. A refusal for one is answered with 403 as usual but not reported by
-      :meth:`refused_since`; it is only counted in :attr:`quiet_refusals`. In record mode they
-      are not noted in :meth:`seen_hosts`.
+      :meth:`refused_since`. They are counted in :attr:`quiet_refusals` and kept in their own
+      history, :meth:`quiet_refused_since`, for a caller that wants to say so quietly. In record
+      mode they are not noted in :meth:`seen_hosts`.
     """
 
     def __init__(  # noqa: PLR0913 - every knob is a keyword the tests turn
@@ -319,6 +320,7 @@ class Proxy:
         self._max_seen_hosts = max_seen_hosts
         self._quiet = frozenset(sites.normalize_host(host) for host in quiet_hosts)
         self._quiet_refused = 0
+        self._quiet_history: deque[Refusal] = deque(maxlen=max_refusals)
         self._refusals: deque[Refusal] = deque(maxlen=max_refusals)
         self._seq = 0
         self._seen: dict[str, int] = {}
@@ -339,6 +341,14 @@ class Proxy:
     def quiet_refusals(self) -> int:
         """How many refusals of ``quiet_hosts`` there have been. They are not in the history."""
         return self._quiet_refused
+
+    def quiet_refused_since(self, cursor: int = 0) -> tuple[list[Refusal], int]:
+        """Return the refusals of ``quiet_hosts`` after ``cursor`` and the cursor for next time.
+
+        Works like :meth:`refused_since`, with a numbering of its own. These refusals never
+        appear in :meth:`refused_since`.
+        """
+        return [r for r in self._quiet_history if r.seq > cursor], self._quiet_refused
 
     def update_policy(self, policy: sites.Policy) -> None:
         """Use ``policy`` for connections that start from now on. Open tunnels are untouched."""
@@ -467,6 +477,9 @@ class Proxy:
     async def _refuse(self, writer: asyncio.StreamWriter, request: Request, reason: str) -> None:
         if request.host in self._quiet:
             self._quiet_refused += 1
+            self._quiet_history.append(
+                Refusal(self._quiet_refused, request.host, request.port, reason)
+            )
         else:
             self._seq += 1
             self._refusals.append(Refusal(self._seq, request.host, request.port, reason))

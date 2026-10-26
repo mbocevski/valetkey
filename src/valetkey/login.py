@@ -389,6 +389,9 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     proxy_socket = login_dir / "proxy.sock"
     try:
         await proxy.start(proxy_socket)
+        policy_dir = await asyncio.to_thread(
+            sandbox.write_chrome_policy, login_dir / "chrome-policy"
+        )
         box = sandbox.Sandbox(
             profile_dir=profile_dir,
             downloads_dir=downloads_dir,
@@ -396,6 +399,7 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
             log_file=runtime / "logins" / f"{site}.log",
             runtime_dir=cast("Path", roots.runtime),
             wayland_socket=socket_path,
+            policy_dir=policy_dir,
         )
         await asyncio.to_thread(box.log_file.unlink, missing_ok=True)
         command = holder_command(

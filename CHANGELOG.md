@@ -18,4 +18,6 @@ Changes that affect users of valetkey. The format follows
 - The `browser_click` tool can name an element by its text, finds it again when it clicks, and checks the outcome you expect.
 - The `browser_type` tool can press Enter after typing.
 - The `valetkey daemon` command, which runs the background process that owns your sessions and logins.
+- Chrome no longer contacts `www.google.com` on its own, so a page that needs it shows as a refused host on any load.
+- The browser tools now say when a page's background requests were refused, such as Chrome's own update requests, in a separate quiet line.
 - A `PKGBUILD` in `packaging/arch` that builds an Arch Linux package with the daemon's systemd units.

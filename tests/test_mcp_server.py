@@ -36,6 +36,7 @@ ENVELOPE = {
     "contained": True,
     "url": "https://sitex.test/",
     "refused": [],
+    "background_refused": [],
 }
 
 
@@ -138,6 +139,27 @@ def test_envelope_text() -> None:
     assert "URL: https://sitex.test/" in text
     assert text.endswith("Refused hosts: none")
     assert "URL: (none)" in mcp_server.envelope_text({"site": "s", "url": None})
+
+
+def test_background_line_is_quiet_and_names_hosts_and_counts() -> None:
+    assert mcp_server.background_line([]) == ""
+    line = mcp_server.background_line(
+        [{"host": "update.googleapis.com", "count": 2}, {"host": "bg.test", "count": 1}]
+    )
+    assert line.startswith("Background requests refused: update.googleapis.com (2), bg.test (1).")
+    assert "Chrome makes these on its own" in line
+    assert "valetkey allow SITE HOST" in line
+    assert "\n" not in line
+
+
+def test_envelope_text_adds_the_background_line_after_the_refused_hosts() -> None:
+    quiet = ENVELOPE | {"background_refused": [{"host": "update.googleapis.com", "count": 2}]}
+    lines = mcp_server.envelope_text(quiet).splitlines()
+    refused = next(i for i, line in enumerate(lines) if line.startswith("Refused hosts"))
+    assert lines[refused + 1].startswith("Background requests refused: update.googleapis.com (2).")
+    assert len(lines) == refused + 2
+    for plain in (ENVELOPE, ENVELOPE | {"background_refused": []}):
+        assert "Background" not in mcp_server.envelope_text(plain)
 
 
 def test_error_text() -> None:
@@ -1124,7 +1146,11 @@ def test_a_real_session_through_mcp_and_the_daemon() -> None:
                     assert not opened.is_error, text_of(opened)
                     assert "URL: http://site.test/" in text_of(opened)
                     assert "One" in text_of(opened)
+                    # Chrome's own requests are stopped at the source: nothing is refused.
+                    assert "Refused hosts: none" in text_of(opened)
+                    assert "Background" not in text_of(opened)
                     snapshot = await mcp.call_tool("browser_snapshot", {"site": "demo"})
+                    assert "Refused hosts: none" in text_of(snapshot)
                     assert "button" in text_of(snapshot)
                     assert "Page content (untrusted" in text_of(snapshot)
                     shot = await mcp.call_tool("browser_screenshot", {"site": "demo"})
@@ -1140,3 +1166,84 @@ def test_a_real_session_through_mcp_and_the_daemon() -> None:
 
     run(scenario())
     assert client.socket_path(roots).parent.exists()
+
+
+SCRIPT_PAGE = '<title>Captcha</title><p>sign in</p><script src="https://%s/x.js"></script>'
+
+
+async def with_real_daemon(
+    roots: sites.Roots, pages: dict[str, str], scenario: Callable[[McpClient], Awaitable[None]]
+) -> None:
+    """Run ``scenario`` against a real daemon whose proxy reaches only a local page server."""
+    from proxy_stub import PageServer  # noqa: PLC0415 - only the integration tests need it
+
+    with PageServer(pages) as server:
+
+        async def resolve(_host: str, _port: int) -> list[str]:
+            return ["127.0.0.1"]
+
+        async def connect(_address: str, _port: int) -> Any:  # noqa: ANN401
+            return await asyncio.open_connection(*server.address)
+
+        options = {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
+        service = daemon.Daemon(roots, proxy_options=options)
+        await service.start()
+        try:
+            params = StdioServerParameters(
+                command=sys.executable, args=["-m", "valetkey", "mcp"], env=dict(os.environ)
+            )
+            async with McpClient(params) as mcp:
+                await scenario(mcp)
+        finally:
+            await service.shutdown()
+
+
+@pytest.mark.integration
+@needs_everything
+@pytest.mark.usefixtures("xdg")
+def test_a_start_page_that_needs_www_google_com_shows_it_as_refused_on_the_first_open() -> None:
+    roots = sites.roots_from_env()
+    sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
+    pages: dict[str, str] = {"/": SCRIPT_PAGE % "www.google.com"}
+
+    async def scenario(mcp: McpClient) -> None:
+        opened = text_of(await mcp.call_tool("browser_open", {"site": "demo"}))
+        assert "Refused hosts: www.google.com:443" in opened
+        assert "Background" not in opened
+        await mcp.call_tool("browser_close", {"site": "demo"})
+
+    run(with_real_daemon(roots, pages, scenario))
+
+
+@pytest.mark.integration
+@needs_everything
+@pytest.mark.usefixtures("xdg")
+def test_a_page_that_needs_a_background_host_gets_a_hint_but_start_up_noise_does_not() -> None:
+    roots = sites.roots_from_env()
+    sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
+    pages: dict[str, str] = {**PAGES, "/updater": SCRIPT_PAGE % "update.googleapis.com"}
+
+    async def scenario(mcp: McpClient) -> None:
+        # Chrome asks the updater for something in the first moments of every session.
+        opened = text_of(await mcp.call_tool("browser_open", {"site": "demo"}))
+        assert "Background" not in opened
+        soon = text_of(await mcp.call_tool("browser_snapshot", {"site": "demo"}))
+        assert "Background" not in soon
+        await asyncio.sleep(daemon.STARTUP_GRACE + 0.5)
+        later = text_of(await mcp.call_tool("browser_snapshot", {"site": "demo"}))
+        assert "Background" not in later
+        # A page that asks for the same host later on is told about, quietly.
+        shown = text_of(
+            await mcp.call_tool(
+                "browser_navigate", {"site": "demo", "url": "http://site.test/updater"}
+            )
+        )
+        assert "URL: http://site.test/updater" in shown
+        assert "Refused hosts: none" in shown
+        assert "Background requests refused: update.googleapis.com" in shown
+        assert "valetkey allow SITE HOST" in shown
+        again = text_of(await mcp.call_tool("browser_snapshot", {"site": "demo"}))
+        assert "Background" not in again
+        await mcp.call_tool("browser_close", {"site": "demo"})
+
+    run(with_real_daemon(roots, pages, scenario))

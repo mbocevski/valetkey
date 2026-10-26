@@ -529,6 +529,7 @@ class FakeStart:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, script: str | None) -> None:
         self.script = script
+        self.policies: list[str] = []
         monkeypatch.setattr(sessions, "installed_version", lambda _: sessions.TESTED_VERSION)
         monkeypatch.setattr(sessions, "_resolve_binary", lambda _: "/usr/bin/agent-browser")
         monkeypatch.setattr(sandbox, "installed_chrome_major", lambda _: 156)
@@ -544,6 +545,8 @@ class FakeStart:
             box.shared_dir
             == sessions.session_paths(make_roots(box.runtime_dir.parent), "demo").driver_dir
         )
+        assert box.policy_dir is not None
+        self.policies.append((box.policy_dir / "managed" / "valetkey.json").read_text())
         env = {**os.environ, "READY": str(box.shared_dir / "ready.json"), "LOG": str(box.log_file)}
         with box.log_file.open("ab") as log:
             return subprocess.Popen(["sh", "-c", self.script], env=env, stdout=log, stderr=log)  # noqa: S603, S607
@@ -563,9 +566,10 @@ def start(
 
 def test_start_waits_for_the_first_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     page = json.dumps({"success": True, "data": {"url": "http://site.test/", "title": "Hi"}})
-    FakeStart(monkeypatch, f"echo '{page}' > \"$READY\"; sleep 60")
+    fake = FakeStart(monkeypatch, f"echo '{page}' > \"$READY\"; sleep 60")
     with start(tmp_path, timeout=10) as session:
         assert session.first_page == sessions.Page("http://site.test/", "Hi")
+        assert [json.loads(text) for text in fake.policies] == [sandbox.CHROME_POLICY]
         assert session.is_alive()
         assert session.paths.profile_dir.is_dir()
         assert session.paths.config_file.read_text() == "{}\n"

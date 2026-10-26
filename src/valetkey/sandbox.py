@@ -16,6 +16,7 @@ The environment is cleared. Credentials sockets (SSH and GPG agents, the Docker 
 system D-Bus, the resolver) and the rest of the user's home do not exist inside.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -82,12 +83,34 @@ def installed_chrome_major(executable: str = "chromium") -> int:
     return parse_chrome_major(result.stdout)
 
 
-BACKGROUND_HOSTS = frozenset({"update.googleapis.com", "www.google.com"})
-"""Hosts Chrome 156 still contacts at startup whatever the flags say, so a proxy can treat them
-as known noise rather than as hosts the page needs. ``update.googleapis.com`` is the component
-updater asking for a foreground update (no flag stops it, including ``--disable-component-update``).
-``www.google.com`` is a one-off preconnect to the default search engine, which happens in some
-runs only. Every other background request the flags below suppress."""
+BACKGROUND_HOSTS = frozenset({"update.googleapis.com"})
+"""Hosts Chrome still contacts at start-up whatever the flags say, so a proxy can treat them as
+known noise rather than as hosts the page needs. ``update.googleapis.com`` is the component
+updater asking for a foreground update; no flag or policy stops it. Every other background
+request is stopped by the flags below and by :data:`CHROME_POLICY`, so a host that is refused
+for a page is a host the page asked for."""
+
+CHROME_POLICY = {"DefaultSearchProviderEnabled": False}
+"""Chrome enterprise policy applied to every contained browser.
+
+Without a default search engine Chrome stops contacting ``www.google.com`` on its own: the new
+tab page's Google bar and doodle, and the check whether AI mode is available. No command-line
+flag does this, and the requests used to look like a page that needs ``www.google.com``, which
+reCAPTCHA does."""
+
+_POLICY_DESTINATIONS = ("/etc/chromium/policies", "/etc/opt/chrome/policies")
+"""Where Chromium and Google Chrome read policy from. Each reads only its own."""
+
+
+def write_chrome_policy(directory: Path) -> Path:
+    """Write :data:`CHROME_POLICY` under ``directory`` as ``managed/valetkey.json`` and return it.
+
+    Pass the directory as ``Sandbox.policy_dir``.
+    """
+    managed = directory / "managed"
+    managed.mkdir(parents=True, exist_ok=True)
+    (managed / "valetkey.json").write_text(json.dumps(CHROME_POLICY) + "\n", encoding="utf-8")
+    return directory
 
 
 def chrome_flags(major: int) -> list[str]:
@@ -155,6 +178,9 @@ class Sandbox:
     one socket file is bound read-write (a socket needs both) at ``runtime_dir`` under its own
     name, and ``WAYLAND_DISPLAY`` is set to the name. Nothing else of the host's runtime
     directory appears. ``None`` means no display, which is what every headless session wants."""
+    policy_dir: Path | None = None
+    """A directory made by :func:`write_chrome_policy`. Bound read-only where the browser reads
+    its policy from."""
     die_with_parent: bool = True
     """Kill the sandbox when the process that started it dies. See ``bwrap_argv``."""
 
@@ -297,6 +323,9 @@ def bwrap_argv(
     ]
     for path in dict.fromkeys(writable):
         argv += ["--bind", str(path), str(path)]
+    if sandbox.policy_dir is not None:
+        for destination in _POLICY_DESTINATIONS:
+            argv += ["--ro-bind", str(sandbox.policy_dir), destination]
     wayland_name = None
     if sandbox.wayland_socket is not None:
         wayland_name = sandbox.wayland_socket.name

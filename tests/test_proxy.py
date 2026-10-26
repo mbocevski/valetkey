@@ -547,6 +547,57 @@ def test_quiet_hosts_are_refused_but_not_reported(sock: Path) -> None:
     run(scenario())
 
 
+def test_quiet_refusals_have_a_history_with_a_cursor_of_their_own(sock: Path) -> None:
+    async def scenario() -> None:
+        async with running(sock, quiet_hosts=frozenset({"bg.test"})) as (proxy, _):
+            assert proxy.quiet_refused_since() == ([], 0)
+            await send(sock, connect_request("bg.test:443"))
+            await send(sock, connect_request("evil.test:443"))
+            await send(sock, connect_request("bg.test:80"))
+            events, cursor = proxy.quiet_refused_since()
+            assert events == [
+                Refusal(1, "bg.test", 443, NOT_ALLOWED),
+                Refusal(2, "bg.test", 80, "port 80 is not allowed (only 443)"),
+            ]
+            assert cursor == 2
+            assert proxy.quiet_refused_since(cursor) == ([], 2)
+            await send(sock, connect_request("bg.test:443"))
+            assert [r.seq for r in proxy.quiet_refused_since(cursor)[0]] == [3]
+            # Never mixed into the reported refusals, which have their own numbers.
+            assert [r.host for r in proxy.refused_since()[0]] == ["evil.test"]
+
+    run(scenario())
+
+
+def test_the_quiet_history_is_bounded_and_numbers_keep_counting(sock: Path) -> None:
+    async def scenario() -> None:
+        async with running(sock, quiet_hosts=frozenset({"bg.test"}), max_refusals=2) as (proxy, _):
+            for _n in range(3):
+                await send(sock, connect_request("bg.test:443"))
+            events, cursor = proxy.quiet_refused_since()
+            assert [r.seq for r in events] == [2, 3]
+            assert cursor == 3
+
+    run(scenario())
+
+
+def test_a_quiet_host_the_policy_allows_connects_like_any_other(sock: Path) -> None:
+    allowed = sites.Policy("sitex", "https://sitex.test/", ("sitex.test", "bg.test"))
+
+    async def scenario() -> None:
+        async with running(sock, policy=allowed, quiet_hosts=frozenset({"bg.test"})) as (
+            proxy,
+            upstream,
+        ):
+            assert status_of(await send_and_hangup(sock, connect_request("bg.test:443"))) == 200
+            assert upstream.connections == 1
+            assert proxy.quiet_refusals == 0
+            assert proxy.quiet_refused_since() == ([], 0)
+            assert proxy.refused_since() == ([], 0)
+
+    run(scenario())
+
+
 def test_quiet_hosts_are_not_recorded_as_seen_in_record_mode(sock: Path) -> None:
     async def scenario() -> None:
         async with running(sock, Mode.RECORD, quiet_hosts=frozenset({"bg.test"})) as (proxy, _):

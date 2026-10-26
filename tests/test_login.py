@@ -403,6 +403,7 @@ def test_closing_the_window_cleans_up_then_calls_finish_with_what_was_seen(
 def test_the_browser_is_started_in_a_private_sandbox_with_the_display(roots: sites.Roots) -> None:
     fake = FakeSandbox(["true"])
     modes: dict[str, int] = {}
+    policies: list[str] = []
 
     def finish(_seen: list[SeenHost], _profile: Path) -> None:
         return None
@@ -415,6 +416,8 @@ def test_the_browser_is_started_in_a_private_sandbox_with_the_display(roots: sit
                 "login": box.proxy_socket.parent,
             }.items():
                 modes[name] = stat.S_IMODE(path.stat().st_mode)
+            assert box.policy_dir is not None
+            policies.append((box.policy_dir / "managed" / "valetkey.json").read_text())
             return super().__call__(box, command)
 
     fake = Watching(["true"])
@@ -434,6 +437,7 @@ def test_the_browser_is_started_in_a_private_sandbox_with_the_display(roots: sit
     assert box.runtime_dir == roots.runtime
     assert box.log_file == roots.runtime / "valetkey" / "logins" / "sitex.log"
     assert box.shared_dir is None
+    assert json.loads(policies[0]) == sandbox.CHROME_POLICY
     (command,) = fake.commands
     assert command[:2] == ["/usr/bin/sh", "-c"]
     assert f"--user-data-dir={box.profile_dir}" in command[2]
