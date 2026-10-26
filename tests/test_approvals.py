@@ -2,17 +2,14 @@
 import asyncio
 import json
 import os
-import signal
 import stat
+import subprocess
 import time
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
 from valetkey import approvals, sites
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 # -- which hosts may be asked about ------------------------------------------------------------
 
@@ -417,14 +414,45 @@ def test_a_command_that_hangs_is_killed_with_everything_it_started(tmp_path: Pat
     assert time.monotonic() - started < 5
     child = int(marker.read_text(encoding="utf-8"))
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        try:
-            os.kill(child, 0)
-        except ProcessLookupError:
-            break
+    while time.monotonic() < deadline and not ended(child):
         time.sleep(0.05)
-    with pytest.raises(ProcessLookupError):
-        os.kill(child, signal.SIG_DFL)
+    assert ended(child)
+
+
+def ended(pid: int) -> bool:
+    """Tell whether ``pid`` is gone, or only a zombie that nothing has collected yet.
+
+    Where nothing reaps orphans, such as the first process of a container, a killed child
+    stays in the table as a zombie, and signal 0 still reaches it.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    try:
+        status = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return True
+    return status.rpartition(")")[2].split()[0] == "Z"
+
+
+def test_ended_knows_a_running_process_a_zombie_and_a_gone_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child = subprocess.Popen(["sleep", "59.5"])  # noqa: S607
+    try:
+        assert not ended(child.pid)
+        child.kill()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not ended(child.pid):
+            time.sleep(0.01)
+        assert ended(child.pid)  # killed and not yet collected: a zombie
+    finally:
+        child.wait()
+    assert ended(child.pid)  # collected
+    # A process that ends between the two looks: signal 0 reaches it, /proc has nothing.
+    monkeypatch.setattr(os, "kill", lambda *_: None)
+    assert ended(child.pid)
 
 
 def test_a_program_that_cannot_start_is_an_error() -> None:
