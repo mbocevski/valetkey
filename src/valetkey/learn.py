@@ -6,10 +6,15 @@ After a person logs in, two lists say what the login reached:
 * the hosts the recording proxy saw, for any reason, and
 * the hosts of the pages the browser navigated to, read from the login profile's history.
 
-:func:`classify` splits them. The site's own domain and any host the browser navigated to (an
-SSO provider, for example) are allowed. A host that only loaded in the background, such as an
-image, script or beacon, is left out. :func:`merge` folds the result into the site's existing
-policy without dropping hosts the person approved earlier, and :func:`summary` describes it.
+:func:`classify` splits them. The site's own domain is allowed. So is any other host that showed
+the person a page: one that ended a redirect chain and was open for at least :data:`SHOWN_MS`
+(an SSO provider's sign-in page, for example). A host the login only passed through, one that
+redirected at once or was left again within moments, is not allowed, because nothing in the
+history tells a sign-in provider that redirects from a tracker or an address a page was sent
+through. A host that only loaded in the background, such as an image, script or beacon, is left
+out too. :func:`merge` folds the result into the site's existing policy without dropping hosts
+the person approved earlier, and :func:`summary` describes it, naming every third party it allowed
+and every host it passed through.
 
 Chromium facts this module relies on, checked against Chromium 156.0.8078.47 by logging in
 headless to a local page that redirects with HTTP 302 and reading ``<profile>/Default/History``:
@@ -26,6 +31,21 @@ headless to a local page that redirects with HTTP 302 and reading ``<profile>/De
   still shows up.
 * That headless run recorded no visit for a frame inside the page. Subframe visits are the core
   types 3 and 4 in Chromium's page transition list, so they are skipped by type.
+* The qualifiers say how a visit was reached: ``SERVER_REDIRECT`` (``0x80000000``) and
+  ``CLIENT_REDIRECT`` (``0x40000000``) by a redirect, ``CHAIN_START`` (``0x10000000``) first in a
+  chain, ``CHAIN_END`` (``0x20000000``) last. A hop that only redirects is in the middle of its
+  chain, so it has no ``CHAIN_END``, and its ``visits.visit_duration`` (microseconds the page was
+  open) is 0. A sign-in page the person used was a ``CHAIN_END`` with a duration of seconds.
+  Measured over a sign-in provider's form (reached by redirect and by link, with the form posted
+  back to the site by redirect and by an auto-submitting page), a chooser page that moved on by
+  script after 0.3 s, an already signed-in provider that only redirected, a tracker bounce by
+  server redirect and by meta refresh, and a host that a page's script or a server redirect sent
+  the browser through.
+* Nothing in the history says whether the person acted on a page. A form posted to a redirect
+  often leaves no form-submit visit, and the same script navigation is recorded as typed in one
+  flow and as a link in another. A page that is shown for a few seconds before it moves on looks
+  like a sign-in page, so this rule keeps out what redirects at once and cannot keep out a page
+  made to look used. The summary names the third parties for that reason.
 
 **The history is hostile.** The login window is a browser a website controls, and it writes the
 ``History`` database this module reads. A page can leave a file that is not a database at all, a
@@ -76,6 +96,11 @@ MAX_URL = 4096
 _COPY_CHUNK = 1 << 20
 _PROGRESS_STEP = 10_000
 _TABLES = frozenset({"urls", "visits"})
+SHOWN_MS = 2000
+"""A page counts as shown when it ended its redirect chain and was open at least this long."""
+_CHAIN_END = 0x20000000
+_FLAGS = 0xFFFFFFFF
+_MAX_NAMED_THIRD_PARTIES = 20
 
 _CHROME_EPOCH = datetime(1601, 1, 1, tzinfo=UTC)
 
@@ -90,7 +115,7 @@ def chrome_time(moment: datetime) -> int:
 # integer :func:`chrome_time` gives: a profile outlives its logins, and what it recorded before
 # is not what this login did.
 _NAVIGATION = (
-    "SELECT u.url FROM visits AS v JOIN urls AS u ON u.id = v.url "
+    "SELECT u.url, v.transition, v.visit_duration FROM visits AS v JOIN urls AS u ON u.id = v.url "
     "WHERE (v.transition & 255) NOT IN (3, 4) AND v.visit_time >= ? LIMIT 100000"
 )
 
@@ -115,12 +140,25 @@ class Classification:
     """Hosts sorted by what the login did with them.
 
     ``allow`` holds the site's registrable domain (covering its subdomains) and the exact hosts
-    of other sites the browser navigated to. ``excluded`` holds the exact hosts that only loaded
-    in the background. Both are sorted.
+    of other sites that showed the person a page. ``excluded`` holds the exact hosts that only
+    loaded in the background or that the login only passed through. Both are sorted.
     """
 
     allow: tuple[str, ...]
     excluded: tuple[str, ...]
+    passed_through: tuple[str, ...] = ()
+    """The exact hosts of other sites that the login only passed through. They are in
+    ``excluded`` too, and are named apart so the person can be told about them."""
+
+
+@dataclass(frozen=True, slots=True)
+class Navigation:
+    """The hosts of a login's top-level pages, split by whether the person was shown a page."""
+
+    shown: frozenset[str]
+    """Hosts with a page that ended its redirect chain and stayed open for :data:`SHOWN_MS`."""
+    passed: frozenset[str]
+    """Every other host the browser navigated to: it only redirected, or was left at once."""
 
 
 class HistoryError(sqlite3.DatabaseError):
@@ -250,35 +288,49 @@ def _read(copy: Path, queries: tuple[Query, ...]) -> list[list[tuple[Any, ...]]]
         database.set_authorizer(_authorize)
         return [
             [
-                (row[0][:MAX_URL] if isinstance(row[0], str) else row[0],)
+                (row[0][:MAX_URL] if isinstance(row[0], str) else row[0], *row[1:])
                 for row in database.execute(sql, params)
             ]
             for sql, params in queries
         ]
 
 
-def navigation_hosts(history_path: Path, *, since: datetime) -> set[str]:
+def _as_int(value: object) -> int:
+    """Return ``value`` if it is an integer, else 0: a history is not trusted to hold numbers."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def navigation(history_path: Path, *, since: datetime) -> Navigation:
     """Return the hosts of the top-level pages a profile's history recorded since ``since``.
 
     ``since`` is when the login began. The profile keeps its history from one login to the next,
     so without it a host that the person removed would come back at the next login.
 
     A visit counts unless it is a subframe load, so each hop of a redirect chain counts. Only
-    ``http`` and ``https`` pages count. A missing file gives an empty set: the profile has no
-    history yet.
+    ``http`` and ``https`` pages count. A host is ``shown`` when one of its visits ended its
+    redirect chain and stayed open for :data:`SHOWN_MS` (see the module docstring), and ``passed``
+    otherwise. A missing file gives nothing: the profile has no history yet.
 
     Raises:
         HistoryError: when the file is not a history database, or cannot be trusted or read.
 
     """
     if not history_path.is_file():
-        return set()
-    hosts: set[str] = set()
-    for (url,) in _query_history(history_path, (_NAVIGATION, (chrome_time(since),)))[0]:
-        if urlsplit(url or "").scheme in {"http", "https"}:
-            with contextlib.suppress(ValueError):
-                hosts.add(sites.host_of(url))
-    return hosts
+        return Navigation(frozenset(), frozenset())
+    shown: set[str] = set()
+    seen: set[str] = set()
+    for url, transition, duration in _query_history(
+        history_path, (_NAVIGATION, (chrome_time(since),))
+    )[0]:
+        if urlsplit(url or "").scheme not in {"http", "https"}:
+            continue
+        with contextlib.suppress(ValueError):
+            host = sites.host_of(url)
+            seen.add(host)
+            ended = _as_int(transition) & _FLAGS & _CHAIN_END
+            if ended and _as_int(duration) >= SHOWN_MS * 1000:
+                shown.add(host)
+    return Navigation(frozenset(shown), frozenset(seen - shown))
 
 
 def login_pages(history_path: Path, start_url: str, *, since: datetime) -> tuple[str, ...]:
@@ -312,29 +364,36 @@ def login_pages(history_path: Path, start_url: str, *, since: datetime) -> tuple
 def classify(
     start_url: str,
     seen_hosts: Iterable[str],
-    navigation_hosts: Iterable[str],
+    shown_hosts: Iterable[str],
+    passed_hosts: Iterable[str] = (),
     suffixes: frozenset[str] = sites.TWO_LEVEL_SUFFIXES,
 ) -> Classification:
     """Sort the hosts a login reached into ``allow`` and ``excluded``.
 
     The registrable domain of ``start_url`` is always allowed. A host under it is covered by it.
-    Any other host that was navigated to is allowed as itself, even if the proxy never saw it.
-    Any other host that was only seen is excluded as itself. An IP address is never covered by
-    a domain, so it follows the same rules as a third party. A host that an allowed host covers,
-    or that covers an allowed host, is not listed as excluded, because an excluded entry would
-    override the allowed one.
+    Any other host that showed the person a page (``shown_hosts``) is allowed as itself, even if
+    the proxy never saw it. Any other host that was only seen, or that the login only passed
+    through (``passed_hosts``), is excluded as itself; the passed-through ones are also named in
+    ``passed_through``. An IP address is never covered by a domain, so it follows the same rules as
+    a third party. A host that an allowed host covers, or that covers an allowed host, is not
+    listed as excluded, because an excluded entry would override the allowed one.
     Entries that are not plausible hosts are ignored.
     """
     domain = sites.registrable_domain(sites.host_of(start_url), suffixes)
-    navigated = _hosts(navigation_hosts)
+    shown = _hosts(shown_hosts)
     allow = {domain}
-    allow.update(host for host in navigated if not sites.host_matches(host, [domain]))
+    allow.update(host for host in shown if not sites.host_matches(host, [domain]))
+    passed = _hosts(passed_hosts) - shown
     excluded = {
         host
-        for host in _hosts(seen_hosts)
+        for host in _hosts(seen_hosts) | passed
         if not (sites.host_matches(host, allow) or sites.excluded_conflicts(host, allow))
     }
-    return Classification(allow=tuple(sorted(allow)), excluded=tuple(sorted(excluded)))
+    return Classification(
+        allow=tuple(sorted(allow)),
+        excluded=tuple(sorted(excluded)),
+        passed_through=tuple(sorted(passed & excluded)),
+    )
 
 
 def _hosts(values: Iterable[str]) -> set[str]:
@@ -388,11 +447,22 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
     )
 
 
+def _named(hosts: Iterable[str]) -> str:
+    """List ``hosts``, each shown safely; past the first twenty the rest are counted."""
+    ordered = sorted(hosts)
+    shown = [sites.shown_host(host) for host in ordered[:_MAX_NAMED_THIRD_PARTIES]]
+    more = len(ordered) - len(shown)
+    return ", ".join(shown) + (f" and {more} more" if more > 0 else "")
+
+
 def summary(policy: sites.Policy, classification: Classification) -> str:
-    """Describe a saved login in one line: what sessions may reach and what was left out.
+    """Describe a saved login: what sessions may reach, what was allowed on the way and what not.
 
     Allowed hosts are named, the site's own domain first; with more than four, the first three
-    are named and the rest counted. Excluded hosts from this login are counted, never named.
+    are named and the rest counted. Every other site this login allowed is named, with how to
+    remove one, because nothing proves a page the person saw was one they meant to trust. Hosts
+    the login only passed through are named too, with how to allow one if signing in needs it.
+    Excluded hosts that only loaded in the background are counted, never named.
     """
     own = sites.registrable_domain(sites.host_of(policy.start))
     allowed = sorted(policy.allow, key=lambda host: (not sites.host_matches(host, [own]), host))
@@ -404,7 +474,23 @@ def summary(policy: sites.Policy, classification: Classification) -> str:
     else:
         named = allowed[0] if allowed else "no hosts"
     text = f"Saved your {policy.site} login. Sessions will be limited to {named}."
-    left_out = sum(1 for host in classification.excluded if host in policy.excluded)
+    third = [host for host in classification.allow if not sites.host_matches(host, [own])]
+    if third:
+        text += (
+            f" Other sites this login allowed: {_named(third)}. Run "
+            f"`valetkey deny {policy.site} HOST` for any you do not recognise."
+        )
+    passed = [host for host in classification.passed_through if host in policy.excluded]
+    if passed:
+        text += (
+            f" Passed through but not allowed, because they only redirected: {_named(passed)}. "
+            f"Run `valetkey allow {policy.site} HOST` if signing in needs one."
+        )
+    left_out = sum(
+        1
+        for host in classification.excluded
+        if host in policy.excluded and host not in classification.passed_through
+    )
     if left_out:
         noun = "host" if left_out == 1 else "hosts"
         text += f" Left out {left_out} {noun} that only loaded in the background."

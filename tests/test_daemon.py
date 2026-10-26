@@ -955,12 +955,15 @@ def make_history(path: Path, urls: list[str], *, after: timedelta = timedelta(se
     database.executescript(
         "CREATE TABLE urls(id INTEGER PRIMARY KEY, url TEXT);"
         "CREATE TABLE visits(id INTEGER PRIMARY KEY, url INTEGER, visit_time INTEGER,"
-        " transition INTEGER);"
+        " transition INTEGER, visit_duration INTEGER DEFAULT 0);"
     )
     for number, url in enumerate(urls, start=1):
         database.execute("INSERT INTO urls VALUES (?, ?)", (number, url))
+        # Each page ended its chain and was open for five seconds: the person was shown it.
         database.execute(
-            "INSERT INTO visits(url, visit_time, transition) VALUES (?, ?, 1)", (number, visited)
+            "INSERT INTO visits(url, visit_time, transition, visit_duration) "
+            "VALUES (?, ?, ?, 5000000)",
+            (number, visited, 0x20000001),
         )
     database.commit()
     database.close()
@@ -1099,6 +1102,38 @@ def test_a_login_with_no_recorded_start_saves_nothing_rather_than_everything(
             (entry,) = (await c.call("sites"))["sites"]
             assert entry["summary"].startswith("The newsite login could not be saved")
             assert not sites.policy_path(roots, "newsite").exists()
+
+    run(scenario())
+
+
+def test_a_login_names_what_it_allowed_and_what_it_only_passed_through(roots: sites.Roots) -> None:
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("login", target="https://newsite.test/")
+            (window,) = rig.logins.windows
+            profile = roots.state / "profile"
+            history = profile / "Default" / "History"
+            history.parent.mkdir(parents=True)
+            make_history(history, ["https://newsite.test/signin", "https://login.okta.test/auth"])
+            with contextlib.closing(sqlite3.connect(history)) as database:
+                database.execute("INSERT INTO urls VALUES (3, 'https://tracker.test/r')")
+                database.execute(
+                    "INSERT INTO visits(url, visit_time, transition, visit_duration) "
+                    "VALUES (3, ?, ?, 0)",
+                    (learn.chrome_time(NOW) + 1, 0x80000001),
+                )
+                database.commit()
+            seen = [SeenHost("newsite.test", 5), SeenHost("tracker.test", 1)]
+            await window.close_window(seen, profile)
+            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            policy = sites.load_policy(roots, "newsite")
+            assert policy.allow == ("login.okta.test", "newsite.test")
+            assert policy.excluded == ("tracker.test",)
+            (entry,) = (await c.call("sites"))["sites"]
+            assert "Other sites this login allowed: login.okta.test." in entry["summary"]
+            assert "valetkey deny newsite HOST" in entry["summary"]
+            assert "only redirected: tracker.test." in entry["summary"]
+            assert "valetkey allow newsite HOST" in entry["summary"]
 
     run(scenario())
 
@@ -1849,7 +1884,7 @@ def test_a_login_records_where_forms_were_submitted_from(roots: sites.Roots) -> 
             database.executescript(
                 "CREATE TABLE urls(id INTEGER PRIMARY KEY, url TEXT);"
                 "CREATE TABLE visits(id INTEGER PRIMARY KEY, url INTEGER, visit_time INTEGER,"
-                " from_visit INTEGER, transition INTEGER);"
+                " from_visit INTEGER, transition INTEGER, visit_duration INTEGER);"
             )
             steps = [
                 ("https://newsite.test/", 1, None),
@@ -1859,7 +1894,7 @@ def test_a_login_records_where_forms_were_submitted_from(roots: sites.Roots) -> 
             for number, (url, transition, origin) in enumerate(steps, start=1):
                 database.execute("INSERT INTO urls VALUES (?, ?)", (number, url))
                 database.execute(
-                    "INSERT INTO visits VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO visits VALUES (?, ?, ?, ?, ?, 5000000)",
                     (number, number, learn.chrome_time(NOW) + number, origin, transition),
                 )
             database.commit()

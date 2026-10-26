@@ -11,6 +11,7 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -32,7 +33,8 @@ CREATE TABLE urls(id INTEGER PRIMARY KEY AUTOINCREMENT, url LONGVARCHAR, title L
     visit_count INTEGER DEFAULT 0 NOT NULL, typed_count INTEGER DEFAULT 0 NOT NULL,
     last_visit_time INTEGER NOT NULL, hidden INTEGER DEFAULT 0 NOT NULL);
 CREATE TABLE visits(id INTEGER PRIMARY KEY AUTOINCREMENT, url INTEGER NOT NULL,
-    visit_time INTEGER NOT NULL, from_visit INTEGER, transition INTEGER DEFAULT 0 NOT NULL);
+    visit_time INTEGER NOT NULL, from_visit INTEGER, transition INTEGER DEFAULT 0 NOT NULL,
+    visit_duration INTEGER DEFAULT 0 NOT NULL);
 """
 
 type Visit = tuple[str, int]
@@ -62,6 +64,12 @@ def build(path: Path, visits: list[Visit], *, wal: bool = False) -> sqlite3.Conn
     return database
 
 
+def all_hosts(path: Path, *, since: datetime = EPOCH) -> set[str]:
+    """Every host a history's top-level visits name, whether or not the person was shown a page."""
+    found = learn.navigation(path, since=since)
+    return set(found.shown | found.passed)
+
+
 def history(tmp_path: Path, visits: list[Visit]) -> Path:
     path = tmp_path / "History"
     build(path, visits).close()
@@ -77,7 +85,7 @@ def test_same_domain_login(tmp_path: Path) -> None:
             ("https://www.sitex.com/", LINK),
         ],
     )
-    hosts = learn.navigation_hosts(path, since=EPOCH)
+    hosts = all_hosts(path)
     assert hosts == {"app.sitex.com", "www.sitex.com"}
     assert learn.classify(START, ["app.sitex.com", "cdn.sitex.com"], hosts) == learn.Classification(
         allow=("sitex.com",), excluded=()
@@ -94,7 +102,7 @@ def test_redirect_chain_through_an_sso_provider(tmp_path: Path) -> None:
             ("https://app.sitex.com/home", LINK | CHAIN_END | SERVER_REDIRECT),
         ],
     )
-    hosts = learn.navigation_hosts(path, since=EPOCH)
+    hosts = all_hosts(path)
     result = learn.classify(START, ["app.sitex.com", "login.okta.com", "okta.com"], hosts)
     assert result.allow == ("login.okta.com", "sitex.com")
     assert result.excluded == ()
@@ -105,7 +113,7 @@ def test_popup_sso_is_a_separate_top_level_visit(tmp_path: Path) -> None:
         tmp_path,
         [("https://app.sitex.com/", TYPED), ("https://accounts.google.com/o/oauth2/auth", LINK)],
     )
-    result = learn.classify(START, [], learn.navigation_hosts(path, since=EPOCH))
+    result = learn.classify(START, [], all_hosts(path))
     assert result.allow == ("accounts.google.com", "sitex.com")
 
 
@@ -117,7 +125,7 @@ def test_navigation_hosts_the_proxy_never_saw_still_count() -> None:
 def test_beacons_seen_by_the_proxy_are_excluded(tmp_path: Path) -> None:
     path = history(tmp_path, [("https://app.sitex.com/login", TYPED)])
     seen = ["app.sitex.com", "t.tracker.example", "cdn.metrics.io", "t.tracker.example"]
-    result = learn.classify(START, seen, learn.navigation_hosts(path, since=EPOCH))
+    result = learn.classify(START, seen, all_hosts(path))
     assert result.allow == ("sitex.com",)
     assert result.excluded == ("cdn.metrics.io", "t.tracker.example")
 
@@ -132,7 +140,7 @@ def test_subframe_only_hosts_are_excluded(tmp_path: Path) -> None:
             ("https://pay.sitex.com/frame", AUTO_SUBFRAME),
         ],
     )
-    hosts = learn.navigation_hosts(path, since=EPOCH)
+    hosts = all_hosts(path)
     assert hosts == {"app.sitex.com"}
     result = learn.classify(START, ["ads.example", "widgets.example"], hosts)
     assert result.excluded == ("ads.example", "widgets.example")
@@ -155,7 +163,7 @@ def test_odd_urls_in_history_are_skipped(tmp_path: Path) -> None:
     database.execute("INSERT INTO visits(url, visit_time) VALUES (7, 1)")
     database.commit()
     database.close()
-    assert learn.navigation_hosts(path, since=EPOCH) == {"app.sitex.com", "192.0.2.7"}
+    assert all_hosts(path) == {"app.sitex.com", "192.0.2.7"}
 
 
 def test_ip_literals_are_third_parties_and_exact() -> None:
@@ -225,13 +233,13 @@ def test_classify_is_sorted_and_deterministic() -> None:
 
 
 def test_missing_history_gives_no_hosts(tmp_path: Path) -> None:
-    assert learn.navigation_hosts(tmp_path / "nope" / "History", since=EPOCH) == set()
+    assert all_hosts(tmp_path / "nope" / "History") == set()
 
 
 def test_history_is_read_from_a_copy(tmp_path: Path) -> None:
     path = history(tmp_path, [("https://app.sitex.com/", TYPED)])
     before = path.read_bytes()
-    learn.navigation_hosts(path, since=EPOCH)
+    all_hosts(path)
     assert path.read_bytes() == before
     assert sorted(entry.name for entry in tmp_path.iterdir()) == ["History"]
 
@@ -248,7 +256,7 @@ def test_a_database_with_a_pending_wal_is_copied_with_it(tmp_path: Path) -> None
     main_file_only = sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True)
     with closing(main_file_only), pytest.raises(sqlite3.OperationalError):
         main_file_only.execute("SELECT count(*) FROM visits")
-    assert learn.navigation_hosts(path, since=EPOCH) == {"app.sitex.com", "login.okta.com"}
+    assert all_hosts(path) == {"app.sitex.com", "login.okta.com"}
     live.close()
 
 
@@ -257,7 +265,7 @@ def test_a_locked_database_is_still_readable(tmp_path: Path) -> None:
     live = build(path, [("https://app.sitex.com/", TYPED)])
     live.execute("BEGIN EXCLUSIVE")
     try:
-        assert learn.navigation_hosts(path, since=EPOCH) == {"app.sitex.com"}
+        assert all_hosts(path) == {"app.sitex.com"}
     finally:
         live.rollback()
         live.close()
@@ -267,7 +275,7 @@ def test_a_file_that_is_not_a_database_is_an_error(tmp_path: Path) -> None:
     path = tmp_path / "History"
     path.write_bytes(b"this is not sqlite" * 100)
     with pytest.raises(sqlite3.DatabaseError):
-        learn.navigation_hosts(path, since=EPOCH)
+        all_hosts(path)
 
 
 def policy(**changes: object) -> sites.Policy:
@@ -329,18 +337,22 @@ def test_summary_names_every_host_up_to_four() -> None:
     assert line(("sitex.com",)) == "Saved your sitex login. Sessions will be limited to sitex.com."
     assert line(("login.okta.com", "sitex.com"), ("a.example", "b.example")) == (
         "Saved your sitex login. Sessions will be limited to sitex.com and login.okta.com. "
+        "Other sites this login allowed: login.okta.com. "
+        "Run `valetkey deny sitex HOST` for any you do not recognise. "
         "Left out 2 hosts that only loaded in the background."
     )
-    assert line(("a.example", "b.example", "sitex.com", "z.example")).endswith(
-        "limited to sitex.com, a.example, b.example and z.example."
+    assert line(("a.example", "b.example", "sitex.com", "z.example")).startswith(
+        "Saved your sitex login. Sessions will be limited to sitex.com, a.example, b.example and "
+        "z.example."
     )
 
 
 def test_summary_trims_a_long_list() -> None:
     allow = ("a.example", "b.example", "c.example", "d.example", "sitex.com")
-    assert line(allow) == (
+    assert line(allow).startswith(
         "Saved your sitex login. Sessions will be limited to sitex.com, a.example, "
-        "b.example and 2 more."
+        "b.example and 2 more. Other sites this login allowed: a.example, b.example, c.example, "
+        "d.example."
     )
 
 
@@ -378,7 +390,7 @@ def test_real_chromium_history_has_the_columns_the_query_reads(tmp_path: Path) -
     path = profile / "Default" / "History"
     if not path.is_file():
         pytest.skip("this Chromium wrote no history")
-    assert isinstance(learn.navigation_hosts(path, since=EPOCH), set)
+    assert isinstance(all_hosts(path), set)
 
 
 # -- the pages a login submitted a form from -----------------------------------------------
@@ -516,7 +528,7 @@ FIXED = "the login's history could not be read"
 def unreadable(path: Path) -> learn.HistoryError:
     """Read ``path`` both ways and return the error, which both ways must raise alike."""
     with pytest.raises(learn.HistoryError) as first:
-        learn.navigation_hosts(path, since=EPOCH)
+        all_hosts(path)
     with pytest.raises(learn.HistoryError) as second:
         learn.login_pages(path, START, since=EPOCH)
     assert str(first.value) == str(second.value)
@@ -638,9 +650,7 @@ def test_a_query_that_runs_too_long_is_stopped(
     )
     database.commit()
     database.close()
-    assert (
-        len(learn.navigation_hosts(path, since=EPOCH)) == 3000
-    )  # read in time under the real budget
+    assert len(all_hosts(path)) == 3000  # read in time under the real budget
     monkeypatch.setattr(learn, "QUERY_SECONDS", -1.0)  # already spent
     assert str(unreadable(path)) == FIXED
 
@@ -671,7 +681,7 @@ def test_a_file_at_the_cap_is_read_and_one_byte_over_is_not(
     path = history(tmp_path, [("https://app.sitex.com/", TYPED)])
     size = path.stat().st_size
     monkeypatch.setattr(learn, "MAX_BYTES", size)
-    assert learn.navigation_hosts(path, since=EPOCH) == {"app.sitex.com"}
+    assert all_hosts(path) == {"app.sitex.com"}
     monkeypatch.setattr(learn, "MAX_BYTES", size - 1)
     assert str(unreadable(path)) == FIXED
 
@@ -698,7 +708,7 @@ def test_a_link_in_place_of_the_history_is_not_followed(tmp_path: Path) -> None:
     real = history(tmp_path, [("https://app.sitex.com/", TYPED)])
     link = tmp_path / "Link"
     link.symlink_to(real)
-    assert learn.navigation_hosts(real, since=EPOCH) == {"app.sitex.com"}
+    assert all_hosts(real) == {"app.sitex.com"}
     assert str(unreadable(link)) == FIXED
 
 
@@ -742,12 +752,12 @@ def test_a_history_with_more_rows_than_the_limit_is_read_as_far_as_it_goes(tmp_p
     )
     database.commit()
     database.close()
-    assert len(learn.navigation_hosts(path, since=EPOCH)) == learn.MAX_ROWS
+    assert len(all_hosts(path)) == learn.MAX_ROWS
 
 
 def test_a_very_long_address_is_cut_but_its_host_is_still_read(tmp_path: Path) -> None:
     path = history(tmp_path, [("https://long.example/" + "a" * 100_000, TYPED)])
-    assert learn.navigation_hosts(path, since=EPOCH) == {"long.example"}
+    assert all_hosts(path) == {"long.example"}
 
 
 def test_the_authorizer_allows_only_reading_the_two_tables() -> None:
@@ -800,7 +810,7 @@ def test_a_history_a_page_wrote_still_gives_the_hosts_it_really_holds(tmp_path: 
     )
     assert path.with_name("History-wal").exists()
     try:
-        assert learn.navigation_hosts(path, since=EPOCH) == {"app.sitex.com", "login.okta.com"}
+        assert all_hosts(path) == {"app.sitex.com", "login.okta.com"}
     finally:
         database.close()
 
@@ -848,8 +858,8 @@ def test_only_the_pages_of_this_login_count(tmp_path: Path) -> None:
             ("https://login.okta.test/auth", LINK, BEGAN + timedelta(seconds=3)),
         ],
     )
-    assert learn.navigation_hosts(path, since=BEGAN) == {"app.sitex.com", "login.okta.test"}
-    assert learn.navigation_hosts(path, since=before) == {
+    assert all_hosts(path, since=BEGAN) == {"app.sitex.com", "login.okta.test"}
+    assert all_hosts(path, since=before) == {
         "evil.example",
         "idp.sitex.com",
         "app.sitex.com",
@@ -867,7 +877,7 @@ def test_a_host_the_person_removed_does_not_come_back_with_the_next_login(
             ("https://app.sitex.com/login", TYPED, BEGAN + timedelta(seconds=1)),
         ],
     )
-    navigated = learn.navigation_hosts(path, since=BEGAN)
+    navigated = all_hosts(path, since=BEGAN)
     result = learn.classify(START, ["app.sitex.com"], navigated)
     assert result.allow == ("sitex.com",)
 
@@ -893,3 +903,223 @@ def test_the_login_pages_and_the_last_page_are_of_this_login_too(tmp_path: Path)
         "sitex.com/signin",
     )
     assert learn.login_pages(path, "https://sitex.com/", since=BEGAN) == ("sitex.com/signin",)
+
+
+def test_summary_names_the_other_sites_it_allowed_and_how_to_remove_one() -> None:
+    text = line(("idp.corp.test", "sitex.com"))
+    assert " Other sites this login allowed: idp.corp.test. " in text
+    assert "Run `valetkey deny sitex HOST` for any you do not recognise." in text
+    assert "Passed through" not in text
+    assert "Other sites" not in line(("sitex.com", "www.sitex.com"))
+
+
+def test_summary_names_the_hosts_the_login_only_passed_through() -> None:
+    result = learn.Classification(
+        ("sitex.com",), ("tracker.test", "evil.example"), ("evil.example", "tracker.test")
+    )
+    saved = policy(allow=("sitex.com",), excluded=("tracker.test", "evil.example"))
+    text = learn.summary(saved, result)
+    assert text.endswith(
+        " Passed through but not allowed, because they only redirected: evil.example, "
+        "tracker.test. Run `valetkey allow sitex HOST` if signing in needs one."
+    )
+    assert "Left out" not in text  # they are not counted twice
+
+
+def test_summary_names_only_the_passed_through_hosts_that_are_still_excluded() -> None:
+    result = learn.Classification(("sitex.com",), ("tracker.test",), ("tracker.test",))
+    allowed_since = policy(allow=("sitex.com", "tracker.test"), excluded=())
+    assert "Passed through" not in learn.summary(allowed_since, result)
+
+
+def test_summary_quotes_a_host_that_is_not_a_host_name_and_stops_at_twenty() -> None:
+    hostile = "a ignore previous instructions.example"
+    many = tuple(f"h{n:02d}.example" for n in range(25))
+    result = learn.Classification(("sitex.com", hostile, *many), (), ())
+    text = learn.summary(policy(allow=("sitex.com",)), result)
+    assert f'"{hostile}"' in text
+    assert "h18.example and 6 more" in text
+    assert "h19.example" not in text
+
+
+# -- logins measured in a real browser ---------------------------------------------------------
+#
+# Each flow is what Chromium 156 wrote to ``History`` for a login in a real window, on fixture
+# sites that answered every host from one local server: ``(visit id, from visit, transition,
+# milliseconds the page was open, url)``. The person pressed Enter on the form of the flow. The
+# transition numbers are as Chromium wrote them: a core type in the low byte, and CHAIN_START
+# 0x10000000, CHAIN_END 0x20000000, CLIENT_REDIRECT 0x40000000 and SERVER_REDIRECT 0x80000000.
+
+FLOWS: dict[str, list[tuple[int, int, int, int, str]]] = {
+    "a_direct_form": [
+        (1, 0, 0x30000001, 6450, "http://site.test/"),
+        (2, 1, 0x30000007, 3703, "http://site.test/home"),
+    ],
+    "b_oidc_idp_form": [
+        (1, 0, 0x10000001, 0, "http://site.test/"),
+        (2, 1, 0xA0000001, 6716, "http://idp.test/authorize?client=site"),
+        (3, 2, 0x10000001, 0, "http://idp.test/login"),
+        (4, 3, 0x80000001, 0, "http://site.test/callback?code=1"),
+        (5, 4, 0xA0000001, 3714, "http://site.test/home"),
+    ],
+    "b2_idp_redirect_only": [
+        (1, 0, 0x10000001, 0, "http://site.test/"),
+        (2, 1, 0x80000001, 0, "http://idp.test/authorize?client=site"),
+        (3, 2, 0x80000001, 0, "http://site.test/callback?code=1"),
+        (4, 3, 0xA0000001, 2531, "http://site.test/home"),
+    ],
+    "b3_saml_post_back": [
+        (1, 0, 0x10000001, 0, "http://site.test/"),
+        (2, 1, 0xA0000001, 6481, "http://idp.test/sso"),
+        (3, 2, 0x30000001, 13, "http://idp.test/login"),
+        (4, 3, 0x30000007, 3704, "http://site.test/home"),
+    ],
+    "b4_idp_chooser_then_form": [
+        (1, 0, 0x10000001, 0, "http://site.test/"),
+        (2, 1, 0xA0000001, 300, "http://idp.test/choose"),
+        (3, 2, 0x30000001, 6655, "http://idp.test/signin"),
+        (4, 3, 0x10000007, 0, "http://site.test/callback?code=1"),
+        (5, 4, 0xA0000007, 3713, "http://site.test/home"),
+    ],
+    "c_tracker_server_bounce": [
+        (1, 0, 0x10000001, 0, "http://site.test/"),
+        (2, 1, 0x80000001, 0, "http://tracker.test/r?u=login"),
+        (3, 2, 0xA0000001, 6477, "http://site.test/login"),
+        (4, 3, 0x30000007, 3716, "http://site.test/home"),
+    ],
+    "c2_tracker_client_bounce": [
+        (1, 0, 0x10000001, 26, "http://site.test/"),
+        (2, 1, 0x40000000, 0, "http://tracker.test/r"),
+        (3, 2, 0xA0000000, 6708, "http://site.test/login"),
+        (4, 3, 0x30000007, 3701, "http://site.test/home"),
+    ],
+    "d1_evil_after_login_js": [
+        (1, 0, 0x30000001, 6468, "http://site.test/"),
+        (2, 1, 0x10000007, 13, "http://site.test/home"),
+        (3, 2, 0x40000000, 0, "http://evil.example/x"),
+        (4, 3, 0xA0000000, 3707, "http://site.test/done"),
+    ],
+    "d2_evil_visible_page": [
+        (1, 0, 0x30000001, 6476, "http://site.test/"),
+        (2, 1, 0x10000007, 1017, "http://evil.example/wait"),
+        (3, 2, 0x60000001, 2692, "http://site.test/done"),
+    ],
+    "d3_evil_server_bounce": [
+        (1, 0, 0x10000001, 0, "http://site.test/"),
+        (2, 1, 0x80000001, 0, "http://evil.example/x"),
+        (3, 2, 0xA0000001, 6463, "http://site.test/login"),
+        (4, 3, 0x30000007, 3716, "http://site.test/home"),
+    ],
+    "d4_evil_shown_3s_then_script": [
+        (1, 0, 0x30000001, 6452, "http://site.test/"),
+        (2, 1, 0x30000007, 3012, "http://evil.example/wait"),
+        (3, 2, 0x30000000, 2695, "http://site.test/done"),
+    ],
+}
+
+# For each flow: the third-party hosts the rule allows, and those it only passes through.
+EXPECTED: dict[str, tuple[set[str], set[str]]] = {
+    "a_direct_form": (set(), set()),
+    "b_oidc_idp_form": ({"idp.test"}, set()),
+    "b2_idp_redirect_only": (set(), {"idp.test"}),
+    "b3_saml_post_back": ({"idp.test"}, set()),
+    "b4_idp_chooser_then_form": ({"idp.test"}, set()),
+    "c_tracker_server_bounce": (set(), {"tracker.test"}),
+    "c2_tracker_client_bounce": (set(), {"tracker.test"}),
+    "d1_evil_after_login_js": (set(), {"evil.example"}),
+    "d2_evil_visible_page": (set(), {"evil.example"}),
+    "d3_evil_server_bounce": (set(), {"evil.example"}),
+    # A page made to look used, shown for three seconds before it moves on, is not told apart
+    # from a sign-in page. The summary names it for the person for this reason.
+    "d4_evil_shown_3s_then_script": ({"evil.example"}, set()),
+}
+
+
+def flow_history(tmp_path: Path, rows: list[tuple[int, int, int, int, str]]) -> Path:
+    path = tmp_path / "History"
+    database = sqlite3.connect(path)
+    database.executescript(SCHEMA)
+    for number, origin, transition, millis, url in rows:
+        database.execute(
+            "INSERT INTO urls(id, url, last_visit_time) VALUES (?, ?, 1)", (number, url)
+        )
+        database.execute(
+            "INSERT INTO visits(id, url, visit_time, from_visit, transition, visit_duration) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                number,
+                number,
+                learn.chrome_time(BEGAN + timedelta(seconds=number)),
+                origin or None,
+                signed(transition),
+                millis * 1000,
+            ),
+        )
+    database.commit()
+    database.close()
+    return path
+
+
+@pytest.mark.parametrize("flow", sorted(FLOWS))
+def test_a_login_allows_a_provider_that_showed_a_page_and_not_one_it_passed_through(
+    tmp_path: Path, flow: str
+) -> None:
+    path = flow_history(tmp_path, FLOWS[flow])
+    found = learn.navigation(path, since=BEGAN)
+    seen = [urlsplit(url).hostname or "" for *_, url in FLOWS[flow]]
+    result = learn.classify("http://site.test/", seen, found.shown, found.passed)
+    allowed, passed = EXPECTED[flow]
+    assert set(result.allow) == {"site.test", *allowed}
+    assert set(result.passed_through) == passed
+    assert passed <= set(result.excluded)
+    assert not passed & set(result.allow)
+
+
+def test_a_page_has_to_be_open_for_two_seconds_and_end_its_chain() -> None:
+    assert learn.SHOWN_MS == 2000
+
+
+@pytest.mark.parametrize(
+    ("transition", "millis", "shown"),
+    [
+        (0x20000001, 2000, True),
+        (0x20000001, 1999, False),
+        (0x20000001, 60_000, True),
+        (0x10000001, 60_000, False),  # chain start only: the chain went on
+        (0x80000001, 60_000, False),  # reached by a redirect and left through another
+        (0xA0000001, 2000, True),  # reached by a redirect, and the chain ended here
+        (0x30000007, 5000, True),
+        (0x00000000, 5000, False),
+        (0x20000001, 0, False),
+    ],
+)
+def test_what_counts_as_a_page_the_person_was_shown(
+    tmp_path: Path, transition: int, millis: int, *, shown: bool
+) -> None:
+    path = flow_history(tmp_path, [(1, 0, transition, millis, "http://idp.test/x")])
+    found = learn.navigation(path, since=BEGAN)
+    assert (found.shown, found.passed) == (
+        (frozenset({"idp.test"}), frozenset()) if shown else (frozenset(), frozenset({"idp.test"}))
+    )
+
+
+def test_a_host_with_one_shown_page_is_shown_even_if_other_visits_passed_through(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        (1, 0, 0x10000001, 0, "http://idp.test/redirect"),
+        (2, 1, 0xA0000001, 4000, "http://idp.test/form"),
+    ]
+    found = learn.navigation(flow_history(tmp_path, rows), since=BEGAN)
+    assert (found.shown, found.passed) == (frozenset({"idp.test"}), frozenset())
+
+
+def test_a_history_that_stores_text_where_numbers_belong_still_gives_its_hosts(
+    tmp_path: Path,
+) -> None:
+    path = flow_history(tmp_path, [(1, 0, 0x20000001, 5000, "http://idp.test/x")])
+    with closing(sqlite3.connect(path)) as database:
+        database.execute("UPDATE visits SET transition = 'text', visit_duration = x'00'")
+        database.commit()
+    found = learn.navigation(path, since=BEGAN)
+    assert (found.shown, found.passed) == (frozenset(), frozenset({"idp.test"}))

@@ -1304,9 +1304,11 @@ class Daemon:
                     raise RuntimeError(message)  # noqa: TRY301 - handled below, as any failure is
                 history = profile / "Default" / "History"
                 navigated = await asyncio.to_thread(
-                    functools.partial(learn.navigation_hosts, history, since=state.began)
+                    functools.partial(learn.navigation, history, since=state.began)
                 )
-                classification = learn.classify(start, [h.host for h in seen], navigated)
+                classification = learn.classify(
+                    start, [h.host for h in seen], navigated.shown, navigated.passed
+                )
                 pages: tuple[str, ...] = ()
                 with contextlib.suppress(sqlite3.DatabaseError):  # the extra is optional
                     pages = await asyncio.to_thread(

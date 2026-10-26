@@ -185,9 +185,7 @@ def url_lines(url: str) -> str:
 
 def shown_host(host: str) -> str:
     """Return ``host`` as it is, or clipped and quoted when it is not a plausible host name."""
-    if sites.is_plausible_host(host):
-        return host
-    return _quoted(host[:URL_CLIP] + ("…" if len(host) > URL_CLIP else ""))
+    return sites.shown_host(host)
 
 
 def untrusted_text(value: Any) -> str:  # noqa: ANN401 - a decoded JSON value

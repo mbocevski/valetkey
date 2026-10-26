@@ -171,6 +171,21 @@ def is_plausible_host(host: str) -> bool:
     return bool(_HOST_RE.fullmatch(host)) or (host == normalize_host(host) and is_ip_literal(host))
 
 
+HOST_CLIP = 200
+"""Characters of a host that is not a plausible host name that a message may show."""
+
+
+def shown_host(host: str) -> str:
+    """Return ``host`` as it is, or clipped and quoted when it is not a plausible host name.
+
+    A host a page chose reaches the agent in text, so anything that is not a plain host name is
+    shown as a quoted, clipped string that cannot pass for a sentence of its own.
+    """
+    if is_plausible_host(host):
+        return host
+    return json.dumps(host[:HOST_CLIP] + ("…" if len(host) > HOST_CLIP else ""), ensure_ascii=False)
+
+
 def host_of(value: str) -> str:
     """Return the normalized host in ``value``, which is a host name or a URL.
 

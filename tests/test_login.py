@@ -12,6 +12,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -20,7 +21,7 @@ from environment import unusable_reason
 from sway import Sway
 from test_wayland import Compositor, Peer, accepting
 
-from valetkey import login, sandbox, sites, wayland
+from valetkey import learn, login, sandbox, sites, wayland
 from valetkey.proxy import SeenHost
 from valetkey.wayland import decode_string
 
@@ -37,8 +38,8 @@ def short_dir() -> Iterator[Path]:
         yield Path(directory)
 
 
-def run[T](scenario: Any) -> T:  # noqa: ANN401 - any awaitable
-    return asyncio.run(asyncio.wait_for(scenario, 60))
+def run[T](scenario: Any, seconds: float = 60) -> T:  # noqa: ANN401 - any awaitable
+    return asyncio.run(asyncio.wait_for(scenario, seconds))
 
 
 # -- finding the display -------------------------------------------------------------------
@@ -1006,6 +1007,182 @@ def test_cancelling_a_login_closes_the_window_and_cleans_up(sway: Sway, roots: s
     assert finished == []
     assert not login_dir(roots).exists()
     assert leftover_sandboxes(sites.profile_path(roots, "sitex")) == []
+
+
+# -- what a login learns from the pages it went through -----------------------------------------
+
+_SKIP_TYPING = unusable_reason("bwrap", "chromium", "sway", "swaymsg", "wtype")
+needs_typing = pytest.mark.skipif(_SKIP_TYPING is not None, reason=_SKIP_TYPING or "")
+
+FORM = (
+    "<html><body onload=\"document.getElementById('u').focus()\">"
+    "<form method=post action='{action}'><input id=u name=u><button>go</button></form>"
+    "</body></html>"
+)
+
+
+def answer(body: str = "ok", status: int = 200, location: str | None = None) -> bytes:
+    status = 302 if location else status
+    reason = {200: "OK", 302: "Found", 404: "Not Found"}[status]
+    head = f"HTTP/1.1 {status} {reason}\r\nConnection: close\r\nContent-Type: text/html\r\n"
+    if location:
+        head += f"Location: {location}\r\n"
+    return (head + f"Content-Length: {len(body.encode())}\r\n\r\n{body}").encode()
+
+
+class Hosts:
+    """Answers any host on port 80 as a small site, chosen by the ``Host`` header."""
+
+    def __init__(self, site: Callable[[str, str], bytes]) -> None:
+        self.site = site
+        self.log: list[tuple[str, str]] = []
+        self.port = 0
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(OSError, asyncio.IncompleteReadError):
+            head = (await reader.readuntil(b"\r\n\r\n")).decode("latin-1")
+            first, *lines = head.split("\r\n")
+            headers = {k.lower(): v for k, _, v in (ln.partition(": ") for ln in lines if ln)}
+            if length := int(headers.get("content-length", 0)):
+                await reader.readexactly(length)
+            host, path = headers.get("host", "").split(":")[0], first.split(" ")[1].split("?")[0]
+            self.log.append((host, path))
+            writer.write(self.site(host, path))
+            await writer.drain()
+        writer.close()
+
+    @contextlib.asynccontextmanager
+    async def serving(self) -> Any:  # noqa: ANN401 - an async generator
+        server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self.port = server.sockets[0].getsockname()[1]
+        try:
+            yield self
+        finally:
+            server.close()
+            server.close_clients()
+            await server.wait_closed()
+
+    def proxy_options(self) -> dict[str, Any]:
+        async def resolve(_host: str, _port: int) -> list[str]:
+            return ["127.0.0.1"]
+
+        async def connect(_address: str, _port: int) -> tuple[Any, Any]:
+            return await asyncio.open_connection("127.0.0.1", self.port)
+
+        return {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
+
+    def reached(self, host: str, path: str) -> bool:
+        return (host, path) in self.log
+
+
+def oidc_site(host: str, path: str) -> bytes:
+    """The site sends the browser to its identity provider, which shows a form and sends it back."""
+    if host == "site.test":
+        return {
+            "/": answer(location="http://idp.test/authorize"),
+            "/callback": answer(location="/home"),
+            "/home": answer("welcome"),
+        }.get(path, answer(status=404))
+    if host == "idp.test":
+        return {
+            "/authorize": answer(FORM.format(action="http://idp.test/login")),
+            "/login": answer(location="http://site.test/callback"),
+        }.get(path, answer(status=404))
+    return answer(status=404)
+
+
+def bounce_site(host: str, path: str) -> bytes:
+    """The site's address redirects through another host, and only then shows its form."""
+    if host == "site.test":
+        return {
+            "/": answer(location="http://evil.example/x"),
+            "/login": answer(FORM.format(action="/signin")),
+            "/signin": answer(location="/home"),
+            "/home": answer("welcome"),
+        }.get(path, answer(status=404))
+    if host == "evil.example":
+        return answer(location="http://site.test/login")
+    return answer(status=404)
+
+
+async def log_in(
+    sway: Sway, roots: sites.Roots, hosts: Hosts, form: tuple[str, str], end: str
+) -> learn.Classification:
+    """Open a login at ``http://site.test/``, press Enter on ``form``, end at ``end``, classify."""
+    finished: list[list[SeenHost]] = []
+    began = datetime.now(UTC)
+    env = {
+        "PATH": os.environ["PATH"],
+        "XDG_RUNTIME_DIR": str(sway.runtime),
+        "WAYLAND_DISPLAY": sway.display.name,
+    }
+    # The seat has no devices, and the browser only binds a keyboard that is there when it asks,
+    # so a virtual keyboard stays for the whole login.
+    keyboard = await asyncio.create_subprocess_exec(
+        "wtype", "-k", "F24", "-s", "120000", "-k", "F23", env=env
+    )
+    try:
+        handle = await login.start_login(
+            "sitex",
+            "http://site.test/",
+            roots,
+            lambda seen, _profile: finished.append(seen),
+            wayland_socket=sway.display,
+            proxy_options=hosts.proxy_options(),
+        )
+        deadline = time.monotonic() + 60
+        while not hosts.reached(*form):
+            assert time.monotonic() < deadline, (hosts.log, sway_log(roots))
+            await asyncio.sleep(0.2)
+        await asyncio.sleep(2.5)  # the page is shown, and the browser takes the focus
+        await sway.msg("[app_id=chromium]", "focus")
+        await asyncio.sleep(0.3)
+        for keys in (["x"], ["-k", "Return"]):
+            typing = await asyncio.create_subprocess_exec("wtype", *keys, env=env)
+            assert await typing.wait() == 0
+            await asyncio.sleep(1.0)
+        while not hosts.reached("site.test", end):
+            assert time.monotonic() < deadline, (hosts.log, sway_log(roots))
+            await asyncio.sleep(0.2)
+        await asyncio.sleep(2.5)  # the person looks at the page they land on
+        await sway.msg("[app_id=chromium]", "kill")
+        result = await asyncio.wait_for(handle.wait(), 40)
+        assert result.cancelled is False
+    finally:
+        keyboard.terminate()
+        await keyboard.wait()
+    history = sites.profile_path(roots, "sitex") / "Default" / "History"
+    found = learn.navigation(history, since=began)
+    return learn.classify(
+        "http://site.test/", [h.host for h in finished[0]], found.shown, found.passed
+    )
+
+
+@integration
+@needs_typing
+def test_a_sign_in_provider_that_showed_its_form_is_allowed(sway: Sway, roots: sites.Roots) -> None:
+    async def scenario() -> learn.Classification:
+        async with Hosts(oidc_site).serving() as hosts:
+            return await log_in(sway, roots, hosts, ("idp.test", "/authorize"), "/home")
+
+    result = run(scenario(), 150)
+    assert result.allow == ("idp.test", "site.test")
+    assert result.passed_through == ()
+
+
+@integration
+@needs_typing
+def test_a_host_the_login_was_only_sent_through_is_not_allowed(
+    sway: Sway, roots: sites.Roots
+) -> None:
+    async def scenario() -> learn.Classification:
+        async with Hosts(bounce_site).serving() as hosts:
+            return await log_in(sway, roots, hosts, ("site.test", "/login"), "/home")
+
+    result = run(scenario(), 150)
+    assert result.allow == ("site.test",)
+    assert result.passed_through == ("evil.example",)
+    assert "evil.example" in result.excluded
 
 
 # -- a window on a laptop, over a bridge ---------------------------------------------------
