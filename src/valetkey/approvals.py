@@ -37,6 +37,7 @@ import json
 import os
 import re
 import signal
+import stat
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -201,18 +202,44 @@ class Config:
     novnc: bool = False
 
 
+_OTHERS_CAN_WRITE = stat.S_IWGRP | stat.S_IWOTH
+
+
+def _unsafe(info: os.stat_result) -> str:
+    """Say why a file with these attributes may not be trusted, or return an empty string."""
+    if not stat.S_ISREG(info.st_mode):
+        return "not a regular file"
+    if info.st_uid != os.getuid():
+        return "belongs to another user"
+    if info.st_mode & _OTHERS_CAN_WRITE:
+        return "can be written by its group or by others; run chmod go-w on it"
+    return ""
+
+
 def load_config(roots: Roots) -> Config:
     """Read ``$XDG_CONFIG_HOME/valetkey/config.json``; a missing file is an empty config.
 
+    The file names a program the daemon runs, so it must be a regular file that belongs to the
+    user and that nobody else can write to.
+
     Raises:
-        ConfigError: when the file is not a JSON object with only known keys, when
+        ConfigError: when the file belongs to another user, can be written by its group or by
+            others, is not a regular file, is not a JSON object with only known keys, when
             ``approve_command`` is not a non-empty list of non-empty strings, or when
             ``remote_logins`` is not an object holding one boolean switch.
 
     """
     path = roots.config / "valetkey" / CONFIG_NAME
     try:
-        text = path.read_text(encoding="utf-8")
+        # O_NONBLOCK: opening a pipe with no writer must not hang. The checks are on the open
+        # file, so the file that is checked is the file that is read, whatever happens to the path.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(descriptor, "rb") as stream:
+            problem = _unsafe(os.fstat(descriptor))
+            if problem:
+                message = f"{path}: {problem}"
+                raise ConfigError(message)
+            text = stream.read().decode("utf-8", errors="replace")
     except FileNotFoundError:
         return Config()
     except OSError as error:

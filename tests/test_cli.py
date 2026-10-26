@@ -854,6 +854,7 @@ class FakeSystem:
         self.display: Path | cli.login.DisplayError = Path("/run/user/1000/wayland-1")
         self.offered: dict[str, int] | WaylandError = {"wl_compositor": 6, MANAGER: 1}
         self.units = tmp_path / "units"
+        self.roots = sites.Roots(tmp_path / "cfg", tmp_path / "state", None)
         self.system_units: tuple[Path, ...] = ()
         self.calls: list[list[str]] = []
         self.remote = False
@@ -894,6 +895,7 @@ class FakeSystem:
             offered=self.interfaces,
             remote_logins=lambda: self.remote,
             viewer=self.viewer_files,
+            roots=self.roots,
             unit_dirs=(self.units, *self.system_units),
         )
 
@@ -919,6 +921,36 @@ def test_doctor_all_good(tmp_path: Path) -> None:
     assert probe[0] == "/usr/bin/bwrap"
     assert probe[-1] == "/usr/bin/true"
     assert all(flag in probe for flag in ("--ro-bind", "--dev", "--proc"))
+
+
+def write_config(fake: FakeSystem, text: str, mode: int) -> None:
+    path = fake.roots.config / "valetkey" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+    path.chmod(mode)
+
+
+def test_doctor_says_nothing_of_a_config_without_a_command(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path)
+    assert "config" not in results(fake)
+    write_config(fake, "{}", 0o600)
+    assert "config" not in results(fake)
+
+
+def test_doctor_accepts_a_private_config(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path)
+    write_config(fake, '{"approve_command": ["/usr/bin/true"]}', 0o644)
+    assert results(fake)["config"] == ("ok", "config.json is yours and nobody else can write to it")
+
+
+@pytest.mark.parametrize("mode", [0o664, 0o666, 0o620, 0o602])
+def test_doctor_fails_a_config_others_can_write_to(tmp_path: Path, mode: int) -> None:
+    fake = FakeSystem(tmp_path)
+    write_config(fake, '{"approve_command": ["/usr/bin/true"]}', mode)
+    status, detail = results(fake)["config"]
+    assert status == "fail"
+    assert "config.json is ignored" in detail
+    assert "chmod go-w" in detail
 
 
 def test_doctor_bwrap_missing(tmp_path: Path) -> None:

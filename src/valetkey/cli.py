@@ -893,6 +893,7 @@ class System:
     """Whether the config turns on showing a login with no screen in a browser."""
     viewer: Callable[[], Path] = display.novnc_root
     """The directory of noVNC viewer files; raises when they are not installed."""
+    roots: sites.Roots = field(default_factory=sites.roots_from_env)
     unit_dirs: tuple[Path, ...] = field(
         default_factory=lambda: (unit_directory(sites.roots_from_env()), *SYSTEM_UNIT_DIRS)
     )
@@ -1034,6 +1035,17 @@ def check_remote_login(system: System) -> list[Check]:
     return [Check("remote-login", "ok", "a login with no screen is shown in a browser")]
 
 
+def check_config(system: System) -> list[Check]:
+    """Check ``config.json``, if there is one: it names a program, so it must be safe to trust."""
+    try:
+        config = approvals.load_config(system.roots)
+    except approvals.ConfigError as error:
+        return [Check("config", "fail", f"config.json is ignored: {error}")]
+    if config.approve_command is None:
+        return []
+    return [Check("config", "ok", "config.json is yours and nobody else can write to it")]
+
+
 def check_units(system: System) -> list[Check]:
     """Report, without judging, whether the units are installed and the socket is active.
 
@@ -1067,6 +1079,7 @@ def run_checks(system: System) -> list[Check]:
         check_display(system),
         *check_security_context(system),
         *check_remote_login(system),
+        *check_config(system),
         *check_units(system),
     ]
 
@@ -1085,7 +1098,8 @@ def doctor(
     Wayland display is a warning, because only logging in needs one, and so is a compositor
     without security-context support, where the login window is not restricted, and an
     agent-browser newer than 0.39.2, the version valetkey was tested with. The state of the
-    systemd units is shown for information. The exit status is 1 when a required check fails. With
+    systemd units is shown for information. A `config.json` that others can write to is ignored and
+    fails. The exit status is 1 when a required check fails. With
     --json, each check is an object with the keys check, status (ok, fail, warn or info) and
     detail.
     """

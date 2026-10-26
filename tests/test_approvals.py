@@ -258,6 +258,39 @@ def test_a_config_that_cannot_be_used_says_why(roots: sites.Roots, text: str) ->
     assert str(path) in str(info.value)
 
 
+@pytest.mark.parametrize("mode", [0o620, 0o602, 0o666, 0o664])
+def test_a_config_others_can_write_to_is_not_trusted(roots: sites.Roots, mode: int) -> None:
+    path = write_config(roots, '{"approve_command": ["/usr/bin/true"]}')
+    path.chmod(mode)
+    with pytest.raises(approvals.ConfigError, match="written by its group or by others"):
+        approvals.load_config(roots)
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o644, 0o400])
+def test_a_config_only_its_owner_can_write_is_trusted(roots: sites.Roots, mode: int) -> None:
+    path = write_config(roots, '{"approve_command": ["/usr/bin/true"]}')
+    path.chmod(mode)
+    assert approvals.load_config(roots).approve_command == ("/usr/bin/true",)
+
+
+def test_a_config_that_is_not_a_regular_file_is_not_trusted(roots: sites.Roots) -> None:
+    path = roots.config / "valetkey" / approvals.CONFIG_NAME
+    path.parent.mkdir(parents=True)
+    os.mkfifo(path)
+    # A pipe would block a read; the open is what must be refused, so do it without blocking.
+    with pytest.raises(approvals.ConfigError, match="not a regular file"):
+        approvals.load_config(roots)
+
+
+def test_a_config_of_another_user_is_not_trusted(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_config(roots, '{"approve_command": ["/usr/bin/true"]}')
+    monkeypatch.setattr(os, "getuid", lambda: roots.config.stat().st_uid + 1)
+    with pytest.raises(approvals.ConfigError, match="belongs to another user"):
+        approvals.load_config(roots)
+
+
 def test_an_unreadable_config_is_an_error(roots: sites.Roots) -> None:
     path = write_config(roots, "{}")
     path.chmod(0)

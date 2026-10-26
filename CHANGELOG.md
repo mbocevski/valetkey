@@ -42,6 +42,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- `config.json` is ignored, and `valetkey doctor` fails, when it belongs to another user or others can write to it, because it names a program the daemon runs.
 - A browser can no longer remove or replace the proxy's socket, and closing a proxy whose socket was swapped no longer fails.
 - The proxy forwards only the body a plain HTTP request announces, so a pipelined second request no longer reaches the first one's server. It refuses a request with an unclear length.
 - The proxy refuses site-local IPv6 addresses (`fec0::/10`) and the 6to4 relay range, which it let through before.
