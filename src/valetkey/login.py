@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
-from valetkey import sandbox, sites, wayland
+from valetkey import profiles, sandbox, sites, wayland
 from valetkey.proxy import PRIVATE_ADDRESS, Mode, Proxy, SeenHost
 
 if TYPE_CHECKING:
@@ -309,10 +309,15 @@ def chromium_command(profile_dir: Path, start_url: str, chrome_major: int) -> li
     hides automation: nothing drives this window, and Chromium shows a warning bar for it. The
     window is a normal one with an address bar and its own profile, on Wayland. There is no
     ``--headless``, no ``--app``, no kiosk mode and no remote debugging port.
+
+    ``--password-store=basic`` makes the window encrypt the cookies it saves with the key that
+    the browser of a session uses (agent-browser passes the same flag), not with one from a
+    keyring that this window might find and a session would not.
     """
     return [
         CHROMIUM,
         *sandbox.chrome_flags(chrome_major, hide_automation=False),
+        "--password-store=basic",
         "--ozone-platform=wayland",
         f"--user-data-dir={profile_dir}",
         start_url,
@@ -616,6 +621,7 @@ def _window_display(
 def _prepare(roots: sites.Roots, site: str, runtime: Path) -> tuple[Path, Path]:
     """Create the profile and per-login socket directories (all ``0700``)."""
     profile = sites.ensure_profile(roots, site)
+    profiles.prepare(profile)
     sites.ensure_runtime(roots)
     login_dir = runtime
     for part in ("logins", sites.storage_key(site)):

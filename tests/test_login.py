@@ -200,6 +200,7 @@ def test_chromium_command_is_a_visible_contained_wayland_window(tmp_path: Path) 
     assert command[0] == "chromium"
     assert command[-1] == "https://sitex.com/login"
     assert "--ozone-platform=wayland" in command
+    assert "--password-store=basic" in command  # the key a session's browser encrypts with
     assert f"--user-data-dir={tmp_path / 'prof'}" in command
     assert f"--proxy-server=http://{sandbox.PROXY_ADDRESS}" in command
     assert set(sandbox.chrome_flags(156, hide_automation=False)) <= set(command)

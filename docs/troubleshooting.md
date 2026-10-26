@@ -67,6 +67,14 @@ A site that shows its sign-in form on the start page itself is not noticed this 
 nothing tells a form there from a sign-in box on a public front page. The agent still sees the
 form in the page and calls `browser_login`.
 
+## The session is not signed in after a login
+
+A site that keeps you signed in only until the browser is closed sets a cookie with no expiry.
+A browser forgets such a cookie when it exits, unless it is set to continue where it left off.
+valetkey sets that on every site's profile before it starts the login window or a session, so
+the cookie reaches the session. A login made by an older version lost its cookie when the window
+closed, and the profile does not have it. Sign in again once, with `browser_login`.
+
 ## A page needs a host that is refused
 
 The browser tools list refused hosts after a load. Tool results also mention Chrome's own update

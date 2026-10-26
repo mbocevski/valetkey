@@ -32,13 +32,18 @@ COOKIE = "session=ok"
 class LoginSite:
     """A local web site: ``/`` and ``/app`` need a ``session`` cookie, which ``POST /login`` sets.
 
+    The cookie lasts an hour, or with ``persistent=False`` only until the browser is closed.
+
     Without the cookie, ``/`` and ``/app`` redirect to ``/login?next=...``. While ``auto_login``
     is true the login page submits itself, so a test can log in without typing. ``/public`` is
     open and has a login box. ``/promo`` redirects to ``/welcome``, a normal page. ``hits`` lists
     every request line.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, persistent: bool = True) -> None:
+        self.persistent = persistent
+        """Whether the cookie has an expiry. A site that signs a person in until they close the
+        browser sets one without."""
         self.auto_login = True
         self.hits: list[str] = []
         site = self
@@ -60,7 +65,8 @@ class LoginSite:
                 self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 self.send_response(302)
                 self.send_header("Location", "/app")
-                self.send_header("Set-Cookie", f"{COOKIE}; Path=/; Max-Age=3600; HttpOnly")
+                lifetime = "; Max-Age=3600" if site.persistent else ""
+                self.send_header("Set-Cookie", f"{COOKIE}; Path=/{lifetime}; HttpOnly")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 

@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import urlsplit
 
-from valetkey import procs, sandbox, seccomp, sites
+from valetkey import procs, profiles, sandbox, seccomp, sites
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -988,7 +988,7 @@ def _prepare(roots: sites.Roots, paths: SessionPaths) -> None:
     for leftover in (paths.log_file, paths.config_file):
         leftover.unlink(missing_ok=True)
     sites.ensure_runtime(roots)
-    sites.ensure_profile(roots, paths.site)
+    profiles.prepare(sites.ensure_profile(roots, paths.site))
     sites.ensure_downloads(roots, paths.site)
     _fresh_private_dir(paths.incoming_dir)
     paths.screenshots_dir.mkdir(mode=0o700, exist_ok=True)
