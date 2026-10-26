@@ -40,6 +40,7 @@ from urllib.parse import urlsplit
 
 from mcp.server.mcpserver import Context, Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp_types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from valetkey import approvals, client, sites
@@ -891,13 +892,58 @@ class _Tools:
         return f"The {site} browser was not running."
 
 
+def _reads(*, open_world: bool) -> ToolAnnotations:
+    """Hints for a tool that changes nothing."""
+    return ToolAnnotations(read_only_hint=True, open_world_hint=open_world)
+
+
+def _changes(*, destructive: bool, idempotent: bool, open_world: bool) -> ToolAnnotations:
+    """Hints for a tool that changes something."""
+    return ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=destructive,
+        idempotent_hint=idempotent,
+        open_world_hint=open_world,
+    )
+
+
+ANNOTATIONS = {
+    # Local state only: valetkey's own policies and the state of its sessions.
+    "browser_sites": _reads(open_world=False),
+    "browser_downloads": _reads(open_world=False),
+    # They read the page the browser has loaded, which comes from the open web.
+    "browser_snapshot": _reads(open_world=True),
+    "browser_screenshot": _reads(open_world=True),
+    # Opens a window and, when the person is done, rewrites what is allowed for the site.
+    "browser_login": _changes(destructive=False, idempotent=False, open_world=True),
+    # Starts the browser, or joins the one that runs, and loads the site.
+    "browser_open": _changes(destructive=False, idempotent=True, open_world=True),
+    # A click or a keystroke can do anything the page offers: submit, send, delete.
+    "browser_click": _changes(destructive=True, idempotent=False, open_world=True),
+    "browser_type": _changes(destructive=True, idempotent=False, open_world=True),
+    # Loading the same address again leaves the browser where it was.
+    "browser_navigate": _changes(destructive=False, idempotent=True, open_world=True),
+    # Adds one host to what a site may reach, after the person says yes. Never removes one.
+    "browser_allow": _changes(destructive=False, idempotent=True, open_world=False),
+    # Ends the session. The login, the profile and the downloads stay.
+    "browser_close": _changes(destructive=False, idempotent=True, open_world=False),
+}
+"""The standard hints of each tool (``readOnlyHint``, ``destructiveHint``, ``idempotentHint`` and
+``openWorldHint``), for a client that decides what to ask the person about. They are hints, not
+promises; nothing here is specific to one client."""
+
+
 def build_server(bridge: Bridge) -> MCPServer:
     """Create the MCP server whose tools forward to the daemon through ``bridge``."""
     server = MCPServer("valetkey", instructions=INSTRUCTIONS)
     tools = _Tools(bridge)
     for name, description in DESCRIPTIONS.items():
         server.add_tool(
-            getattr(tools, name), name=name, description=description, structured_output=False
+            getattr(tools, name),
+            name=name,
+            description=description,
+            annotations=ANNOTATIONS[name],
+            structured_output=False,
         )
     return server
 

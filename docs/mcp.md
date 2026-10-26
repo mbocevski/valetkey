@@ -51,6 +51,15 @@ scheme and host, which valetkey reads the way the browser does. The path and que
 chose, come below it, fenced and labelled as untrusted, cut to 200 characters, with the full length
 when they were cut. Percent-encoded text is shown as it is, never decoded.
 
+## Hints for the client
+
+Each tool carries the standard MCP hints, so a client can decide what to ask you about.
+`browser_sites`, `browser_downloads`, `browser_snapshot` and `browser_screenshot` only read; the
+first two touch nothing but valetkey's own state. `browser_click` and `browser_type` are marked
+destructive, because a click or Enter can submit, send or delete. `browser_open`,
+`browser_navigate`, `browser_allow` and `browser_close` are idempotent. Every tool that touches a
+page is marked open world. They are hints, not promises.
+
 ## Downloads
 
 Files a site downloads are saved in its downloads folder, `$XDG_STATE_HOME/valetkey/downloads/SITE`.

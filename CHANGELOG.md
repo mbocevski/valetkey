@@ -36,6 +36,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Changed
 
+- The browser tools now say, with the standard MCP hints, which ones only read, which can change a page and which reach the web, so a client can ask you only when it matters.
 - A login allows another site only if it showed you a page for two seconds. A host it only passed through by redirect is left out. The summary names both, with `valetkey deny` and `valetkey allow`.
 - The link to a login shown in a web browser is no longer given to the agent. Your client shows it, or `valetkey status` does; it works once, and the page then sets a cookie that the WebSocket needs.
 - Tool results show a page's address as its scheme and host, and put the path and query below it, cut to 200 characters and fenced as untrusted page data.

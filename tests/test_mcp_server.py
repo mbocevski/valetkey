@@ -19,6 +19,7 @@ from mcp_types import ElicitResult, ImageContent
 
 from valetkey import client, daemon, mcp_server, sessions, sites
 from valetkey.client import DaemonError
+from valetkey.gateway import Gateway
 from valetkey.mcp_server import Bridge, build_server
 
 if TYPE_CHECKING:
@@ -303,6 +304,61 @@ EXPECTED_TOOLS = {
     "browser_allow": {"site", "host", "reason"},
     "browser_close": {"site"},
 }
+
+
+READS = {"browser_sites", "browser_downloads", "browser_snapshot", "browser_screenshot"}
+OPEN_WORLD = {
+    "browser_snapshot",
+    "browser_screenshot",
+    "browser_login",
+    "browser_open",
+    "browser_click",
+    "browser_type",
+    "browser_navigate",
+}
+DESTRUCTIVE = {"browser_click", "browser_type"}
+NOT_IDEMPOTENT = {"browser_login", "browser_click", "browser_type"}
+
+
+def test_every_tool_carries_the_standard_hints_and_nothing_else(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, _fake, _bridge):
+            tools = (await mcp.list_tools()).tools
+            assert {t.name for t in tools} == set(EXPECTED_TOOLS)
+            for tool in tools:
+                hints = tool.annotations
+                assert hints is not None, tool.name
+                assert hints.read_only_hint is (tool.name in READS), tool.name
+                assert hints.open_world_hint is (tool.name in OPEN_WORLD), tool.name
+                if tool.name in READS:
+                    # The spec ignores these two for a tool that changes nothing.
+                    assert hints.destructive_hint is None
+                    assert hints.idempotent_hint is None
+                else:
+                    assert hints.destructive_hint is (tool.name in DESTRUCTIVE), tool.name
+                    assert hints.idempotent_hint is (tool.name not in NOT_IDEMPOTENT), tool.name
+                assert hints.title is None  # the name is the title
+                assert not tool.meta  # no vendor-specific keys
+                assert set(hints.model_dump(exclude_none=True)) <= {
+                    "read_only_hint",
+                    "destructive_hint",
+                    "idempotent_hint",
+                    "open_world_hint",
+                }
+
+    run(scenario())
+
+
+def test_the_annotations_table_matches_the_tool_descriptions() -> None:
+    assert set(mcp_server.ANNOTATIONS) == set(mcp_server.DESCRIPTIONS) == set(EXPECTED_TOOLS)
+
+
+def test_the_login_link_is_far_shorter_than_a_client_may_allow(short_dir: Path) -> None:
+    """URL-mode elicitation hands this exact string to the client; some limit URLs to 512 bytes."""
+    gateway = Gateway(short_dir / "vnc.sock", short_dir)
+    gateway.port = 65535  # the longest a port can be
+    assert len(gateway.url.encode()) <= 160  # 143 today, whatever the token
+    assert len(gateway.url.encode()) < 512
 
 
 def test_the_tool_set_is_exactly_this_and_none_takes_a_script_or_launch_option(
