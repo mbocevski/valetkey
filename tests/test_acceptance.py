@@ -6,9 +6,9 @@ installed ``valetkey mcp`` with the SDK's own stdio client, in a private headles
 local fixture site. It covers, in order: install, units and doctor; ``browser_sites``; a login
 typed with key events into a real window; ``browser_open``, ``browser_snapshot``,
 ``browser_click`` with an expectation and ``browser_screenshot``; a refused host and
-``browser_allow`` answered no, then yes in a new session; two downloads of one name; ``status``
-and ``watch``; an expired login; and ``forget``. At the end it checks that no tool result held a
-link, a token, or page text outside a fence.
+``browser_allow`` answered no, then yes in a new session, and ``browser_deny``; two downloads
+of one name; ``status`` and ``watch``; an expired login; and ``forget``. At the end it checks
+that no tool result held a link, a token, or page text outside a fence.
 
 **What this cannot cover** (still for the person, in MAR-53's checklist):
 
@@ -381,6 +381,18 @@ async def part_two(agent: Recorder, person: Person) -> None:
     loaded = await agent.call("browser_navigate", site="site", url=f"http://{OTHER_HOST}/hello")
     assert "Hello from the other host" in loaded
     assert "did not load" not in loaded
+    # The site's complete lists, then the person takes the host away again.
+    full = await agent.call("browser_sites", site="site")
+    assert OTHER_HOST in full
+    assert "Denied (0): none" in full
+    removed = await agent.call(
+        "browser_deny", site="site", hosts=[OTHER_HOST], reason="I am done with it"
+    )
+    assert removed.startswith("Result: denied."), removed
+    assert person.asked == 2
+    blocked = await agent.call("browser_navigate", site="site", url=f"http://{OTHER_HOST}/hello")
+    assert "Hello from the other host" not in blocked
+    assert f"Denied (1): {OTHER_HOST}" in await agent.call("browser_sites", site="site")
 
 
 async def part_three(

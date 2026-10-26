@@ -746,6 +746,20 @@ def remove_private_network(policy: Policy, text: str) -> tuple[Policy, bool]:
     return replace(policy, private_networks=kept), True
 
 
+def deny_host(policy: Policy, host: str) -> Policy:
+    """Return ``policy`` with ``host`` denied: no longer allowed, and blocked from now on.
+
+    The host's own ``allow`` entry is removed, and the host is added to ``denied`` unless it is
+    there. A ``denied`` entry blocks the host and its subdomains even when a wider ``allow``
+    entry covers them (``cdn.example.com`` denied with ``example.com`` allowed), so a host
+    carved out of an allowed domain stays out. ``host`` must already be normalized (see
+    :func:`host_of`).
+    """
+    allow = tuple(entry for entry in policy.allow if entry != host)
+    denied = policy.denied if host in policy.denied else (*policy.denied, host)
+    return replace(policy, allow=allow, denied=denied)
+
+
 def allows(policy: Policy, host: str) -> bool:
     """Tell whether ``policy`` lets the browser connect to ``host``.
 

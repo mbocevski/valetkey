@@ -55,6 +55,33 @@ def test_the_command_names_the_site_and_host_and_quotes_the_agent() -> None:
     assert argv[8] == 'Seen during login: yes\nThe agent says: "it loads"'
 
 
+def test_a_deny_question_has_its_own_buttons_and_words() -> None:
+    question = notify.Question(
+        "sitex", "cdn.example.com", seen=False, reason="it tracks", deny=True
+    )
+    argv = notify.command("n", question, 60)
+    assert argv[4:6] == ["--action=deny=Deny", "--action=keep=Keep"]
+    assert argv[7] == "Deny sitex the host cdn.example.com?"
+    assert argv[8] == (
+        "It is now allowed. Deny means sitex will no longer reach it, and later logins will "
+        'not allow it again.\nThe agent says: "it tracks"'
+    )
+    left_out = notify.Question("sitex", "h.test", seen=True, reason="", deny=True)
+    assert "left out when you logged in" in notify.command("n", left_out, 60)[8]
+
+
+@pytest.mark.parametrize(
+    ("send", "expected"),
+    [("echo deny", "yes"), ("echo keep", "no"), ("echo allow", "timeout"), ("echo -1", "timeout")],
+)
+def test_a_deny_question_is_yes_only_on_its_own_deny_button(
+    tmp_path: Path, send: str, expected: str
+) -> None:
+    which = tools(tmp_path, send=send)
+    question = notify.Question("sitex", "cdn.example.com", seen=False, reason="x", deny=True)
+    assert run(REAL_NOTIFY_ASK(question, ENV, 5, which=which)) == expected
+
+
 def test_a_reason_that_looks_like_an_option_is_only_text() -> None:
     argv = notify.command(
         "n", notify.Question("s", "h.test", seen=False, reason="--action=allow=Evil"), 5

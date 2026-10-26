@@ -8,6 +8,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Added
 
+- The `browser_deny` tool, which asks you to stop a site reaching hosts it reaches now, and `browser_sites` takes a `site` to list its complete host lists.
 - With no client prompt and no approval command, `browser_allow` asks with a desktop notification that has Allow and Deny buttons; `"notifications": false` in the config turns it off.
 - A login allows every host it used, such as a sign-in provider and its CDN, except ads and tracking, which it counts; a host you deny with `valetkey deny` stays denied through later logins.
 - The `browser_save` tool, which saves a picture, a video or a linked file from the page into the site's downloads folder, through the site's own proxy; `browser_snapshot` can list the pictures with their addresses.

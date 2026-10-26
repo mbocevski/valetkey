@@ -13,9 +13,10 @@ an error result the model can read. That is all this server needs, so the low-le
 its hand-written schemas and handlers, would add nothing.
 
 **What the tools leave out.** There is no script evaluation, no launch option, no upload, no
-cookie or storage access, and no way to delete a site. The one way the policy can change is
-``browser_allow``, which only *asks*: the person answers in the client's own interface (or
-through the approval command the daemon runs), and nothing is allowed without a yes. See
+cookie or storage access, and no way to delete a site. The only ways the policy can change are
+``browser_allow`` and ``browser_deny``, which only *ask*: the person answers in the client's own
+interface (or through the approval command the daemon runs), and nothing is changed without a
+yes. The second only narrows what a site may reach. See
 :mod:`valetkey.approvals`.
 
 **Untrusted text.** Everything that came from a web page (titles, the page's text tree) is
@@ -476,18 +477,22 @@ _STATES = {"idle": "no session", "login": "login window open", "session": "sessi
 _SHOWN_HOSTS = 3
 
 
-def _hosts_line(label: str, hosts: list[str]) -> str:
-    """List a few hosts, then how many more there are."""
+def _hosts_line(label: str, hosts: list[str], *, full: bool = False) -> str:
+    """List a few hosts, then how many more there are; with ``full``, list every one."""
+    if full:
+        return f"  {label} ({len(hosts)}): {', '.join(hosts) or 'none'}"
     shown = ", ".join(hosts[:_SHOWN_HOSTS])
     more = len(hosts) - _SHOWN_HOSTS
     return f"  {label} ({len(hosts)}): {shown}" + (f" and {more} more" if more > 0 else "")
 
 
-def sites_text(listing: list[dict[str, Any]]) -> str:
+def sites_text(listing: list[dict[str, Any]], *, full: bool = False) -> str:
     """Describe the known sites: state, last login, hosts it may reach, hosts left out.
 
-    Long host lists are cut to the first few. The summary of the last login is included when
-    there is one that has not been reported yet.
+    Long host lists are cut to the first few. With ``full`` every list is complete and the three
+    lists (may reach, left out, denied) are always there, empty or not, in this order, so that a
+    reader can rely on the layout. The summary of the last login is included when there is one
+    that has not been reported yet. The hosts are valetkey's own data, plain host names.
     """
     if not listing:
         return "No sites yet. Ask the person which site to log in to, then call browser_login."
@@ -497,14 +502,19 @@ def sites_text(listing: list[dict[str, Any]]) -> str:
         lines = [f"- {entry['site']}: {state}; starts at {entry['start'] or 'unknown'}"]
         learned = (entry.get("learned") or "").replace("T", " ").removesuffix(":00Z")
         lines.append(f"  Logged in: {learned + ' UTC' if learned else 'never'}")
-        if entry["allow"]:
-            lines.append(_hosts_line("May reach", entry["allow"]))
+        if full:
+            lines.append(_hosts_line("May reach", entry["allow"], full=True))
+            lines.append(_hosts_line("Left out", entry.get("excluded") or [], full=True))
+            lines.append(_hosts_line("Denied", entry.get("denied") or [], full=True))
         else:
-            lines.append("  May reach: nothing learned yet")
-        if entry.get("excluded"):
-            lines.append(_hosts_line("Left out", entry["excluded"]))
-        if entry.get("denied"):
-            lines.append(_hosts_line("Denied", entry["denied"]))
+            if entry["allow"]:
+                lines.append(_hosts_line("May reach", entry["allow"]))
+            else:
+                lines.append("  May reach: nothing learned yet")
+            if entry.get("excluded"):
+                lines.append(_hosts_line("Left out", entry["excluded"]))
+            if entry.get("denied"):
+                lines.append(_hosts_line("Denied", entry["denied"]))
         if entry.get("summary"):
             lines.append(f"  Last login: {entry['summary']}")
         blocks.append("\n".join(lines))
@@ -643,8 +653,9 @@ MAX_HOSTS = 10
 DESCRIPTIONS = {
     "browser_sites": (
         "List the sites the person has set up: each one's state (no session, login window open "
-        "or session running), when they last logged in, the hosts it may reach and the ones "
-        "left out, and what the last login learned (shown once). Start here."
+        "or session running), when they last logged in, the first few hosts it may reach and "
+        "the ones left out or denied, and what the last login learned (shown once). Start "
+        "here. Pass site to get that one site's complete lists instead."
     ),
     "browser_login": (
         "Open a login window on the person's own screen so they can sign in to a site. Returns "
@@ -715,6 +726,19 @@ DESCRIPTIONS = {
         "the result); not_eligible (it cannot be asked about). Your reason is shown to the "
         "person as your claim, not as fact."
     ),
+    "browser_deny": (
+        "Ask the person to stop a site's browser reaching hosts it reaches now. Only a host the "
+        "site may reach, or one left out when they logged in, can be asked about; give up to "
+        f"{MAX_HOSTS} exact host names in one call, no wildcards or URLs, and the person ticks "
+        "the ones they deny. A denied host stays denied through later logins; only the person "
+        "can allow it again. Nothing is denied unless the person says yes. Each host gets a "
+        "result: denied (done: it no longer loads, in a running session too); declined (the "
+        "person said no: never ask again for that host); expired (no answer: you may ask "
+        "again); could_not_ask (nobody could be asked from here: tell the person to run the "
+        "command in the result); not_eligible (there is nothing to deny). Denying a host such "
+        "as cdn.example.com does not remove example.com, if that is allowed. Your reason is "
+        "shown to the person as your claim, not as fact."
+    ),
     "browser_close": (
         "End the site's browser. The login stays saved, so browser_open works again later."
     ),
@@ -722,15 +746,16 @@ DESCRIPTIONS = {
 """What the model reads about each tool."""
 
 
-def _choices(hosts: Sequence[str]) -> type[BaseModel]:
+def _choices(hosts: Sequence[str], what: str = "Allow") -> type[BaseModel]:
     """Return the form that asks about ``hosts``: one checkbox each, ticked, in the given order.
 
-    The questions of one call render the same on every round, as the protocol needs.
+    ``what`` is the verb of the question, ``Allow`` or ``Deny``. The questions of one call render
+    the same on every round, as the protocol needs.
     """
     fields: dict[str, Any] = {
         f"host_{number}": (
             bool,
-            Field(default=True, title=host, description="Allow this host for this site."),
+            Field(default=True, title=host, description=f"{what} this host for this site."),
         )
         for number, host in enumerate(hosts)
     }
@@ -754,6 +779,11 @@ class _Plan:
 
 ELICIT_SECONDS = 300.0
 """How long the client's interface may take to get an answer from the person."""
+_DENY_STEPS = {
+    "declined": "Do not ask again for this host.",
+    "expired": "You may ask again.",
+    "could_not_ask": "Tell the person to run the command above themselves.",
+}
 _NEXT_STEPS = {
     "allowed": "The next navigation to it will load.",
     "denied": "Do not ask again for this host.",
@@ -769,6 +799,28 @@ def allow_text(result: str, host: str, message: str, site: str) -> str:
         message = f"{message} Run: {approvals.manual_command(site, host)}"
     steps = _NEXT_STEPS.get(result, "")
     return f"Result: {result}. {message}" + (f" {steps}" if steps else "")
+
+
+def deny_text(result: str, host: str, message: str, site: str) -> str:
+    """Say how a request to deny ``host`` ended, in words that keep the results apart."""
+    if result == "could_not_ask" and "valetkey deny" not in message:
+        message = f"{message} Run: {approvals.manual_deny_command(site, host)}"
+    steps = _DENY_STEPS.get(result, "")
+    return f"Result: {result}. {message}" + (f" {steps}" if steps else "")
+
+
+def _validated_hosts(hosts: list[str]) -> list[str]:
+    """Return the exact host names asked about, normalized and without repeats."""
+    order: list[str] = []
+    for host in hosts:
+        try:
+            name = approvals.validate_host(host)
+        except ValueError as error:
+            message = f"{host!r}: {error}"
+            raise ToolError(message) from error
+        if name not in order:
+            order.append(name)
+    return order
 
 
 def can_elicit(ctx: Context) -> bool:
@@ -876,7 +928,9 @@ class _Tools:
     def __init__(self, bridge: Bridge) -> None:
         self._bridge = bridge
         self._denied: set[tuple[str, str]] = set()
+        self._kept: set[tuple[str, str]] = set()
         self.browser_allow = self._allow_tool()
+        self.browser_deny = self._deny_tool()
 
     async def _ask(self, op: str, **args: Any) -> dict[str, Any]:  # noqa: ANN401 - JSON values
         try:
@@ -884,8 +938,21 @@ class _Tools:
         except DaemonError as error:
             raise ToolError(error_text(error)) from error
 
-    async def browser_sites(self) -> str:
-        return sites_text((await self._ask("sites"))["sites"])
+    async def browser_sites(
+        self,
+        site: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "One site (or site:account) to list in full: every host it may reach, was "
+                    "left out and is denied. Leave it out for the short list of all sites."
+                )
+            ),
+        ] = None,
+    ) -> str:
+        if site is None:
+            return sites_text((await self._ask("sites"))["sites"])
+        return sites_text((await self._ask("sites", site=site))["sites"], full=True)
 
     async def browser_login(
         self,
@@ -1087,15 +1154,7 @@ class _Tools:
 
     async def _plan(self, site: str, hosts: list[str], reason: str) -> _Plan:
         """Check every host with the daemon: which are settled and which are to be asked."""
-        order: list[str] = []
-        for host in hosts:
-            try:
-                name = approvals.validate_host(host)
-            except ValueError as error:
-                message = f"{host!r}: {error}"
-                raise ToolError(message) from error
-            if name not in order:
-                order.append(name)
+        order = _validated_hosts(hosts)
         settled: dict[str, str] = {}
         ask: list[tuple[str, bool]] = []
         resolved = site
@@ -1158,6 +1217,113 @@ class _Tools:
             self._denied.add((planned.site, name))
         return allow_text(answered["result"], name, answered["message"], planned.site)
 
+    def _deny_tool(self) -> Callable[..., Awaitable[str]]:
+        """Build the ``browser_deny`` function and the resolvers it uses.
+
+        It asks the way ``browser_allow`` does (see :meth:`_allow_tool`): the client's form
+        first, then the daemon's approval command, then a desktop notification, and else it
+        hands the person the command to run. A yes moves the host to the site's denied list.
+        """
+
+        async def plan(site: SITE, hosts: list[str], reason: str) -> _Plan:
+            return await self._plan_deny(site, hosts, reason)
+
+        async def question(
+            planned: Annotated[_Plan, Resolve(plan)], ctx: Context
+        ) -> Elicit[BaseModel] | None:
+            if not planned.ask or not can_elicit(ctx):
+                return None
+            hosts = [host for host, _left_out in planned.ask]
+            if len(planned.ask) == 1:
+                message = approvals.deny_prompt_text(
+                    planned.site, hosts[0], planned.ask[0][1], planned.reason
+                )
+            else:
+                message = approvals.deny_prompt_text_many(planned.site, planned.ask, planned.reason)
+            return Elicit(message, _choices(hosts, "Deny"))
+
+        async def browser_deny(
+            site: SITE,
+            hosts: Annotated[
+                list[str],
+                Field(
+                    min_length=1,
+                    max_length=MAX_HOSTS,
+                    description=(
+                        f"Up to {MAX_HOSTS} exact host names, such as cdn.example.com. "
+                        "No wildcards or URLs."
+                    ),
+                ),
+            ],
+            reason: Annotated[str, Field(description="Why they should be denied, for the person.")],
+            planned: Annotated[_Plan, Resolve(plan)],
+            answer: Annotated[ElicitationResult[BaseModel], Resolve(question)],
+        ) -> str:
+            del site, hosts, reason  # the resolvers read them, by name
+            return await self._deny(planned, answer)
+
+        return browser_deny
+
+    async def _plan_deny(self, site: str, hosts: list[str], reason: str) -> _Plan:
+        """Check every host with the daemon: which are settled and which are to be asked."""
+        order = _validated_hosts(hosts)
+        settled: dict[str, str] = {}
+        ask: list[tuple[str, bool]] = []
+        resolved = site
+        for name in order:
+            checked = await self._ask("deny_check", site=site, host=name)
+            resolved = checked["site"]
+            if checked["status"] == "already_denied":
+                settled[name] = deny_text("denied", name, checked["message"], resolved)
+            elif checked["status"] != "eligible":
+                settled[name] = deny_text(checked["status"], name, checked["message"], resolved)
+            elif checked["kept"] or (resolved, name) in self._kept:
+                settled[name] = deny_text("declined", name, "The person already said no.", resolved)
+            else:
+                ask.append((name, checked["left_out"]))
+        reason_text = approvals.sanitize_reason(reason)
+        return _Plan(resolved, reason_text, tuple(order), settled, tuple(ask))
+
+    async def _deny(self, planned: _Plan, answer: ElicitationResult[BaseModel]) -> str:
+        """Carry out what the person answered, host by host, and say how each one ended."""
+        results = dict(planned.settled)
+        names = [host for host, _left_out in planned.ask]
+        if isinstance(answer, AcceptedElicitation) and isinstance(answer.data, BaseModel):
+            results |= await self._apply_deny(planned.site, names, answer.data)
+        elif isinstance(answer, DeclinedElicitation):
+            for name in names:
+                self._kept.add((planned.site, name))
+                results[name] = deny_text("declined", name, "The person said no.", planned.site)
+        elif isinstance(answer, CancelledElicitation):
+            for name in names:
+                message = "The question was dismissed."
+                results[name] = deny_text("expired", name, message, planned.site)
+        else:
+            for name in names:
+                results[name] = await self._command_deny(planned, name)
+        if len(planned.order) == 1:
+            return results[planned.order[0]]
+        return "\n".join(f"{name}: {results[name]}" for name in planned.order)
+
+    async def _apply_deny(self, site: str, names: list[str], boxes: BaseModel) -> dict[str, str]:
+        """Deny the hosts whose box was ticked; the others stay as they were."""
+        results: dict[str, str] = {}
+        for number, name in enumerate(names):
+            if getattr(boxes, f"host_{number}"):
+                done = await self._ask("deny_apply", site=site, host=name, channel="elicitation")
+                results[name] = deny_text(done["result"], name, done["message"], site)
+            else:
+                self._kept.add((site, name))
+                results[name] = deny_text("declined", name, "The person said no.", site)
+        return results
+
+    async def _command_deny(self, planned: _Plan, name: str) -> str:
+        """Put one host to the approval command, if there is one, and say how it ended."""
+        answered = await self._ask("deny_ask", site=planned.site, host=name, reason=planned.reason)
+        if answered["result"] == "declined":
+            self._kept.add((planned.site, name))
+        return deny_text(answered["result"], name, answered["message"], planned.site)
+
     async def browser_close(self, site: SITE) -> str:
         result = await self._ask("close", site=site)
         if result["closed"]:
@@ -1200,6 +1366,9 @@ ANNOTATIONS = {
     "browser_save": _changes(destructive=False, idempotent=False, open_world=True),
     # Adds one host to what a site may reach, after the person says yes. Never removes one.
     "browser_allow": _changes(destructive=False, idempotent=True, open_world=False),
+    # Removes one host from what a site may reach, after the person says yes. It narrows, and
+    # asking again for a denied host changes nothing.
+    "browser_deny": _changes(destructive=False, idempotent=True, open_world=False),
     # Ends the session. The login, the profile and the downloads stay.
     "browser_close": _changes(destructive=False, idempotent=True, open_world=False),
 }

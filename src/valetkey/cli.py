@@ -10,7 +10,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path  # the command-line framework reads the annotation at runtime
 from typing import TYPE_CHECKING, Annotated, Any
@@ -485,13 +485,9 @@ def deny(site: str, host: str | None = None, *, network: PrivateNetwork = None) 
         policy = _load(roots, site)
         site = policy.site
         name = _host(str(host))
-        allowed = tuple(entry for entry in policy.allow if entry != name)
-        denied = policy.denied if name in policy.denied else (*policy.denied, name)
-        changed = (
-            replace(policy, allow=allowed, denied=denied)
-            if allowed != policy.allow or denied != policy.denied
-            else None
-        )
+        denied_policy = sites.deny_host(policy, name)
+        allowed, denied = denied_policy.allow, denied_policy.denied
+        changed = denied_policy if denied_policy != policy else None
     except CommandError as error:
         return _fail(error)
     applied = save_and_reload(roots, site, changed)

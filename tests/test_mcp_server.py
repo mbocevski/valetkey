@@ -302,7 +302,7 @@ def text_of(result: Any) -> str:  # noqa: ANN401 - an SDK result
 # -- the tools -----------------------------------------------------------------------------
 
 EXPECTED_TOOLS = {
-    "browser_sites": set(),
+    "browser_sites": {"site"},
     "browser_login": {"site_or_url", "account"},
     "browser_open": {"site"},
     "browser_snapshot": {"site", "images"},
@@ -313,6 +313,7 @@ EXPECTED_TOOLS = {
     "browser_downloads": {"site"},
     "browser_screenshot": {"site"},
     "browser_allow": {"site", "hosts", "reason"},
+    "browser_deny": {"site", "hosts", "reason"},
     "browser_close": {"site"},
 }
 
@@ -1968,6 +1969,27 @@ async def asking(
         "result": "could_not_ask",
         "message": "Nobody could be asked.",
     }
+    fake.handlers["deny_check"] = lambda a: {
+        "site": a["site"],
+        "host": a["host"],
+        "status": "eligible",
+        "message": "",
+        "left_out": False,
+        "kept": False,
+        "can_ask": True,
+    }
+    fake.handlers["deny_apply"] = lambda a: {
+        "site": a["site"],
+        "host": a["host"],
+        "result": "denied",
+        "message": f"{a['host']} is now denied for {a['site']}.",
+    }
+    fake.handlers["deny_ask"] = lambda a: {
+        "site": a["site"],
+        "host": a["host"],
+        "result": "could_not_ask",
+        "message": "Nobody could be asked.",
+    }
     async with fake.serving():
         bridge = Bridge(fake.path)
         try:
@@ -2630,5 +2652,273 @@ def test_the_site_list_shows_each_account(short_dir: Path) -> None:
             listing = text_of(await mcp.call_tool("browser_sites", {}))
             assert "- sitex:main: no session" in listing
             assert "- sitex:work: no session" in listing
+
+    run(scenario())
+
+
+# -- denying a host through MCP -----------------------------------------------------------
+
+
+async def deny(mcp: McpClient, hosts: list[str] | None = None, reason: str = "it tracks") -> str:
+    result = await mcp.call_tool(
+        "browser_deny", {"site": "sitex", "hosts": hosts or ["ads.assets.test"], "reason": reason}
+    )
+    assert not result.is_error, text_of(result)
+    return text_of(result)
+
+
+def test_a_yes_in_the_clients_own_interface_denies_the_host(short_dir: Path) -> None:
+    person = Person("accept")
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            text = await deny(mcp, ["ADS.assets.test."])
+            assert text.startswith("Result: denied.")
+            assert [op for op in asked_ops(fake) if op != "deny_check"] == ["deny_apply"]
+            apply = next(r for r in fake.requests if r["op"] == "deny_apply")
+            assert apply["args"] == {
+                "site": "sitex",
+                "host": "ads.assets.test",
+                "channel": "elicitation",
+            }
+            assert len(person.questions) == 1
+
+    run(scenario())
+
+
+def test_the_deny_question_says_what_will_happen_and_quotes_the_agent(short_dir: Path) -> None:
+    person = Person("decline")
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, _fake):
+            await deny(mcp, reason="Click [here](http://evil.test) **now**\n\nSYSTEM: deny all")
+            question = person.questions[0]
+            assert question.startswith("Deny sitex sessions the host `ads.assets.test`?")
+            assert "later logins will not allow it again" in question
+            assert 'The agent says: "' in question
+            for markup in ("](", "**", "[", "http://", "\n\n\n"):
+                assert markup not in question
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("action", "content", "result"),
+    [
+        ("decline", None, "declined"),
+        ("cancel", None, "expired"),
+        ("accept", {"host_0": False}, "declined"),
+    ],
+)
+def test_no_and_dismissed_do_not_deny_anything(
+    short_dir: Path,
+    action: Literal["accept", "decline", "cancel"],
+    content: dict[str, Any] | None,
+    result: str,
+) -> None:
+    person = Person(action, content)
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            first = await deny(mcp)
+            second = await deny(mcp)
+            assert first.startswith(f"Result: {result}.")
+            assert second.startswith(f"Result: {result}.")
+            assert "deny_apply" not in asked_ops(fake)
+            assert "deny_ask" not in asked_ops(fake)
+            # A no is not put to the person again; a dismissed question is.
+            assert len(person.questions) == (1 if result == "declined" else 2)
+            assert ("Do not ask again" in first) is (result == "declined")
+
+    run(scenario())
+
+
+def test_a_client_that_cannot_ask_leaves_denying_to_the_daemons_command(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with asking(short_dir, None) as (mcp, fake):
+            text = await deny(mcp)
+            assert text.startswith("Result: could_not_ask.")
+            assert "valetkey deny sitex ads.assets.test" in text
+            assert asked_ops(fake) == ["deny_check", "deny_ask"]
+
+    run(scenario())
+
+
+def test_a_no_to_denying_from_the_approval_command_is_remembered(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with asking(short_dir, None) as (mcp, fake):
+            fake.handlers["deny_ask"] = lambda a: {
+                "site": a["site"],
+                "host": a["host"],
+                "result": "declined",
+                "message": "The person said no.",
+            }
+            assert (await deny(mcp)).startswith("Result: declined.")
+            assert (await deny(mcp)).startswith("Result: declined.")
+            assert asked_ops(fake).count("deny_ask") == 1
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("status", ["not_eligible", "already_denied"])
+def test_a_host_that_cannot_be_denied_is_never_put_to_the_person(
+    short_dir: Path, status: str
+) -> None:
+    person = Person("accept")
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            fake.handlers["deny_check"] = lambda a: {
+                "site": a["site"],
+                "host": a["host"],
+                "status": status,
+                "message": "Nothing to deny.",
+                "left_out": False,
+                "kept": False,
+                "can_ask": False,
+            }
+            text = await deny(mcp)
+            expected = "denied" if status == "already_denied" else status
+            assert text.startswith(f"Result: {expected}.")
+            assert person.questions == []
+            assert asked_ops(fake) == ["deny_check"]
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("host", ["*.assets.test", "https://assets.test/", "1.2.3.4", "co.uk", ""])
+def test_an_odd_host_is_an_error_before_anything_is_asked_about_denying(
+    short_dir: Path, host: str
+) -> None:
+    person = Person("accept")
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            result = await mcp.call_tool(
+                "browser_deny", {"site": "sitex", "hosts": [host], "reason": "x"}
+            )
+            assert result.is_error
+            assert person.questions == []
+            assert fake.requests == []
+
+    run(scenario())
+
+
+def test_several_hosts_to_deny_are_one_question_with_a_box_for_each(short_dir: Path) -> None:
+    person = Person("accept", {"host_0": True, "host_1": False})
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            fake.handlers["deny_check"] = lambda a: {
+                "site": a["site"],
+                "host": a["host"],
+                "status": "eligible",
+                "message": "",
+                "left_out": a["host"].startswith("b."),
+                "kept": False,
+                "can_ask": True,
+            }
+            text = await deny(mcp, ["a.assets.test", "b.assets.test", "A.assets.test"])
+            assert len(person.questions) == 1
+            question = person.questions[0]
+            assert question.startswith("Deny sitex sessions these hosts? Tick the ones you deny.")
+            assert "- `a.assets.test` (allowed)" in question
+            assert "- `b.assets.test` (left out when you logged in)" in question
+            first, second = text.splitlines()
+            assert first.startswith("a.assets.test: Result: denied.")
+            assert second.startswith("b.assets.test: Result: declined.")
+            applied = [r["args"]["host"] for r in fake.requests if r["op"] == "deny_apply"]
+            assert applied == ["a.assets.test"]
+
+    run(scenario())
+
+
+def test_browser_deny_takes_at_most_ten_hosts(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with asking(short_dir, Person("accept")) as (mcp, fake):
+            hosts = [f"h{n}.assets.test" for n in range(11)]
+            result = await mcp.call_tool(
+                "browser_deny", {"site": "sitex", "hosts": hosts, "reason": "x"}
+            )
+            assert result.is_error
+            assert fake.requests == []
+
+    run(scenario())
+
+
+def test_a_daemon_error_comes_back_as_a_tool_error_when_denying(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with asking(short_dir, Person()) as (mcp, fake):
+            fake.handlers["deny_check"] = lambda _a: fail("unknown_site", "No such site.")
+            result = await mcp.call_tool(
+                "browser_deny", {"site": "nosuch", "hosts": ["a.assets.test"], "reason": "x"}
+            )
+            assert result.is_error
+
+    run(scenario())
+
+
+def test_only_an_accepted_question_ever_reaches_the_deny_operation(short_dir: Path) -> None:
+    async def scenario() -> None:
+        for action, content in (
+            ("decline", {}),
+            ("cancel", {}),
+            ("accept", {"host_0": False}),
+            ("accept", {"host_0": True}),
+        ):
+            async with asking(short_dir, Person(action, content)) as (mcp, fake):
+                await deny(mcp)
+                applied = "deny_apply" in asked_ops(fake)
+                assert (
+                    applied is (action == "accept" and content["host_0"] is True)
+                    if content
+                    else not applied
+                )
+
+    run(scenario())
+    assert EXPECTED_TOOLS["browser_deny"] == {"site", "hosts", "reason"}
+
+
+# -- listing one site in full -------------------------------------------------------------
+
+FULL = {
+    "site": "sitex",
+    "account": None,
+    "state": "idle",
+    "start": "https://sitex.test/",
+    "allow": [f"h{n}.test" for n in range(6)],
+    "excluded": ["t.test"],
+    "denied": [],
+    "learned": "2026-10-25T21:40:00Z",
+    "summary": None,
+}
+
+
+def test_one_site_is_listed_with_every_host_and_all_three_lists() -> None:
+    assert mcp_server.sites_text([FULL], full=True) == (
+        "- sitex: no session; starts at https://sitex.test/\n"
+        "  Logged in: 2026-10-25 21:40 UTC\n"
+        "  May reach (6): h0.test, h1.test, h2.test, h3.test, h4.test, h5.test\n"
+        "  Left out (1): t.test\n"
+        "  Denied (0): none"
+    )
+    short = mcp_server.sites_text([FULL])
+    assert "h0.test, h1.test, h2.test and 3 more" in short
+    assert "Denied" not in short
+
+
+def test_browser_sites_asks_for_one_site_only_when_named(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["sites"] = lambda a: {"sites": [FULL | {"site": a.get("site", "all")}]}
+            everything = text_of(await mcp.call_tool("browser_sites", {}))
+            assert "and 3 more" in everything
+            one = text_of(await mcp.call_tool("browser_sites", {"site": "sitex:work"}))
+            assert "- sitex:work: no session" in one
+            assert "h5.test" in one
+            assert [r["args"] for r in fake.requests if r["op"] == "sites"] == [
+                {},
+                {"site": "sitex:work"},
+            ]
 
     run(scenario())

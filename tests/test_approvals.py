@@ -178,6 +178,67 @@ def test_the_prompt_labels_the_reason_as_the_agents() -> None:
     assert "The agent says: (nothing)" in approvals.prompt_text("s", "h.test", False, "")  # noqa: FBT003
 
 
+def test_the_deny_prompt_says_what_will_happen_and_that_it_lasts() -> None:
+    one = approvals.deny_prompt_text("sitex", "cdn.sitexassets.net", False, "it tracks")  # noqa: FBT003
+    assert one == (
+        "Deny sitex sessions the host `cdn.sitexassets.net`?\n"
+        "It is now allowed. If you deny it, sitex will no longer reach it, and later logins "
+        "will not allow it again.\n"
+        'The agent says: "it tracks"'
+    )
+    assert "left out when you logged in" in approvals.deny_prompt_text("s", "h.test", True, "")  # noqa: FBT003
+    many = approvals.deny_prompt_text_many("sitex", [("a.test", False), ("b.test", True)], "")
+    assert many == (
+        "Deny sitex sessions these hosts? Tick the ones you deny. sitex will no longer reach "
+        "them, and later logins will not allow them again.\n"
+        "- `a.test` (allowed)\n"
+        "- `b.test` (left out when you logged in)\n"
+        "The agent says: (nothing)"
+    )
+
+
+def test_deny_eligibility() -> None:
+    held = sites.Policy(
+        "sitex",
+        "https://sitex.com/",
+        ("sitex.com", "cdn.other.net"),
+        ("seen.test",),
+        denied=("no.test",),
+    )
+    status = {
+        host: approvals.deny_eligibility(held, host).status
+        for host in (
+            "sitex.com",
+            "cdn.sitex.com",
+            "cdn.other.net",
+            "seen.test",
+            "no.test",
+            "x.no.test",
+            "never.test",
+            "other.net",
+        )
+    }
+    assert status == {
+        "sitex.com": "eligible",
+        "cdn.sitex.com": "eligible",
+        "cdn.other.net": "eligible",
+        "seen.test": "eligible",
+        "no.test": "already_denied",
+        "x.no.test": "already_denied",
+        "never.test": "not_eligible",
+        "other.net": "not_eligible",
+    }
+    assert approvals.deny_eligibility(held, "seen.test").seen_during_login is True
+    assert approvals.deny_eligibility(held, "sitex.com").seen_during_login is False
+    assert "nothing to deny" in approvals.deny_eligibility(held, "never.test").message
+
+
+def test_the_manual_deny_command_is_the_exact_line_for_the_person() -> None:
+    assert approvals.manual_deny_command("sitex", "cdn.sitexassets.net") == (
+        "valetkey deny sitex cdn.sitexassets.net"
+    )
+
+
 def test_the_manual_command_is_the_exact_line_for_the_person() -> None:
     assert approvals.manual_command("sitex", "cdn.sitexassets.net") == (
         "valetkey allow sitex cdn.sitexassets.net"

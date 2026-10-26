@@ -68,7 +68,7 @@ _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 _NOT_A_HOST = "*/\\@#?:%[]()<>\"' ,;=&"
 
 type Answer = Literal["yes", "no", "timeout"]
-type Status = Literal["eligible", "already_allowed", "not_eligible"]
+type Status = Literal["eligible", "already_allowed", "already_denied", "not_eligible"]
 
 
 class ConfigError(ValueError):
@@ -78,6 +78,11 @@ class ConfigError(ValueError):
 def manual_command(site: str, host: str) -> str:
     """Return the command a person can run to allow ``host`` for ``site`` themselves."""
     return f"valetkey allow {site} {host}"
+
+
+def manual_deny_command(site: str, host: str) -> str:
+    """Return the command a person can run to deny ``host`` for ``site`` themselves."""
+    return f"valetkey deny {site} {host}"
 
 
 def validate_host(value: object) -> str:
@@ -153,6 +158,41 @@ def prompt_text_many(site: str, hosts: Sequence[tuple[str, bool]], reason: str) 
     )
 
 
+def deny_prompt_text(site: str, host: str, left_out: bool, reason: str) -> str:  # noqa: FBT001
+    """Return the question that asks the person to deny one host. ``reason`` is sanitized.
+
+    It says what will happen, and that it lasts: the site will no longer reach the host, and a
+    later login will not allow it again. As in :func:`prompt_text`, the host is in a code span
+    and the reason is labelled as the agent's claim.
+    """
+    state = "left out when you logged in" if left_out else "allowed"
+    claim = f'"{reason}"' if reason else "(nothing)"
+    return (
+        f"Deny {site} sessions the host `{host}`?\n"
+        f"It is now {state}. If you deny it, {site} will no longer reach it, and later logins "
+        "will not allow it again.\n"
+        f"The agent says: {claim}"
+    )
+
+
+def deny_prompt_text_many(site: str, hosts: Sequence[tuple[str, bool]], reason: str) -> str:
+    """Return one question about denying several hosts. ``hosts`` pairs each with "left out".
+
+    The person ticks the hosts they deny.
+    """
+    lines = "\n".join(
+        f"- `{host}` ({'left out when you logged in' if left_out else 'allowed'})"
+        for host, left_out in hosts
+    )
+    claim = f'"{reason}"' if reason else "(nothing)"
+    return (
+        f"Deny {site} sessions these hosts? Tick the ones you deny. {site} will no longer reach "
+        "them, and later logins will not allow them again.\n"
+        f"{lines}\n"
+        f"The agent says: {claim}"
+    )
+
+
 # -- eligibility -----------------------------------------------------------------------------
 
 
@@ -202,6 +242,29 @@ def eligibility(
         "not_eligible",
         f"{host} was not refused for {policy.site} and is not in its excluded list, so it "
         "cannot be asked about. Ask for the exact host a page needed that was refused.",
+    )
+
+
+def deny_eligibility(policy: sites.Policy, host: str) -> Eligibility:
+    """Decide whether ``host`` may be asked about for denying, for ``policy``'s site.
+
+    A host qualifies when the policy allows it now (``eligible``), or when it is an entry of
+    ``excluded``, left out at login (``eligible`` too, with ``seen_during_login`` true: the
+    person's deny keeps it out for good, which an exclusion does not). A host a ``denied`` entry
+    already blocks is ``already_denied``. Anything else is ``not_eligible``, because there is
+    nothing to deny. A host under a wider allowed entry (``cdn.example.com`` with ``example.com``
+    allowed) is allowed, so it qualifies, and the denial applies to it and its subdomains alone.
+    """
+    if sites.allows(policy, host):
+        return Eligibility("eligible", "")
+    if sites.host_matches(host, policy.denied):
+        return Eligibility("already_denied", f"{host} is already denied for {policy.site}.")
+    if host in policy.excluded:
+        return Eligibility("eligible", "", seen_during_login=True)
+    return Eligibility(
+        "not_eligible",
+        f"{host} is not allowed for {policy.site}, so there is nothing to deny. Only a host that "
+        "the site may reach, or that was left out when the person logged in, can be asked about.",
     )
 
 

@@ -38,7 +38,7 @@ A host is added to a site's policy only when a person says yes. Three things can
 - You, with `valetkey allow` and `valetkey deny`. The login's summary names the hosts it allowed,
   so you can deny any you do not want. The proxy cannot tell a provider from a page made to look
   like one, so check the names.
-- The agent's `browser_allow`, which only asks. You answer in the client's own interface, in a
+- The agent's `browser_allow` and `browser_deny`, which only ask; the second only narrows. You answer in the client's own interface, in a
   notification, or through the approval command, and no tool takes "the person said yes" from the agent. See
   [MCP clients](mcp.md).
 

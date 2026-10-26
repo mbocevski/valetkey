@@ -1023,3 +1023,20 @@ def test_allowing_a_host_lifts_what_blocks_it_from_both_lists() -> None:
 def test_a_denied_entry_must_be_a_plausible_host() -> None:
     with pytest.raises(ValueError, match="plausible host"):
         policy(denied=("Bad Host",))
+
+
+def test_deny_host_removes_the_entry_and_blocks_the_host_and_its_subdomains() -> None:
+    held = policy(allow=("sitex.com", "cdn.sitex.com", "x.org"))
+    result = sites.deny_host(held, "cdn.sitex.com")
+    assert result.allow == ("sitex.com", "x.org")
+    assert result.denied == ("cdn.sitex.com",)
+    assert not allows(result, "cdn.sitex.com")
+    assert not allows(result, "a.cdn.sitex.com")
+    assert allows(result, "www.sitex.com")
+    assert sites.deny_host(result, "cdn.sitex.com") == result
+
+
+def test_deny_host_blocks_a_host_only_a_wider_entry_covers() -> None:
+    result = sites.deny_host(policy(allow=("sitex.com",)), "ads.sitex.com")
+    assert result.allow == ("sitex.com",)
+    assert not allows(result, "ads.sitex.com")

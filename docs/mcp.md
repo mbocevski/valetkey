@@ -19,8 +19,9 @@ starts `valetkey daemon` itself, and that daemon keeps running so several client
 
 Start with `browser_sites`. The others act on one site by its name.
 
-- `browser_sites` lists the sites you have set up, their state, the hosts each may reach, and what
-  the last login learned. That names the hosts the login allowed, in groups, and counts the ads and tracking hosts it left out.
+- `browser_sites` lists the sites you have set up, their state, the first hosts each may reach, and
+  what the last login learned. With `site` it lists that one site's complete lists: hosts it may
+  reach, hosts the login left out, and hosts denied.
 - `browser_login` opens a login window on your screen and returns at once. Pass `account` to add
   another account to a site (see [accounts](#accounts)). With no screen it
   uses a connected bridge if `remote_logins.waypipe` is on, so the window opens on your laptop.
@@ -43,6 +44,8 @@ Start with `browser_sites`. The others act on one site by its name.
   files.
 - `browser_screenshot` returns an image of the page.
 - `browser_allow` asks you to let the site reach more hosts.
+- `browser_deny` asks you to stop the site reaching hosts it reaches now (see
+  [denying a host](#denying-a-host)).
 - `browser_close` ends the site's browser. The login stays saved.
 
 There is no script evaluation, no launch option, no upload, no cookie access and no way to delete
@@ -61,7 +64,7 @@ Each tool carries the standard MCP hints, so a client can decide what to ask you
 `browser_sites`, `browser_downloads`, `browser_snapshot` and `browser_screenshot` only read; the
 first two touch nothing but valetkey's own state. `browser_click` and `browser_type` are marked
 destructive, because a click or Enter can submit, send or delete. `browser_open`,
-`browser_navigate`, `browser_allow` and `browser_close` are idempotent. `browser_save` writes a
+`browser_navigate`, `browser_allow`, `browser_deny` and `browser_close` are idempotent. `browser_save` writes a
 file, so it is not read-only; it never overwrites one, so it is not destructive. Every tool that touches a
 page is marked open world. They are hints, not promises.
 
@@ -138,6 +141,23 @@ Each host gets a result of its own, one line per host when there are several.
   that is set could not run. The agent tells you the exact `valetkey allow` command to run.
 - `not_eligible`: the host cannot be asked about, either because it was not refused for this site
   or because its name is allowed but it resolves to a private address. The message says which.
+
+## Denying a host
+
+The agent may call `browser_deny` with up to ten exact host names and a reason, to take hosts away
+from a site. Only a host the site may reach now, or one the login left out, can be asked about.
+Denying `cdn.example.com` leaves `example.com` allowed if it was: the exact host and its subdomains
+are blocked, and the broader entry stays.
+
+You are asked the way `browser_allow` asks: a form in the client with a box for each host, then
+your `approve_command`, then a notification, and else the agent hands you
+`valetkey deny SITE HOST`. The question says the site will no longer reach the hosts, and that this
+lasts through later logins. The approval command gets `"action": "deny"` in its request, and yes
+denies. The notification has Deny and Keep buttons.
+
+Hosts you confirm move to the site's denied list and stop loading, in a running session too. The
+results are `denied`, `declined` (you said no: the agent must not ask again), `expired`,
+`could_not_ask` and `not_eligible`. Only you can allow a denied host again, with `valetkey allow`.
 
 ## A client that cannot show questions
 

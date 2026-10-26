@@ -9,9 +9,10 @@ profile.
 
 **Operations.** ``args`` are JSON; every success carries the fields below in ``result``.
 
-* ``sites``: no args. ``{"sites": [{"site", "account", "state", "start", "allow", "learned",
-  "summary"}]}`` from the policy files and the live state, one entry per account. ``summary`` is
-  what the last login learned, and it is delivered once.
+* ``sites`` ``{site?}``: ``{"sites": [{"site", "account", "state", "start", "allow", "excluded",
+  "denied", "learned", "summary"}]}`` from the policy files and the live state, one entry per
+  account, or only the entry of ``site`` when that is given. ``summary`` is what the last login
+  learned, and it is delivered once.
 * ``open`` ``{site}``: start the site's session, or join the running one (``reused: true``).
 * ``snapshot`` ``{images?}``, ``type`` ``{ref, text, submit?}``, ``navigate`` ``{url}``,
   ``screenshot`` ``{name?}``, ``status`` ``{site}``: act on the site's session. ``submit``
@@ -480,6 +481,21 @@ _ASK_OUTCOMES = {
 """How each way the approval command can end, other than yes, is reported."""
 
 
+_DENY_OUTCOMES = {
+    "no": ("declined", "The person said no. Do not ask again for this host."),
+    "timeout": ("expired", "Nobody answered in time. You may ask again."),
+    "none": ("could_not_ask", "Nobody could be asked from here. Run: {manual}"),
+    "broken": ("could_not_ask", "The approval command could not run. Run: {manual}"),
+}
+"""How each way the question to deny a host can end, other than yes, is reported."""
+
+
+def _deny_answer(site: str, host: str, found: approvals.Eligibility) -> dict[str, Any]:
+    """Answer for a host that is not to be asked about: denied already, or not eligible."""
+    result = "denied" if found.status == "already_denied" else "not_eligible"
+    return _answer(site, host, result, found.message)
+
+
 def _answer(site: str, host: str, result: str, message: str) -> dict[str, Any]:
     return {"site": site, "host": host, "result": result, "message": message}
 
@@ -566,6 +582,8 @@ class _Site:
     address_floor: int = 0
     """Refusals up to this number of the live proxy predate the last reload of the policy."""
     denied_hosts: set[str] = field(default_factory=set)
+    kept_hosts: set[str] = field(default_factory=set)
+    """Hosts the person was asked to deny and said no to, until the daemon restarts."""
     """Hosts the approval command said no to, so the agent is not allowed to ask again."""
     ask_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     """One question at a time per site."""
@@ -680,6 +698,9 @@ class Daemon:
             "allow_check": self._op_allow_check,
             "allow_apply": self._op_allow_apply,
             "allow_ask": self._op_allow_ask,
+            "deny_check": self._op_deny_check,
+            "deny_apply": self._op_deny_apply,
+            "deny_ask": self._op_deny_ask,
             "bridge_register": self._op_bridge_register,
         }
 
@@ -989,10 +1010,17 @@ class Daemon:
 
     # -- operations: sites and policies --
 
-    async def _op_sites(self, _connection: _Connection, _args: dict[str, Any]) -> dict[str, Any]:
+    async def _op_sites(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         entries = []
         found = self._known_sites()
+        only: str | None = None
+        if args.get("site") is not None:
+            only = self._site(args)
+            if only not in found:
+                await self._load_policy(only)  # says that the site is not known
         for name in found:
+            if only is not None and name != only:
+                continue
             state = self._state(name)
             try:
                 policy: sites.Policy | None = await asyncio.to_thread(
@@ -1123,19 +1151,37 @@ class Daemon:
                 site, host, result, message.format(manual=approvals.manual_command(site, host))
             )
 
-    async def _consult(self, site: str, host: str, seen: bool, reason: str) -> str:  # noqa: FBT001
+    async def _consult(
+        self,
+        site: str,
+        host: str,
+        seen: bool,  # noqa: FBT001
+        reason: str,
+        *,
+        deny: bool = False,
+    ) -> str:
         """Run the approval command and return ``yes``, ``no``, ``timeout``, ``none`` or ``broken``.
 
         ``none`` means no command is configured (or its config is unusable), ``broken`` that it
-        could not be started.
+        could not be started. With ``deny`` the question is whether to deny a host the site may
+        reach: the request then has ``"action": "deny"`` and ``seen_during_login`` says the host
+        was left out at login, and yes (exit status 0) denies it.
         """
         command = await self._approve_command()
         env = await asyncio.to_thread(
             approvals.command_environment, os.environ, self._user_environment
         )
         if command is None:
-            return await self._notify(notify.Question(site, host, seen=seen, reason=reason), env)
-        request = {"site": site, "host": host, "seen_during_login": seen, "reason": reason}
+            question = notify.Question(site, host, seen=seen, reason=reason, deny=deny)
+            return await self._notify(question, env)
+        request: dict[str, Any] = {
+            "site": site,
+            "host": host,
+            "seen_during_login": seen,
+            "reason": reason,
+        }
+        if deny:
+            request["action"] = "deny"
         try:
             return await approvals.run_command(command, request, env, self._approve_timeout)
         except OSError as error:
@@ -1156,6 +1202,78 @@ class Daemon:
             return "none"
         ask = self._notifier or notify.ask
         return await ask(question, env, self._approve_timeout)
+
+    async def _deny_eligibility(
+        self, site: str, host: object
+    ) -> tuple[sites.Policy, str, approvals.Eligibility]:
+        try:
+            name = approvals.validate_host(host)
+        except ValueError as error:
+            _fail("bad_request", str(error))
+        policy = await self._load_policy(site)
+        return policy, name, approvals.deny_eligibility(policy, name)
+
+    async def _op_deny_check(
+        self, _connection: _Connection, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Say whether ``host`` may be asked about for denying, and whether the daemon can ask."""
+        site = self._site(args)
+        _policy, host, found = await self._deny_eligibility(site, args.get("host"))
+        return {
+            "site": site,
+            "host": host,
+            "status": found.status,
+            "message": found.message,
+            "left_out": found.seen_during_login,
+            "kept": host in self._state(site).kept_hosts,
+            "can_ask": await self._approve_command() is not None,
+        }
+
+    async def _op_deny_apply(
+        self, _connection: _Connection, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Deny ``host`` because the MCP client's interface returned a yes (see ``allow_apply``)."""
+        site = self._site(args)
+        if args.get("channel") != "elicitation":
+            _fail("bad_request", 'this operation is for the "elicitation" channel')
+        policy, host, found = await self._deny_eligibility(site, args.get("host"))
+        if found.status != "eligible":
+            return _deny_answer(site, host, found)
+        return await self._revoke(site, host, policy)
+
+    async def _op_deny_ask(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
+        """Ask through the approval command or a notification, and deny if the answer is yes."""
+        site = self._site(args)
+        reason = approvals.sanitize_reason(args.get("reason"))
+        state = self._state(site)
+        async with state.ask_lock:
+            policy, host, found = await self._deny_eligibility(site, args.get("host"))
+            if found.status != "eligible":
+                return _deny_answer(site, host, found)
+            if host in state.kept_hosts:
+                return _answer(site, host, "declined", "The person already said no.")
+            outcome = await self._consult(site, host, found.seen_during_login, reason, deny=True)
+            if outcome == "yes":
+                return await self._revoke(site, host, policy)
+            if outcome == "no":
+                state.kept_hosts.add(host)
+            result, message = _DENY_OUTCOMES[outcome]
+            manual = approvals.manual_deny_command(site, host)
+            return _answer(site, host, result, message.format(manual=manual))
+
+    async def _revoke(self, site: str, host: str, policy: sites.Policy) -> dict[str, Any]:
+        """Deny ``host`` for the site, save the policy and give it to the live proxy."""
+        changed = sites.deny_host(policy, host)
+        await asyncio.to_thread(sites.save_policy, self.roots, changed)
+        state = self._state(site)
+        if state.proxy is not None:
+            state.proxy.update_policy(changed)
+        logger.info("denied %s for %s", host, site)
+        message = (
+            f"{host} is now denied for {site}. It no longer loads, and later logins will not "
+            "allow it again."
+        )
+        return _answer(site, host, "denied", message)
 
     async def _grant(self, site: str, host: str, policy: sites.Policy) -> dict[str, Any]:
         """Add ``host`` to the site's policy, save it, and give it to the live proxy."""

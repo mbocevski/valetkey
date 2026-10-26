@@ -3755,7 +3755,9 @@ def test_no_operation_widens_a_policy_except_the_ones_that_ask(roots: sites.Root
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
-            assert set(rig.daemon._ops) - set(ops) == {"login"}  # noqa: SLF001 - every other op is listed
+            # The deny operations only narrow a policy, and are tested apart.
+            denying = {"deny_check", "deny_apply", "deny_ask"}
+            assert set(rig.daemon._ops) - set(ops) == {"login", *denying}  # noqa: SLF001 - every other op is listed
             for op in ops:
                 with contextlib.suppress(DaemonError):
                     await c.call(op, **arguments)
@@ -4733,5 +4735,330 @@ def test_a_host_with_a_port_is_never_taken_for_an_account(roots: sites.Roots) ->
                 assert started["site"] == ("intranet-2" if existing else "intranet")
                 assert rig.logins.windows[-1].start == "https://intranet:8080"
                 await c.call("close", site=started["site"])
+
+    run(scenario())
+
+
+# -- denying a host, asked by the agent --------------------------------------------------------
+
+
+def deny_site(roots: sites.Roots) -> None:
+    """A site that allows its own domain and a CDN, with a host left out and one denied."""
+    sites.save_policy(
+        roots,
+        sites.Policy(
+            "sitex",
+            "https://app.sitex.test/",
+            ("sitex.test", "cdn.assets.test"),
+            ("seen.test",),
+            denied=("no.test",),
+        ),
+    )
+
+
+def test_only_a_host_that_is_allowed_or_left_out_can_be_asked_about_denying(
+    roots: sites.Roots,
+) -> None:
+    deny_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            checks = {
+                host: await c.call("deny_check", site="sitex", host=host)
+                for host in (
+                    "cdn.assets.test",
+                    "CDN.assets.test.",
+                    "img.sitex.test",
+                    "seen.test",
+                    "no.test",
+                    "sub.no.test",
+                    "never.test",
+                    "assets.test",
+                )
+            }
+            statuses = {host: check["status"] for host, check in checks.items()}
+            assert statuses == {
+                "cdn.assets.test": "eligible",
+                "CDN.assets.test.": "eligible",
+                "img.sitex.test": "eligible",
+                "seen.test": "eligible",
+                "no.test": "already_denied",
+                "sub.no.test": "already_denied",
+                "never.test": "not_eligible",
+                "assets.test": "not_eligible",
+            }
+            assert checks["seen.test"]["left_out"] is True
+            assert checks["cdn.assets.test"]["left_out"] is False
+            assert checks["cdn.assets.test"]["can_ask"] is False
+            assert "nothing to deny" in checks["never.test"]["message"]
+
+    run(scenario())
+
+
+def test_a_denied_host_leaves_the_policy_and_the_live_session_stops_reaching_it(
+    roots: sites.Roots,
+) -> None:
+    deny_site(roots)
+
+    async def scenario() -> None:
+        async def resolve(_host: str, _port: int) -> list[str]:
+            return ["127.0.0.1"]
+
+        async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            writer.write(await reader.read(1))
+            writer.close()
+
+        upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+        port = upstream.sockets[0].getsockname()[1]
+
+        async def connect(_address: str, _port: int) -> Any:  # noqa: ANN401
+            return await asyncio.open_connection("127.0.0.1", port)
+
+        options = {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
+
+        async def reaches(proxy: Path, host: str) -> bool:
+            reader, writer = await asyncio.open_unix_connection(proxy)
+            writer.write(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode())
+            found = (await reader.readline()).startswith(b"HTTP/1.1 200")
+            writer.close()
+            await writer.wait_closed()
+            return found
+
+        async with serving(roots, proxy_options=options) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            proxy = session_socket(roots, "sitex")
+            assert await reaches(proxy, "cdn.assets.test")
+            done = await c.call(
+                "deny_apply", site="sitex", host="cdn.assets.test", channel="elicitation"
+            )
+            assert done["result"] == "denied"
+            assert "later logins will not allow it again" in done["message"]
+            saved = sites.load_policy(roots, "sitex")
+            assert saved.allow == ("sitex.test",)
+            assert saved.denied == ("no.test", "cdn.assets.test")
+            assert saved.excluded == ("seen.test",)
+            assert not await reaches(proxy, "cdn.assets.test")
+            assert await reaches(proxy, "app.sitex.test")
+            # Asking again for what is denied changes nothing and says so.
+            before = policy_text(roots)
+            again = await c.call(
+                "deny_apply", site="sitex", host="cdn.assets.test", channel="elicitation"
+            )
+            assert (again["result"], "already denied" in again["message"]) == ("denied", True)
+            assert policy_text(roots) == before
+        upstream.close()
+        await upstream.wait_closed()
+
+    run(scenario())
+
+
+def test_denying_a_host_under_an_allowed_domain_denies_that_host_and_keeps_the_domain(
+    roots: sites.Roots,
+) -> None:
+    deny_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("deny_apply", site="sitex", host="cdn.sitex.test", channel="elicitation")
+            saved = sites.load_policy(roots, "sitex")
+            assert "sitex.test" in saved.allow
+            assert saved.denied == ("no.test", "cdn.sitex.test")
+            assert sites.allows(saved, "app.sitex.test")
+            assert not sites.allows(saved, "cdn.sitex.test")
+            assert not sites.allows(saved, "x.cdn.sitex.test")
+
+    run(scenario())
+
+
+def test_denying_a_host_that_was_left_out_keeps_it_out_for_good(roots: sites.Roots) -> None:
+    deny_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("deny_apply", site="sitex", host="seen.test", channel="elicitation")
+            saved = sites.load_policy(roots, "sitex")
+            assert "seen.test" in saved.denied
+            assert saved.allow == ("sitex.test", "cdn.assets.test")
+
+    run(scenario())
+
+
+def test_a_deny_is_refused_for_what_is_not_eligible_and_for_a_bad_channel(
+    roots: sites.Roots,
+) -> None:
+    deny_site(roots)
+    before = policy_text(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            answer = await c.call(
+                "deny_apply", site="sitex", host="never.test", channel="elicitation"
+            )
+            assert answer["result"] == "not_eligible"
+            with pytest.raises(DaemonError) as info:
+                await c.call("deny_apply", site="sitex", host="cdn.assets.test", channel="other")
+            assert info.value.code == "bad_request"
+            for op in ("deny_check", "deny_apply", "deny_ask"):
+                for bad in ("*.assets.test", "https://assets.test/", "1.2.3.4", 5, None):
+                    with pytest.raises(DaemonError) as info:
+                        await c.call(op, site="sitex", host=bad, channel="elicitation")
+                    assert info.value.code == "bad_request"
+                with pytest.raises(DaemonError) as info:
+                    await c.call(op, site="nosuch", host="a.assets.test", channel="elicitation")
+                assert info.value.code == "unknown_site"
+
+    run(scenario())
+    assert policy_text(roots) == before
+
+
+def test_the_approval_command_is_told_it_is_a_deny_and_exit_zero_denies(
+    roots: sites.Roots, tmp_path: Path
+) -> None:
+    deny_site(roots)
+    seen = tmp_path / "request.json"
+    write_approver(roots, f"cat > {seen}\nexit 0")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            answer = await c.call(
+                "deny_ask", site="sitex", host="cdn.assets.test", reason="it **tracks**"
+            )
+            assert answer["result"] == "denied"
+
+    run(scenario())
+    request = json.loads(seen.read_text(encoding="utf-8"))
+    assert request == {
+        "site": "sitex",
+        "host": "cdn.assets.test",
+        "seen_during_login": False,
+        "reason": "it tracks",
+        "action": "deny",
+    }
+    assert "cdn.assets.test" in sites.load_policy(roots, "sitex").denied
+
+
+def test_an_approval_command_that_says_no_leaves_the_host_and_is_not_asked_again(
+    roots: sites.Roots, tmp_path: Path
+) -> None:
+    deny_site(roots)
+    count = tmp_path / "count"
+    write_approver(roots, f"echo x >> {count}\nexit 1")
+    before = policy_text(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            first = await c.call("deny_ask", site="sitex", host="cdn.assets.test", reason="")
+            second = await c.call("deny_ask", site="sitex", host="cdn.assets.test", reason="")
+            assert (first["result"], second["result"]) == ("declined", "declined")
+            assert (await c.call("deny_check", site="sitex", host="cdn.assets.test"))["kept"]
+
+    run(scenario())
+    assert len(count.read_text(encoding="utf-8").split()) == 1
+    assert policy_text(roots) == before
+
+
+@pytest.mark.parametrize(
+    ("outcome", "result"),
+    [("yes", "denied"), ("no", "declined"), ("timeout", "expired"), ("none", "could_not_ask")],
+)
+def test_a_notification_asks_about_denying_when_there_is_no_approval_command(
+    roots: sites.Roots, outcome: str, result: str
+) -> None:
+    deny_site(roots)
+    notifier = Notifier(outcome)
+
+    async def scenario() -> None:
+        async with serving(roots, notifier=notifier) as rig, await rig.connect() as c:
+            answer = await c.call("deny_ask", site="sitex", host="seen.test", reason="x")
+            assert answer["result"] == result
+            if outcome == "none":
+                assert "valetkey deny sitex seen.test" in answer["message"]
+            (question, _env, _limit) = notifier.asked[0]
+            assert (question.site, question.host, question.seen, question.deny) == (
+                "sitex",
+                "seen.test",
+                True,
+                True,
+            )
+
+    run(scenario())
+    assert ("seen.test" in sites.load_policy(roots, "sitex").denied) is (outcome == "yes")
+
+
+def test_a_deny_never_adds_to_what_a_site_may_reach(roots: sites.Roots) -> None:
+    deny_site(roots)
+    write_approver(roots, "exit 0")
+    before = sites.load_policy(roots, "sitex")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            for host in ("cdn.assets.test", "seen.test", "never.test", "img.sitex.test"):
+                for op in ("deny_apply", "deny_ask"):
+                    await c.call(op, site="sitex", host=host, channel="elicitation", reason="")
+                    after = sites.load_policy(roots, "sitex")
+                    assert set(after.allow) <= set(before.allow), (op, host)
+                    assert after.private_networks == before.private_networks
+                    assert after.login_pages == before.login_pages
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected", "denied"),
+    [
+        (Reply("accept"), "Result: denied.", True),
+        (Reply("accept", {"host_0": False}), "Result: declined.", False),
+        (Reply("decline"), "Result: declined.", False),
+        (Reply("cancel"), "Result: expired.", False),
+        (None, "Result: could_not_ask.", False),
+    ],
+)
+def test_a_real_daemon_denies_only_after_a_yes(
+    roots: sites.Roots,
+    reply: Reply | None,
+    expected: str,
+    denied: bool,  # noqa: FBT001
+) -> None:
+    deny_site(roots)
+
+    async def scenario() -> str:
+        async with serving(roots) as rig:
+            bridge = mcp_server.Bridge(rig.path)
+            try:
+                async with McpClient(
+                    mcp_server.build_server(bridge), elicitation_callback=reply, mode="2026-07-28"
+                ) as mcp:
+                    result = await mcp.call_tool(
+                        "browser_deny",
+                        {"site": "sitex", "hosts": ["cdn.assets.test"], "reason": "it tracks"},
+                    )
+                    return "\n".join(p.text for p in result.content if p.type == "text")
+            finally:
+                await bridge.close()
+
+    text = run(scenario())
+    assert text.startswith(expected)
+    saved = sites.load_policy(roots, "sitex")
+    assert ("cdn.assets.test" in saved.denied) is denied
+    assert ("cdn.assets.test" in saved.allow) is (not denied)
+
+
+def test_the_sites_operation_can_name_one_site(roots: sites.Roots) -> None:
+    deny_site(roots)
+    add_site(roots, "other")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            both = (await c.call("sites"))["sites"]
+            assert [entry["site"] for entry in both] == ["other", "sitex"]
+            (only,) = (await c.call("sites", site="sitex"))["sites"]
+            assert only["allow"] == ["sitex.test", "cdn.assets.test"]
+            assert (only["excluded"], only["denied"]) == (["seen.test"], ["no.test"])
+            with pytest.raises(DaemonError) as info:
+                await c.call("sites", site="nosuch")
+            assert info.value.code == "unknown_site"
+            with pytest.raises(DaemonError) as info:
+                await c.call("sites", site=5)
+            assert info.value.code == "bad_request"
 
     run(scenario())

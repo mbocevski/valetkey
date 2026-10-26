@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 ALLOW = "allow"
 DENY = "deny"
+KEEP = "keep"
 CAPABILITY = "actions"
 CAPABILITY_TIMEOUT = 5.0
 """Seconds to wait for the notification daemon to list what it can do."""
@@ -47,6 +48,9 @@ class Question:
     host: str
     seen: bool
     reason: str
+    deny: bool = False
+    """``True`` when the question is whether to deny a host the site may reach now; ``seen`` then
+    means that the host was left out at login."""
 
 
 def command(program: str, question: Question, limit: float) -> list[str]:
@@ -56,17 +60,28 @@ def command(program: str, question: Question, limit: float) -> list[str]:
     so nothing in it can be read as an option. The notification expires with the question.
     """
     claim = f'"{question.reason}"' if question.reason else "(nothing)"
-    seen = "yes" if question.seen else "no"
+    if question.deny:
+        state = "left out when you logged in" if question.seen else "allowed"
+        buttons = [f"--action={DENY}=Deny", f"--action={KEEP}=Keep"]
+        title = f"Deny {question.site} the host {question.host}?"
+        body = (
+            f"It is now {state}. Deny means {question.site} will no longer reach it, and later "
+            f"logins will not allow it again.\nThe agent says: {claim}"
+        )
+    else:
+        seen = "yes" if question.seen else "no"
+        buttons = [f"--action={ALLOW}=Allow", f"--action={DENY}=Deny"]
+        title = f"Allow {question.site} to reach {question.host}?"
+        body = f"Seen during login: {seen}\nThe agent says: {claim}"
     return [
         program,
         "--app-name=valetkey",
         "--urgency=normal",
         f"--expire-time={int(limit * 1000)}",
-        f"--action={ALLOW}=Allow",
-        f"--action={DENY}=Deny",
+        *buttons,
         "--",
-        f"Allow {question.site} to reach {question.host}?",
-        f"Seen during login: {seen}\nThe agent says: {claim}",
+        title,
+        body,
     ]
 
 
@@ -159,8 +174,9 @@ async def ask(
     if found is None:
         return "timeout"
     chosen = found[1].strip()
-    if found[0] == 0 and chosen == ALLOW:
+    yes, no = (DENY, KEEP) if question.deny else (ALLOW, DENY)
+    if found[0] == 0 and chosen == yes:
         return "yes"
-    if found[0] == 0 and chosen == DENY:
+    if found[0] == 0 and chosen == no:
         return "no"
     return "timeout"
