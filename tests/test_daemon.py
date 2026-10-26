@@ -221,6 +221,8 @@ class FakeSession:
         self.texts: list[str] = []
         self.on_click: Callable[[], None] | None = None
         self.on_open: Callable[[], None] | None = None
+        self.on_call: Callable[[], None] | None = None
+        """Runs during every call, before it fails or answers, as the browser's own requests do."""
         self.abort_with: Path | None = None
         self.addresses: dict[str, str] = {}
         """What each reference stands for, as the page wrote it."""
@@ -243,6 +245,8 @@ class FakeSession:
         try:
             time.sleep(self.delay)
             self.calls.append(call)
+            if self.on_call is not None:
+                self.on_call()
             if self.fail is not None:
                 raise self.fail
         finally:
@@ -869,12 +873,13 @@ def test_session_errors_name_the_refusals(roots: sites.Roots) -> None:
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("open", site="sitex")
             session = rig.factory.made[0]
-            await asyncio.to_thread(refuse_via_proxy, session_socket(roots, "sitex"), "evil.test")
-            session.fail = sessions.AgentBrowserError("net::ERR_TUNNEL_CONNECTION_FAILED")
+            proxy = session_socket(roots, "sitex")
+            session.on_call = lambda: refuse_via_proxy(proxy, "evil.test")
+            session.fail = sessions.AgentBrowserError("net::ERR_NAME_NOT_RESOLVED")
             with pytest.raises(DaemonError) as info:
                 await c.call("navigate", site="sitex", url="https://evil.test/")
             assert info.value.code == "browser_error"
-            assert "ERR_TUNNEL" in info.value.message
+            assert "ERR_NAME_NOT_RESOLVED" in info.value.message
             assert info.value.details["site"] == "sitex"
             assert info.value.details["contained"] is True
             assert [r["host"] for r in info.value.details["refused"]] == ["evil.test"]
@@ -5120,5 +5125,140 @@ def test_the_sites_operation_can_name_one_site(roots: sites.Roots) -> None:
             with pytest.raises(DaemonError) as info:
                 await c.call("sites", site=5)
             assert info.value.code == "bad_request"
+
+    run(scenario())
+
+
+# -- a navigation or a start page the proxy refused ---------------------------------------------
+
+TUNNEL = "Navigation failed: net::ERR_TUNNEL_CONNECTION_FAILED"
+
+
+def test_a_navigation_to_a_refused_host_is_an_answer_that_names_the_host(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            proxy = session_socket(roots, "sitex")
+            session.on_call = lambda: refuse_via_proxy(proxy, "evil.test")
+            session.fail = sessions.AgentBrowserError(TUNNEL)
+            answer = await c.call("navigate", site="sitex", url="https://Evil.test/a?b=1")
+            assert answer["not_loaded"] == "evil.test"
+            assert answer["url"] == "https://Evil.test/a?b=1"
+            assert answer["site"] == "sitex"
+            assert answer["contained"] is True
+            assert [r["host"] for r in answer["refused"]] == ["evil.test"]
+            assert answer["page"] == {"title": {"untrusted": True, "text": ""}}
+
+    run(scenario())
+
+
+def test_other_failures_of_a_navigation_stay_errors(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            proxy = session_socket(roots, "sitex")
+            session.on_call = lambda: refuse_via_proxy(proxy, "evil.test")
+            # The tunnel failed, but for a host the proxy did not refuse.
+            session.fail = sessions.AgentBrowserError(TUNNEL)
+            with pytest.raises(DaemonError) as info:
+                await c.call("navigate", site="sitex", url="https://other.test/")
+            assert info.value.code == "browser_error"
+            assert "ERR_TUNNEL" in info.value.message
+            # The refused host, but another way to fail.
+            session.fail = sessions.AgentBrowserError("net::ERR_CONNECTION_RESET")
+            with pytest.raises(DaemonError) as info:
+                await c.call("navigate", site="sitex", url="https://evil.test/")
+            assert "ERR_CONNECTION_RESET" in info.value.message
+            # An address with no host at all.
+            session.fail = sessions.AgentBrowserError(TUNNEL)
+            with pytest.raises(DaemonError):
+                await c.call("navigate", site="sitex", url="about:blank")
+
+    run(scenario())
+
+
+def test_a_start_page_on_a_refused_host_is_an_answer_and_the_host_can_be_asked_about(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots, allow=("other.test",))  # the start host is not allowed
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            rig.factory.during_start = lambda proxy: refuse_via_proxy(proxy, "sitex.test")
+            rig.factory.fail = sessions.AgentBrowserError(TUNNEL)
+            answer = await c.call("open", site="sitex")
+            assert answer["not_loaded"] == "sitex.test"
+            assert answer["reused"] is False
+            assert answer["url"] == "https://sitex.test/"
+            assert [r["host"] for r in answer["refused"]] == ["sitex.test"]
+            assert (await c.call("status", site="sitex"))["state"] == "idle"
+            checked = await c.call("allow_check", site="sitex", host="sitex.test")
+            assert checked["status"] == "eligible"
+
+    run(scenario())
+
+
+def test_a_start_page_that_fails_for_another_reason_stays_an_error(roots: sites.Roots) -> None:
+    add_site(roots, allow=("other.test",))  # the start host is not allowed
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            rig.factory.fail = sessions.AgentBrowserError(TUNNEL)  # nothing was refused
+            with pytest.raises(DaemonError) as info:
+                await c.call("open", site="sitex")
+            assert info.value.code == "browser_error"
+            rig.factory.during_start = lambda proxy: refuse_via_proxy(proxy, "sitex.test")
+            rig.factory.fail = sessions.AgentBrowserError("net::ERR_CONNECTION_RESET")
+            with pytest.raises(DaemonError) as info:
+                await c.call("open", site="sitex")
+            assert "ERR_CONNECTION_RESET" in info.value.message
+
+    run(scenario())
+
+
+def test_a_navigation_names_only_the_hosts_its_own_page_asked_for(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            proxy = session_socket(roots, "sitex")
+            # The page that is going away fires beacons as it unloads, before the next call.
+            for host in ("beacon.test", "pixel.test"):
+                await asyncio.to_thread(refuse_via_proxy, proxy, host)
+            session.on_open = lambda: refuse_via_proxy(proxy, "new.test")
+            answer = await c.call("navigate", site="sitex", url="https://sitex.test/next")
+            assert [r["host"] for r in answer["refused"]] == ["new.test"]
+            # Nothing is lost: the earlier hosts can still be asked about.
+            for host in ("beacon.test", "pixel.test"):
+                checked = await c.call("allow_check", site="sitex", host=host)
+                assert checked["status"] == "eligible"
+            # Another call that is not a navigation still reports what came before it.
+            await asyncio.to_thread(refuse_via_proxy, proxy, "late.test")
+            snapshot = await c.call("snapshot", site="sitex")
+            assert [r["host"] for r in snapshot["refused"]] == ["late.test"]
+
+    run(scenario())
+
+
+def test_a_navigation_skips_the_refusals_of_a_client_with_no_session_yet(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            with pytest.raises(DaemonError) as info:
+                await c.call("navigate", site="sitex", url="https://sitex.test/")
+            assert info.value.code == "no_session"
 
     run(scenario())

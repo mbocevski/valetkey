@@ -58,6 +58,11 @@ scheme and host, which valetkey reads the way the browser does. The path and que
 chose, come below it, fenced and labelled as untrusted, cut to 200 characters, with the full length
 when they were cut. Percent-encoded text is shown as it is, never decoded.
 
+When a page could not load because its host is refused, the first line says so and names the host
+and the site, as in `The page did not load: example.org is not allowed for sitex.` The refused
+hosts and the advice follow. `browser_open` says the same when the host of the site's own start
+page is refused, and adds that no session is running.
+
 ## Hints for the client
 
 Each tool carries the standard MCP hints, so a client can decide what to ask you about.

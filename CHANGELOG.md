@@ -56,6 +56,8 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- `browser_navigate` lists as refused only the hosts its own page asked for, not the beacons the previous page fired as it unloaded.
+- `browser_navigate` and `browser_open` now begin with "The page did not load: HOST is not allowed for SITE" when the proxy refused the target's host, instead of the browser's tunnel error.
 - `browser_login` closes the site's running session before it opens the login window, and says so, instead of failing with `session_running` and asking the agent to close it first.
 - A page whose pictures, scripts or style sheets come with a download header no longer makes valetkey report downloads that started but saved nothing.
 - An AVIF or HEIC picture is no longer listed as `video/mp4` in a download's type.

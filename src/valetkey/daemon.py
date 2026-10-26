@@ -522,6 +522,27 @@ def _private_note(summary: str | None, site: str, hosts: tuple[str, ...]) -> str
     return f"{summary} {note}" if summary else note
 
 
+class _StartRefused(Exception):  # noqa: N818 - not an error to report: it becomes an answer
+    """The browser could not load a start page because the proxy refused its host."""
+
+    def __init__(self, answer: dict[str, Any]) -> None:
+        super().__init__("the start page host is refused")
+        self.answer = answer
+
+
+def _refused_target(message: str, url: str | None, refused: Sequence[dict[str, Any]]) -> str | None:
+    """Return the host of ``url`` when a failed navigation was the proxy refusing that host.
+
+    The browser reports a refused HTTPS host as a failed tunnel (``ERR_TUNNEL_CONNECTION_FAILED``),
+    which says nothing of the host. It was the host's refusal when the proxy refused exactly that
+    host. Any other failure, or a refusal of some other host, is not this.
+    """
+    host = _host_of(url) if url else None
+    if host is None or "ERR_TUNNEL_CONNECTION_FAILED" not in message:
+        return None
+    return host if any(entry["host"] == host for entry in refused) else None
+
+
 def _remember_refusals(state: _Site, proxy: Proxy) -> None:
     """Note the hosts ``proxy`` refused for the policy, so they can be asked about later."""
     for refusal in proxy.refused_since(0)[0]:
@@ -1584,7 +1605,11 @@ class Daemon:
             if state.kind == "session" and not (state.session and state.session.is_alive()):
                 await self._end(state)
             reused = state.kind == "session"
-            policy = None if reused else await self._begin_session(state)
+            try:
+                policy = None if reused else await self._begin_session(state)
+            except _StartRefused as refusal:
+                # No session runs: the start page's host is refused, so say so as an answer.
+                return refusal.answer | {"reused": False, "page": {"title": untrusted("")}}
             session = cast("BrowserSession", state.session)
             if policy is not None:
                 # The opener sees the start-up refusals, but not the background ones.
@@ -1621,9 +1646,22 @@ class Daemon:
             session = await asyncio.to_thread(
                 self._session_factory, self.roots, state.name, policy.start, paths.proxy_socket
             )
-        except BaseException:
+        except BaseException as error:
+            refused = [refused_entry(entry) for entry in proxy.refused_since(0)[0]]
+            _remember_refusals(state, proxy)  # so the host can be asked about, as any other
             await proxy.close()
             await asyncio.to_thread(shutil.rmtree, paths.directory, ignore_errors=True)
+            host = _refused_target(str(error), policy.start, refused)
+            if isinstance(error, sessions.AgentBrowserError) and host is not None:
+                answer = {
+                    "site": self._shown(state.name),
+                    "contained": True,
+                    "url": policy.start,
+                    "refused": refused,
+                    "background_refused": [],
+                    "not_loaded": host,
+                }
+                raise _StartRefused(answer) from error
             raise
         state.session, state.proxy, state.kind = session, proxy, "session"
         state.start = policy.start
@@ -1812,11 +1850,19 @@ class Daemon:
         state = self._state(self._site(args))
         url = _string_arg(args, "url")
         seen = await self._seen_downloads(connection, state.name)
+        self._skip_refusals_so_far(connection, state)
         try:
             result = await self._session_op(
                 connection, state, _watching(lambda session: session.open(url))
             )
         except DaemonError as error:
+            host = _refused_target(error.message, url, error.details.get("refused", []))
+            if error.code == "browser_error" and host is not None:
+                return error.details | {
+                    "url": url,
+                    "page": {"title": untrusted("")},
+                    "not_loaded": host,
+                }
             return await self._navigation_that_downloaded(connection, state, seen, error)
         page: sessions.Page = result.pop("_value")
         result["url"] = page.url
@@ -1958,6 +2004,23 @@ class Daemon:
             if state.session is dead:
                 await self._end(state)
         _fail("session_ended", f"the {state.name} browser has exited; open the site again")
+
+    def _skip_refusals_so_far(self, connection: _Connection, state: _Site) -> None:
+        """Leave out of this client's next answer the refusals made until now.
+
+        A navigation's answer should name what the new page asked for. What the old page asked
+        for as it went away, such as the beacons it fires as it unloads, was refused before the
+        navigation began, and is not the new page's. (Those refusals are still remembered, so the
+        hosts can be asked about.)
+        """
+        proxy = state.proxy
+        if state.kind != "session" or proxy is None:
+            return
+        connection.cursors[state.name] = (
+            state.generation,
+            proxy.refused_since(_NEWEST)[1],
+            proxy.quiet_refused_since(_NEWEST)[1],
+        )
 
     def _envelope(self, connection: _Connection, state: _Site, url: str | None) -> dict[str, Any]:
         """Build the fields every session answer carries; this client's refusals are consumed.

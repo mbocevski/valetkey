@@ -272,15 +272,19 @@ def not_loaded_note(result: dict[str, Any]) -> str:
     """Return a sentence saying the page did not load, or ``""``.
 
     When the browser sits on a host the proxy refused, what it shows is an empty or error page,
-    which could be mistaken for a page that loaded. The note leads the answer.
+    which could be mistaken for a page that loaded. The note leads the answer and names the host
+    and the site. The daemon says ``not_loaded`` when a navigation failed outright because the
+    target's host was refused, with no page to look at.
     """
-    try:
-        host = sites.host_of(result.get("url") or "")
-    except ValueError:
-        return ""
-    if any(entry["host"] == host for entry in result.get("refused", [])):
-        return f"The page did not load: {host} is not allowed.\n"
-    return ""
+    host = result.get("not_loaded")
+    if host is None:
+        try:
+            host = sites.host_of(result.get("url") or "")
+        except ValueError:
+            return ""
+        if not any(entry["host"] == host for entry in result.get("refused", [])):
+            return ""
+    return f"The page did not load: {shown_host(host)} is not allowed for {result['site']}.\n"
 
 
 def envelope_text(result: dict[str, Any]) -> str:
@@ -1017,6 +1021,8 @@ class _Tools:
                 "without asking first, then call browser_open again."
             )
         parts.append(envelope_text(result))
+        if result.get("not_loaded"):
+            parts.append("No session is running. Open the site again once the host is allowed.")
         if result.get("reused"):
             parts.append("The site's browser was already running; you joined it.")
         parts.append(page_content(untrusted_text(result["page"]["title"])))

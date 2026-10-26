@@ -370,6 +370,13 @@ async def part_one(
     assert never.startswith("Result: not_eligible."), never
     assert person.asked == 1  # and a host nobody was refused is never put to the person
     assert "valetkey" in refused  # the advice names the person's own command
+    # An encrypted address fails as a tunnel in the browser; the answer names the host instead.
+    tunnel = await agent.call("browser_navigate", site="site", url=f"https://{OTHER_HOST}/hello")
+    assert tunnel.startswith(f"The page did not load: {OTHER_HOST} is not allowed for site."), (
+        tunnel
+    )
+    assert "ERR_TUNNEL" not in tunnel
+    assert "Refused hosts:" in tunnel
 
 
 async def part_two(agent: Recorder, person: Person) -> None:
