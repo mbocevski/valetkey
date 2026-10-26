@@ -215,7 +215,13 @@ def git(root: Path, *args: str) -> str:
 @pytest.mark.skipif(
     shutil.which("git") is None or shutil.which("uv") is None, reason="needs git and uv"
 )
-def test_release_end_to_end_in_a_throwaway_repository(tmp_path: Path) -> None:
+def test_release_end_to_end_in_a_throwaway_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The CI workflow sets UV_LOCKED, which makes uv refuse to write the lockfile of this new
+    # repository, and UV_FROZEN, which makes it ignore it.
+    monkeypatch.delenv("UV_LOCKED", raising=False)
+    monkeypatch.delenv("UV_FROZEN", raising=False)
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "demo"\nversion = "0.1.0"\nrequires-python = ">=3.14"\n'
         '[build-system]\nrequires = ["uv_build>=0.13.5,<0.14.0"]\nbuild-backend = "uv_build"\n'
