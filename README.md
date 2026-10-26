@@ -184,8 +184,9 @@ daemon keeps running so several clients can share it.
 
 The tools are `browser_sites`, `browser_login`, `browser_open`, `browser_snapshot`,
 `browser_click`, `browser_type`, `browser_navigate`, `browser_screenshot` and `browser_close`.
-There is no way to run scripts, change launch options or edit a site's hosts. When a page needs
-a host that is not allowed, the client is told, and you decide with `valetkey allow SITE HOST`.
+`browser_click` finds its element again when it clicks and can check an `expect`ed outcome. There
+is no way to run scripts, change launch options or edit a site's hosts. When a page needs a host
+that is not allowed, the client is told, and you decide with `valetkey allow SITE HOST`.
 
 <!-- begin: valetkey mcp --help -->
 ```text

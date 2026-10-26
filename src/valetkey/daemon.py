@@ -13,8 +13,15 @@ profile.
   from the policy files and the live state. ``summary`` is what the last login learned, and it
   is delivered once.
 * ``open`` ``{site}``: start the site's session, or join the running one (``reused: true``).
-* ``snapshot``, ``click`` ``{ref}``, ``type`` ``{ref, text}``, ``navigate`` ``{url}``,
-  ``screenshot`` ``{name?}``, ``status``: act on the site's session.
+* ``snapshot``, ``type`` ``{ref, text, submit?}``, ``navigate`` ``{url}``,
+  ``screenshot`` ``{name?}``, ``status``: act on the site's session. ``submit`` presses Enter
+  after the text is typed.
+* ``click`` ``{ref | text, role?, expect?}``: a verified click (see :mod:`valetkey.clicks`).
+  A ``ref`` means the element it was in this client's last snapshot, which is looked up again
+  at click time; ``text`` is visible text, optionally with a ``role``. ``expect`` is one of
+  ``{"text_appears": s}``, ``{"text_gone": s}`` or ``{"url_changes": true}``. The answer adds
+  ``clicked`` (``role`` and the page's ``name``, untrusted), ``attempts``, ``expect`` and
+  ``outcome`` (``met``, ``not_met``, ``already_true`` or ``unchecked``).
 * ``close`` ``{site}``: end the site's session or login. ``{site, closed}``.
 * ``reload_policy`` ``{site}``: read the policy file again and give it to the live proxy.
 * ``login`` ``{target}``: ``target`` is a known site name or a host or URL. Opens a login
@@ -27,9 +34,9 @@ site. Text that came from a web page is wrapped as ``{"untrusted": true, "text":
 client can tell it from anything the daemon says itself.
 
 **Errors** are ``{code, message}``: ``bad_request``, ``request_too_large``, ``unknown_op``,
-``unknown_site``, ``login_in_progress``, ``session_running``, ``no_session``, ``session_ended``,
-``session_failed``, ``browser_error``, ``no_display``, ``x11_only``, ``bad_policy`` and
-``internal``.
+``unknown_site``, ``unknown_ref``, ``target_not_found``, ``target_ambiguous``,
+``login_in_progress``, ``session_running``, ``no_session``, ``session_ended``, ``session_failed``,
+``browser_error``, ``no_display``, ``x11_only``, ``bad_policy`` and ``internal``.
 
 **Registry.** Each site is ``idle``, ``login`` or ``session``, changed only under a per-site
 lock. ``open`` is refused while a login runs, ``login`` while a session runs, and a second
@@ -60,7 +67,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 
-from valetkey import client, learn, login, sandbox, sessions, sites
+from valetkey import clicks, client, learn, login, sandbox, sessions, sites
 from valetkey.client import MAX_LINE_BYTES, DaemonError
 from valetkey.proxy import Mode, Proxy
 
@@ -103,8 +110,14 @@ class BrowserSession(Protocol):
     def snapshot(self) -> sessions.Snapshot:
         """Return the page's interactive elements."""
 
+    def outline(self) -> str:
+        """Return the whole accessibility tree as text."""
+
     def click(self, ref: str) -> None:
         """Click ``ref``."""
+
+    def press_enter(self) -> None:
+        """Press Enter in the focused element."""
 
     def fill(self, ref: str, text: str) -> None:
         """Fill ``ref`` with ``text``."""
@@ -220,6 +233,8 @@ def map_error(error: Exception) -> DaemonError:
     """Turn an error from a session or the login runner into the error the client sees."""
     if isinstance(error, DaemonError):
         return error
+    if isinstance(error, clicks.ClickError):
+        return DaemonError(error.code, str(error), error.details)
     for kind, code in _ERROR_CODES:
         if isinstance(error, kind):
             return DaemonError(code, str(error))
@@ -323,9 +338,12 @@ class _Site:
 
 @dataclass(eq=False)
 class _Connection:
-    """One client connection. Refusal cursors are kept here, per site."""
+    """One client connection. Refusal cursors and the last snapshot are kept here, per site."""
 
     cursors: dict[str, tuple[int, int]] = field(default_factory=dict)
+    refs: dict[str, tuple[int, dict[str, tuple[str, str]]]] = field(default_factory=dict)
+    """For each site, the session generation and the ``{ref: (role, name)}`` of the snapshot
+    this client last received. A click by reference means the element it was in that snapshot."""
 
 
 class Daemon:
@@ -712,22 +730,43 @@ class Daemon:
         result["url"] = snap.url
         result["snapshot"] = untrusted(snap.tree)
         result["refs"] = {ref: element.role for ref, element in snap.refs.items()}
+        connection.refs[state.name] = (
+            state.generation,
+            {ref: (element.role, element.name) for ref, element in snap.refs.items()},
+        )
         return result
 
     async def _op_click(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         state = self._state(_site_arg(args))
-        ref = _string_arg(args, "ref")
-        result = await self._session_op(connection, state, lambda session: session.click(ref))
-        result.pop("_value")
-        result["done"] = True
+        generation, known = connection.refs.get(state.name, (-1, {}))
+        target = clicks.build_target(args, known if generation == state.generation else {})
+        expect = clicks.parse_expectation(args.get("expect"))
+        result = await self._session_op(
+            connection, state, lambda session: clicks.verified_click(session, target, expect)
+        )
+        done: clicks.ClickResult = result.pop("_value")
+        result["clicked"] = {"role": done.role, "name": untrusted(done.name)}
+        result["attempts"] = done.attempts
+        result["expect"] = done.expect.to_json() if done.expect else None
+        result["outcome"] = done.outcome
         return result
 
     async def _op_type(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         state = self._state(_site_arg(args))
         ref, text = _string_arg(args, "ref"), _string_arg(args, "text")
-        result = await self._session_op(connection, state, lambda session: session.fill(ref, text))
+        submit = args.get("submit", False)
+        if not isinstance(submit, bool):
+            _fail("bad_request", '"submit" must be true or false')
+
+        def fill(session: BrowserSession) -> None:
+            session.fill(ref, text)
+            if submit:
+                session.press_enter()
+
+        result = await self._session_op(connection, state, fill)
         result.pop("_value")
         result["done"] = True
+        result["submitted"] = submit
         return result
 
     async def _op_navigate(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
@@ -769,7 +808,7 @@ class Daemon:
                     url = await asyncio.to_thread(session.current_url)
                 except Exception as error:
                     mapped = map_error(error)
-                    mapped.details = self._envelope(connection, state, None) | {"url": None}
+                    mapped.details = mapped.details | self._envelope(connection, state, None)
                     raise mapped from error
                 envelope = self._envelope(connection, state, url)
                 envelope["_value"] = value

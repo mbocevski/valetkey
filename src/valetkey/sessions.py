@@ -287,6 +287,10 @@ def holder_script(paths: SessionPaths, binary: str, open_command: list[str], run
     )
 
 
+OWN_FLAGS = frozenset({"-i"})
+"""The only option-like arguments valetkey itself passes after a verb (``snapshot -i``)."""
+
+
 def call_command(
     binary: str, paths: SessionPaths, runtime: Path, *verb: str
 ) -> tuple[list[str], dict[str, str]]:
@@ -294,7 +298,23 @@ def call_command(
 
     This is the only place that builds them. They carry the session's identity and nothing
     that configures how the browser launches.
+
+    agent-browser reads any argument that looks like one of its options as that option, wherever
+    it comes from, and has no ``--`` to end the options. An option can relaunch the browser on
+    another profile (``--headed``, ``--profile``) or point the call at another session
+    (``--session``). So no argument after the verb may start with a dash unless it is one of
+    :data:`OWN_FLAGS`; anything else is refused here, whatever the caller meant it to be.
+
+    Raises:
+        ValueError: when an argument after the verb starts with a dash and is not ours.
+
     """
+    for argument in verb[1:]:
+        if argument.startswith("-") and argument not in OWN_FLAGS:
+            message = (
+                f"refusing to pass {argument[:40]!r} to agent-browser: it looks like an option"
+            )
+            raise ValueError(message)
     environment = {
         "PATH": os.environ.get("PATH", "/usr/bin"),
         "HOME": os.environ.get("HOME", str(paths.directory)),
@@ -568,14 +588,38 @@ class Session:
         """Return the page's interactive elements, with references for ``click`` and ``fill``."""
         return parse_snapshot(self._call("snapshot", "-i"))
 
+    def outline(self) -> str:
+        """Return the whole accessibility tree as text: every node, with names and page text.
+
+        The interactive snapshot leaves out plain text and headings. This one has them, so it
+        answers "is this text on the page" and "did the page change at all".
+        """
+        return parse_snapshot(self._call("snapshot")).tree
+
     def click(self, ref: str) -> None:
         """Click the element ``ref`` (``e3`` or ``@e3``) from the latest snapshot."""
         self._call("click", _check_ref(ref))
 
     def fill(self, ref: str, text: str) -> None:
-        """Replace the contents of the field ``ref`` with ``text``."""
-        # "--" so that text starting with a dash is never read as an option.
-        self._call("fill", _check_ref(ref), "--", text)
+        """Replace the contents of the field ``ref`` with ``text``.
+
+        agent-browser reads a word that looks like one of its own options as that option, even
+        in the text to type (``--json`` is dropped, ``--session x`` changes the session, and
+        ``--headed`` would relaunch the browser), and it has no ``--`` to end the options: it
+        types the ``--`` itself. So text that starts with a dash is typed with a space in front,
+        which no option starts with, and the space is then deleted from the start of the field.
+        """
+        target = _check_ref(ref)
+        if not text.startswith("-"):
+            self._call("fill", target, text)
+            return
+        self._call("fill", target, f" {text}")
+        self._call("press", "Control+Home")
+        self._call("press", "Delete")
+
+    def press_enter(self) -> None:
+        """Press Enter in the focused element, for example to submit the field just filled."""
+        self._call("press", "Enter")
 
     def current_url(self) -> str:
         """Return the URL of the page."""

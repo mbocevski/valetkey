@@ -19,7 +19,7 @@ import pytest
 from environment import unusable_reason
 from proxy_stub import PageServer
 
-from valetkey import client, daemon, login, sessions, sites
+from valetkey import clicks, client, daemon, login, sessions, sites
 from valetkey.client import DaemonError
 from valetkey.proxy import SeenHost
 
@@ -200,6 +200,8 @@ class FakeSession:
         self.calls: list[tuple[Any, ...]] = []
         self.fail: Exception | None = None
         self.close_error: Exception | None = None
+        self.texts: list[str] = []
+        self.on_click: Callable[[], None] | None = None
         self.active = 0
         self.most_active = 0
         self._lock = threading.Lock()
@@ -228,8 +230,17 @@ class FakeSession:
             self.url, '- button "Go" [ref=e1]', {"e1": sessions.Ref("button", "Go")}
         )
 
+    def outline(self) -> str:
+        texts = [f'- StaticText "{text}"' for text in [f"page at {self.url}", *self.texts]]
+        return "\n".join(['- button "Go" [ref=e1]', *texts])
+
     def click(self, ref: str) -> None:
         self._use("click", ref)
+        if self.on_click is not None:
+            self.on_click()
+
+    def press_enter(self) -> None:
+        self._use("press_enter")
 
     def fill(self, ref: str, text: str) -> None:
         self._use("fill", ref, text)
@@ -411,10 +422,19 @@ def test_a_session_from_open_to_close(roots: sites.Roots) -> None:
                 "text": "Title of https://sitex.test/two",
             }
             clicked = await c.call("click", site="sitex", ref="e1")
-            assert clicked["done"] is True
+            assert clicked["clicked"] == {
+                "role": "button",
+                "name": {"untrusted": True, "text": "Go"},
+            }
+            assert (clicked["attempts"], clicked["expect"], clicked["outcome"]) == (
+                1,
+                None,
+                "unchecked",
+            )
             assert clicked["url"] == "https://sitex.test/two"
             typed = await c.call("type", site="sitex", ref="e2", text="hello")
             assert typed["done"] is True
+            assert typed["submitted"] is False
             shot = await c.call("screenshot", site="sitex", name="a.png")
             assert shot["path"] == "/shots/a.png"
             default_shot = await c.call("screenshot", site="sitex")
@@ -424,7 +444,7 @@ def test_a_session_from_open_to_close(roots: sites.Roots) -> None:
             assert status["url"] == "https://sitex.test/two"
             assert "_value" not in status
             assert [call[0] for call in session.calls] == [
-                "snapshot", "open", "click", "fill", "screenshot", "screenshot",
+                "snapshot", "open", "snapshot", "click", "fill", "screenshot", "screenshot",
             ]  # fmt: skip
             assert ("fill", "e2", "hello") in session.calls
             closed = await c.call("close", site="sitex")
@@ -508,7 +528,7 @@ def test_two_clients_share_one_session_and_never_interleave(roots: sites.Roots) 
             session.delay = 0.05
             await asyncio.gather(
                 one.call("snapshot", site="sitex"),
-                two.call("click", site="sitex", ref="e1"),
+                two.call("type", site="sitex", ref="e1", text="x"),
                 one.call("snapshot", site="sitex"),
                 two.call("snapshot", site="sitex"),
             )
@@ -1371,6 +1391,132 @@ def test_the_daemon_command_uses_a_socket_from_systemd(short_dir: Path) -> None:
                 process.wait()
             if process.stderr is not None:
                 process.stderr.close()
+
+
+def test_a_verified_click_through_the_daemon(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_site(roots)
+    monkeypatch.setattr(clicks, "PRESENCE_SECONDS", 0.02)
+    monkeypatch.setattr(clicks, "GRACE_SECONDS", 0.1)
+    monkeypatch.setattr(clicks, "SETTLE_SECONDS", 0.2)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            with pytest.raises(DaemonError) as info:
+                await c.call("click", site="sitex", ref="e1")
+            assert info.value.code == "unknown_ref"
+            await c.call("snapshot", site="sitex")
+
+            session.on_click = lambda: session.texts.append("Saved")
+            met = await c.call("click", site="sitex", ref="e1", expect={"text_appears": "Saved"})
+            assert met["clicked"] == {"role": "button", "name": {"untrusted": True, "text": "Go"}}
+            assert (met["outcome"], met["attempts"]) == ("met", 1)
+            assert met["expect"] == {"kind": "text_appears", "text": "Saved"}
+            assert met["contained"] is True
+            assert met["site"] == "sitex"
+
+            already = await c.call(
+                "click", site="sitex", text="go", role="BUTTON", expect={"text_appears": "Saved"}
+            )
+            assert already["outcome"] == "already_true"
+
+            session.on_click = None
+            session.texts.clear()
+            clicked_before = [call for call in session.calls if call[0] == "click"]
+            missed = await c.call(
+                "click", site="sitex", text="Go", expect={"text_appears": "Never"}
+            )
+            assert (missed["outcome"], missed["attempts"]) == ("not_met", 2)
+            assert len([call for call in session.calls if call[0] == "click"]) == (
+                len(clicked_before) + 2
+            )
+
+    run(scenario())
+
+
+def test_click_refusals_carry_the_page_names_and_the_envelope(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            await c.call("snapshot", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("click", site="sitex", text="Go Home")
+            assert info.value.code == "target_not_found"
+            assert info.value.details["site"] == "sitex"
+            assert info.value.details["contained"] is True
+            assert info.value.details["candidates"] == []
+            with pytest.raises(DaemonError) as info:
+                await c.call("click", site="sitex", text="Go", role="link")
+            assert info.value.code == "target_not_found"
+            for bad in (
+                {"ref": "e1", "text": "Go"},
+                {},
+                {"ref": "e1", "role": "button"},
+                {"ref": "e1", "expect": {"text_appears": ""}},
+                {"ref": "e1", "expect": {"url_changes": False}},
+                {"ref": "e1", "expect": []},
+            ):
+                with pytest.raises(DaemonError) as info:
+                    await c.call("click", site="sitex", **bad)
+                assert info.value.code == "bad_request"
+            assert not [call for call in session.calls if call[0] == "click"]
+
+    run(scenario())
+
+
+def test_a_reference_from_an_earlier_session_is_unknown(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            await c.call("snapshot", site="sitex")
+            await c.call("close", site="sitex")
+            await c.call("open", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("click", site="sitex", ref="e1")
+            assert info.value.code == "unknown_ref"
+
+    run(scenario())
+
+
+def test_each_client_clicks_by_its_own_snapshot(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as one, await rig.connect() as two:
+            await one.call("open", site="sitex")
+            await one.call("snapshot", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await two.call("click", site="sitex", ref="e1")
+            assert info.value.code == "unknown_ref"
+            assert (await one.call("click", site="sitex", ref="e1"))["outcome"] == "unchecked"
+
+    run(scenario())
+
+
+def test_type_can_press_enter(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            plain = await c.call("type", site="sitex", ref="e1", text="a")
+            sent = await c.call("type", site="sitex", ref="e1", text="b", submit=True)
+            assert (plain["submitted"], sent["submitted"]) == (False, True)
+            assert [call[0] for call in session.calls] == ["fill", "fill", "press_enter"]
+            with pytest.raises(DaemonError) as info:
+                await c.call("type", site="sitex", ref="e1", text="c", submit="yes")
+            assert info.value.code == "bad_request"
+
+    run(scenario())
 
 
 def test_status_during_a_login(roots: sites.Roots) -> None:

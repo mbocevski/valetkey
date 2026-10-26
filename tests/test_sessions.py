@@ -268,7 +268,7 @@ def test_call_command_carries_the_session_name_and_no_launch_option(tmp_path: Pa
     verbs = [
         ("snapshot", "-i"),
         ("click", "@e1"),
-        ("fill", "@e1", "--", "x"),
+        ("fill", "@e1", "x"),
         ("get", "url"),
         ("close",),
     ]
@@ -287,6 +287,52 @@ def test_call_command_carries_the_session_name_and_no_launch_option(tmp_path: Pa
         assert env["AGENT_BROWSER_CONFIG"] == str(paths.config_file)
 
 
+@pytest.mark.parametrize("argument", ["--headed", "-x", "--session", "--profile=/tmp/x", "-", "--"])
+def test_an_argument_that_looks_like_an_option_never_reaches_agent_browser(
+    tmp_path: Path, argument: str
+) -> None:
+    paths = sessions.session_paths(make_roots(tmp_path), "demo")
+    with pytest.raises(ValueError, match="looks like an option"):
+        sessions.call_command("/usr/bin/ab", paths, tmp_path / "rt", "fill", "@e1", argument)
+    # Our own flag is fine, and so is a dash anywhere but first.
+    sessions.call_command("/usr/bin/ab", paths, tmp_path / "rt", "snapshot", "-i")
+    sessions.call_command("/usr/bin/ab", paths, tmp_path / "rt", "fill", "@e1", "a --headed")
+    # The verb itself is ours.
+    sessions.call_command("/usr/bin/ab", paths, tmp_path / "rt", "get", "url")
+
+
+DANGEROUS = ["--headed", "-x", "--session other", "--json", "--", "-", "--profile=/x", "- a dash"]
+
+
+def test_no_session_method_lets_a_leading_dash_reach_the_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = FakeRun(answer({"url": "u", "title": "t", "refs": {}, "snapshot": "", "origin": "u"}))
+    monkeypatch.setattr(sessions.subprocess, "run", run)
+    session = make_session(tmp_path)
+    methods = {
+        "open": session.open,
+        "click": session.click,
+        "screenshot": session.screenshot,
+    }
+    for name, method in methods.items():
+        for value in DANGEROUS:
+            with pytest.raises(ValueError):  # noqa: PT011 - any refusal will do
+                method(value)
+            assert not run.calls, f"{name}({value!r}) built a command"
+    # fill takes text, so it must accept every one of them, and none may start a word with a dash.
+    for value in DANGEROUS:
+        session.fill("e1", value)
+    for argv, _ in run.calls:
+        assert not [a for a in argv[2:] if a.startswith("-") and a not in sessions.OWN_FLAGS]
+    typed = [argv[4] for argv, _ in run.calls if argv[2] == "fill"]
+    assert typed == [f" {value}" for value in DANGEROUS]
+    assert [argv[2:] for argv, _ in run.calls if argv[2] == "press"][:2] == [
+        ["press", "Control+Home"],
+        ["press", "Delete"],
+    ]
+
+
 def test_every_verb_goes_through_call_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -296,14 +342,22 @@ def test_every_verb_goes_through_call_command(
     session.open("http://a.test/")
     session.snapshot()
     session.click("e1")
+    session.fill("@e1", "plain text")
     session.fill("@e1", "--proxy http://evil")
+    session.press_enter()
+    session.outline()
     session.current_url()
     session.screenshot("x.png")
     assert [argv[2:] for argv, _ in run.calls] == [
         ["open", "http://a.test/"],
         ["snapshot", "-i"],
         ["click", "@e1"],
-        ["fill", "@e1", "--", "--proxy http://evil"],
+        ["fill", "@e1", "plain text"],
+        ["fill", "@e1", " --proxy http://evil"],
+        ["press", "Control+Home"],
+        ["press", "Delete"],
+        ["press", "Enter"],
+        ["snapshot"],
         ["get", "url"],
         ["screenshot", str(session.paths.downloads_dir / "x.png")],
     ]
@@ -401,8 +455,8 @@ def test_open_refuses_other_schemes(tmp_path: Path) -> None:
 def test_the_session_has_no_eval_or_passthrough() -> None:
     public = {n for n in dir(sessions.Session) if not n.startswith("_")}
     assert public == {
-        "start", "is_alive", "close", "open", "snapshot", "click", "fill", "current_url",
-        "screenshot",
+        "start", "is_alive", "close", "open", "snapshot", "outline", "click", "fill", "press_enter",
+        "current_url", "screenshot",
     }  # fmt: skip
 
 
