@@ -6,11 +6,13 @@ import ipaddress
 import logging
 import socket
 import stat
+import subprocess
 import sys
 import threading
 import time
 import warnings
 from http import HTTPStatus
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -34,7 +36,6 @@ from valetkey.proxy import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Iterator
-    from pathlib import Path
 
 POLICY = sites.Policy(
     site="sitex",
@@ -1566,3 +1567,95 @@ def test_close_survives_a_socket_path_that_became_a_directory(sock: Path) -> Non
 
     run(scenario())
     assert sock.is_dir()
+
+
+# -- a flood of connections ----------------------------------------------------------------
+
+FLOOD = """
+import asyncio, resource, sys, tempfile
+from pathlib import Path
+from valetkey import sites
+from valetkey.proxy import Proxy
+
+resource.setrlimit(resource.RLIMIT_NOFILE, (1024, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
+base = Path(tempfile.mkdtemp(prefix="vk-"))
+ATTACKER = '''
+import resource, socket, sys, time
+resource.setrlimit(resource.RLIMIT_NOFILE, (4096, 4096))
+held = []
+for _ in range(1100):
+    held.append(socket.socket(socket.AF_UNIX))
+    held[-1].connect(sys.argv[1])
+print("opened", len(held), flush=True)
+time.sleep(6)
+'''
+
+
+async def main():
+    policy = sites.Policy(site="sx", start="https://sitex.test/", allow=("sitex.test",))
+    proxy = Proxy(policy)
+    await proxy.start(base / "p.sock")
+
+    async def daemon_socket(_reader, writer):
+        writer.write(b"pong\\n")
+        await writer.drain()
+        writer.close()
+
+    await asyncio.start_unix_server(daemon_socket, str(base / "d.sock"))
+    attacker = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", ATTACKER, str(base / "p.sock"), stdout=asyncio.subprocess.PIPE
+    )
+    print((await attacker.stdout.readline()).decode().strip(), flush=True)
+    await asyncio.sleep(0.5)
+    reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(base / "d.sock")), 3)
+    print("daemon socket:", await asyncio.wait_for(reader.readline(), 3), flush=True)
+    attacker.kill()
+    await attacker.wait()
+    await proxy.close()
+
+
+asyncio.run(main())
+"""
+
+
+def test_a_flood_of_idle_connections_leaves_the_rest_of_the_process_working() -> None:
+    """1100 idle connections to a proxy, with the 1024 descriptors a service gets by default."""
+    result = subprocess.run(  # noqa: S603  # fixed argument list
+        [sys.executable, "-I", "-c", FLOOD],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        env={"PYTHONPATH": str(Path(proxy_module.__file__).parent.parent)},
+    )
+    assert "opened 1100" in result.stdout, result.stderr[-500:]
+    assert "daemon socket: b'pong\\n'" in result.stdout, result.stderr[-500:]
+    assert "Too many open files" not in result.stderr
+
+
+def test_connections_over_the_limit_are_closed_at_once(
+    sock: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> None:
+        async with running(sock, max_connections=3) as (_proxy, upstream):
+            held = [await asyncio.open_unix_connection(sock) for _ in range(3)]
+            await asyncio.sleep(0.1)
+            for _ in range(2):
+                reader, writer = await asyncio.open_unix_connection(sock)
+                assert await asyncio.wait_for(reader.read(), 2) == b""  # closed, nothing said
+                await close(writer)
+            held[0][1].write(connect_request("sitex.test:443"))
+            await held[0][1].drain()
+            assert await held[0][0].readuntil(b"\r\n\r\n")  # the three held ones still work
+            for _reader, writer in held:
+                await close(writer)
+            await asyncio.sleep(0.1)
+            answer = await send(sock, connect_request("evil.test:443"))  # room again
+            assert status_of(answer) == 403  # answered, so it was served
+            assert upstream.connections == 1  # only the one tunnel opened above
+
+    with caplog.at_level(logging.WARNING, logger="valetkey.proxy"):
+        run(scenario())
+    assert [r.getMessage() for r in caplog.records].count(
+        "more than 3 connections to a proxy; closing the rest"
+    ) == 1

@@ -65,6 +65,7 @@ CONNECT_TIMEOUT = 10.0
 RESOLVE_TIMEOUT = 5.0
 RESOLVE_WORKERS = 4
 MAX_REFUSALS = 1000
+MAX_CONNECTIONS = 128
 MAX_SEEN_HOSTS = 5000
 CONNECT_PORT = 443
 HTTP_PORT = 80
@@ -390,6 +391,10 @@ class Proxy:
       a local server; nothing else should.
     * ``head_timeout`` and ``connect_timeout`` are seconds to receive a request head and to
       connect to one upstream address.
+    * ``max_connections`` is how many connections are served at once. Chrome opens at most a few
+      dozen to one proxy, so only a program that means to use up the daemon's file descriptors
+      gets near it. A connection over the limit is closed at once, and the first of a burst is
+      logged.
     * ``max_refusals`` is how many refusals :meth:`refused_since` can still return. Older ones are
       dropped, and their numbers are not reused.
     * ``max_seen_hosts`` is how many distinct hosts record mode keeps. Further new hosts are
@@ -412,6 +417,7 @@ class Proxy:
         address_check: AddressCheck = address_refusal,
         head_timeout: float = HEAD_TIMEOUT,
         connect_timeout: float = CONNECT_TIMEOUT,
+        max_connections: int = MAX_CONNECTIONS,
         max_refusals: int = MAX_REFUSALS,
         max_seen_hosts: int = MAX_SEEN_HOSTS,
         quiet_hosts: frozenset[str] = frozenset(),
@@ -426,6 +432,8 @@ class Proxy:
         self._address_check = address_check
         self._head_timeout = head_timeout
         self._connect_timeout = connect_timeout
+        self._max_connections = max_connections
+        self._turning_away = False
         self._max_seen_hosts = max_seen_hosts
         self._quiet = frozenset(sites.normalize_host(host) for host in quiet_hosts)
         self._quiet_refused = 0
@@ -532,6 +540,15 @@ class Proxy:
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = cast("asyncio.Task[None]", asyncio.current_task())
+        if len(self._tasks) >= self._max_connections:
+            if not self._turning_away:
+                self._turning_away = True
+                logger.warning(
+                    "more than %d connections to a proxy; closing the rest", self._max_connections
+                )
+            await _close(writer)
+            return
+        self._turning_away = False
         self._tasks.add(task)
         try:
             if self._closing:

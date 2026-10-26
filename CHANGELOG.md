@@ -44,6 +44,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- A flood of connections to a site's proxy can no longer use up the daemon's file descriptors; the proxy serves 128 at a time and closes the rest.
 - The browser can now write only into its two hidden folders in a site's downloads folder, not into the folder where finished downloads are kept.
 - `config.json` is ignored, and `valetkey doctor` fails, when it belongs to another user or others can write to it, because it names a program the daemon runs.
 - A browser can no longer remove or replace the proxy's socket, and closing a proxy whose socket was swapped no longer fails.
