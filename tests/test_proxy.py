@@ -844,6 +844,79 @@ def test_one_connection_never_reaches_a_second_host(sock: Path) -> None:
     run(scenario())
 
 
+def test_a_pipelined_request_is_not_forwarded_to_the_first_requests_server(sock: Path) -> None:
+    """Both hosts are allowed; the second request still must not reach the first one's server."""
+
+    async def scenario() -> None:
+        async with running(sock) as (_proxy, upstream):
+            first = head("POST http://sitex.test/a HTTP/1.1", "Content-Length: 3", "", "abc")
+            second = head("GET http://login.okta.test/b HTTP/1.1", "Host: login.okta.test", "", "")
+            reader, writer = await asyncio.open_unix_connection(sock)
+            try:
+                writer.write(first + second)
+                await reader.readuntil(b"abc")
+                await asyncio.sleep(0.1)
+            finally:
+                await close(writer)
+            assert upstream.connections == 1
+            assert b"POST /a HTTP/1.1" in upstream.received
+            assert upstream.received.endswith(b"abc")
+            assert b"okta" not in upstream.received
+
+    run(scenario())
+
+
+def test_the_body_is_forwarded_in_pieces_and_no_more_than_announced(sock: Path) -> None:
+    async def scenario() -> None:
+        async with running(sock) as (_proxy, upstream):
+            request = head("POST http://sitex.test/a HTTP/1.1", "Content-Length: 6", "", "")
+            reader, writer = await asyncio.open_unix_connection(sock)
+            try:
+                writer.write(request + b"ab")
+                await writer.drain()
+                await asyncio.sleep(0.05)
+                writer.write(b"cdefGHIJ")
+                await reader.readuntil(b"abcdef")
+                await asyncio.sleep(0.1)
+            finally:
+                await close(writer)
+            assert upstream.received.endswith(b"abcdef")
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("headers", "status"),
+    [
+        (("Transfer-Encoding: chunked", "Content-Length: 4"), 400),
+        (("Content-Length: 4", "transfer-encoding: identity"), 400),
+        (("Transfer-Encoding: chunked",), 411),
+        (("Content-Length: 4", "Content-Length: 5"), 400),
+        (("Content-Length: 4, 4",), 400),
+        (("Content-Length: -1",), 400),
+        (("Content-Length: 0x4",), 400),
+    ],
+)
+def test_a_request_that_states_its_length_unclearly_is_refused(
+    sock: Path, headers: tuple[str, ...], status: int
+) -> None:
+    async def scenario() -> None:
+        async with running(sock) as (proxy, upstream):
+            request = head("POST http://sitex.test/a HTTP/1.1", *headers, "", "abcd")
+            assert status_of(await send(sock, request)) == status
+            assert upstream.connections == 0
+            assert proxy.refused_since() == ([], 0)  # a malformed request is not a refusal
+
+    run(scenario())
+
+
+def test_the_same_content_length_twice_is_one_length() -> None:
+    request = head(
+        "POST http://sitex.test/a HTTP/1.1", "Content-Length: 4", "content-length: 4", "", ""
+    )
+    assert proxy_module.parse_request(request[:-4]).body_length == 4
+
+
 # -- malformed input -----------------------------------------------------------------------
 
 

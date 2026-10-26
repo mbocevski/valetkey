@@ -127,7 +127,8 @@ class Request:
     """The parts of a proxy request the proxy acts on.
 
     ``path`` is the origin-form target (``/a?b=1``) for plain HTTP and empty for ``CONNECT``.
-    ``headers`` are the raw header lines, without line endings.
+    ``headers`` are the raw header lines, without line endings. ``body_length`` is the size of
+    the body a plain HTTP request announces (zero for ``CONNECT``).
     """
 
     method: str
@@ -135,6 +136,7 @@ class Request:
     port: int
     path: str
     headers: tuple[bytes, ...]
+    body_length: int = 0
 
 
 class RequestError(Exception):
@@ -187,7 +189,35 @@ def parse_request(head: bytes) -> Request:
     parsed = _split(target)
     host, port = _endpoint(parsed)
     path = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
-    return Request(method, host, HTTP_PORT if port is None else port, path, headers)
+    length = _body_length(headers)
+    return Request(method, host, HTTP_PORT if port is None else port, path, headers, length)
+
+
+def _body_length(headers: tuple[bytes, ...]) -> int:
+    """Return the length of the body ``headers`` announce, or refuse an unclear one.
+
+    A request that names its length twice, or in two ways, is read differently by different
+    servers, and what follows it on the connection is then read differently too. A body of
+    unknown length (``Transfer-Encoding``) cannot be told from the next request without parsing
+    it, so it is not forwarded.
+    """
+    names = [line.partition(b":")[0].strip().lower() for line in headers]
+    lengths = {
+        line.partition(b":")[2].strip()
+        for line, name in zip(headers, names, strict=True)
+        if name == b"content-length"
+    }
+    if b"transfer-encoding" in names:
+        if lengths:
+            _bad("a request with both Transfer-Encoding and Content-Length")
+        msg = "request bodies must have a Content-Length"
+        raise RequestError(HTTPStatus.LENGTH_REQUIRED, msg)
+    if not lengths:
+        return 0
+    (value,) = lengths if len(lengths) == 1 else _bad("conflicting Content-Length headers")
+    if not (value.isascii() and value.isdigit()):
+        _bad("malformed Content-Length")
+    return int(value)
 
 
 def _bad(message: str) -> NoReturn:
@@ -546,9 +576,10 @@ class Proxy:
         try:
             if request.method == "CONNECT":
                 writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                await _splice(reader, writer, upstream_reader, upstream_writer)
             else:
                 upstream_writer.write(upstream_head(request))
-            await _splice(reader, writer, upstream_reader, upstream_writer)
+                await _exchange(reader, writer, upstream_reader, upstream_writer, request)
         finally:
             await _close(upstream_writer)
 
@@ -613,6 +644,44 @@ async def _pump(source: asyncio.StreamReader, sink: asyncio.StreamWriter) -> Non
         while data := await source.read(_CHUNK):
             sink.write(data)
             await sink.drain()
+
+
+async def _forward_body(
+    source: asyncio.StreamReader, sink: asyncio.StreamWriter, length: int
+) -> None:
+    """Copy ``length`` bytes from ``source`` to ``sink``, then read and discard the rest."""
+    remaining = length
+    with contextlib.suppress(OSError):
+        while remaining and (data := await source.read(min(remaining, _CHUNK))):
+            sink.write(data)
+            await sink.drain()
+            remaining -= len(data)
+        while await source.read(_CHUNK):
+            pass
+
+
+async def _exchange(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    upstream_reader: asyncio.StreamReader,
+    upstream_writer: asyncio.StreamWriter,
+    request: Request,
+) -> None:
+    """Pass one plain HTTP request's body upstream and the answer back, then stop.
+
+    Nothing after the request's own body is forwarded, so a second request pipelined on the
+    connection, for another host, never reaches this host's server.
+    """
+    pumps = [
+        asyncio.create_task(_forward_body(reader, upstream_writer, request.body_length)),
+        asyncio.create_task(_pump(upstream_reader, writer)),
+    ]
+    try:
+        await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for pump in pumps:
+            pump.cancel()
+        await asyncio.gather(*pumps, return_exceptions=True)
 
 
 async def _splice(
