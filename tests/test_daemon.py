@@ -22,6 +22,7 @@ from mcp_types import ElicitResult
 from proxy_stub import PageServer
 
 from valetkey import (
+    approvals,
     clicks,
     client,
     daemon,
@@ -3585,6 +3586,119 @@ def test_a_broken_config_or_command_means_could_not_ask(
 
     run(scenario())
     assert "config.json cannot be used" in caplog.text
+
+
+class Notifier:
+    """Stands in for the desktop notification: records the question and answers as told."""
+
+    def __init__(self, outcome: str) -> None:
+        self.outcome = outcome
+        self.asked: list[tuple[Any, ...]] = []
+
+    async def __call__(self, *question: Any) -> str:  # noqa: ANN401
+        self.asked.append(question)
+        return self.outcome
+
+
+@pytest.mark.parametrize(
+    ("outcome", "result", "granted"),
+    [
+        ("yes", "allowed", True),
+        ("no", "denied", False),
+        ("timeout", "expired", False),
+        ("none", "could_not_ask", False),
+    ],
+)
+def test_a_notification_asks_when_there_is_no_approval_command(
+    roots: sites.Roots,
+    outcome: str,
+    result: str,
+    granted: bool,  # noqa: FBT001
+) -> None:
+    add_site(roots, excluded=("cdn.assets.test",))
+    notifier = Notifier(outcome)
+
+    async def scenario() -> None:
+        async with serving(roots, notifier=notifier) as rig, await rig.connect() as c:
+            answer = await c.call(
+                "allow_ask", site="sitex", host="cdn.assets.test", reason="it **loads**"
+            )
+            assert answer["result"] == result
+            assert ("cdn.assets.test" in sites.load_policy(roots, "sitex").allow) is granted
+            again = await c.call("allow_ask", site="sitex", host="cdn.assets.test", reason="")
+            # A no is final; a dismissed or unanswerable question may be asked again.
+            assert again["result"] == ("denied" if outcome == "no" else result) or granted
+            (question, env, limit) = notifier.asked[0]
+            assert (question.site, question.host, question.seen) == (
+                "sitex",
+                "cdn.assets.test",
+                True,
+            )
+            assert "**" not in question.reason  # the markup is gone before anyone is shown it
+            assert limit == approvals.COMMAND_TIMEOUT
+            assert set(env) <= {*approvals._PASSED_ENVIRONMENT, "PATH"}  # noqa: SLF001
+
+    run(scenario())
+    assert len(notifier.asked) == (1 if outcome in {"yes", "no"} else 2)
+
+
+def test_the_approval_command_comes_before_the_notification(roots: sites.Roots) -> None:
+    add_site(roots, excluded=("cdn.assets.test",))
+    write_approver(roots, "exit 0")
+    notifier = Notifier("no")
+
+    async def scenario() -> None:
+        async with serving(roots, notifier=notifier) as rig, await rig.connect() as c:
+            answer = await c.call("allow_ask", site="sitex", host="cdn.assets.test", reason="")
+            assert answer["result"] == "allowed"
+
+    run(scenario())
+    assert notifier.asked == []
+
+
+@pytest.mark.parametrize(
+    ("config", "asked"),
+    [
+        ('{"notifications": false}', 0),
+        ('{"notifications": true}', 1),
+        ("{", 1),  # a config that cannot be read leaves the default, which is on
+    ],
+)
+def test_the_notification_can_be_switched_off(roots: sites.Roots, config: str, asked: int) -> None:
+    add_site(roots, excluded=("cdn.assets.test",))
+    folder = roots.config / "valetkey"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "config.json").write_text(config, encoding="utf-8")
+    notifier = Notifier("yes")
+
+    async def scenario() -> None:
+        async with serving(roots, notifier=notifier) as rig, await rig.connect() as c:
+            answer = await c.call("allow_ask", site="sitex", host="cdn.assets.test", reason="")
+            assert answer["result"] == ("allowed" if asked else "could_not_ask")
+
+    run(scenario())
+    assert len(notifier.asked) == asked
+
+
+def test_the_real_notifier_is_the_default(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_site(roots, excluded=("cdn.assets.test",))
+    seen: list[str] = []
+
+    async def fake(question: Any, *_rest: Any) -> str:  # noqa: ANN401
+        seen.append(question.host)
+        return "yes"
+
+    monkeypatch.setattr(daemon.notify, "ask", fake)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            answer = await c.call("allow_ask", site="sitex", host="cdn.assets.test", reason="")
+            assert answer["result"] == "allowed"
+
+    run(scenario())
+    assert seen == ["cdn.assets.test"]
 
 
 def test_one_question_at_a_time_for_a_site(roots: sites.Roots, tmp_path: Path) -> None:

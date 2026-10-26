@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 CONFIG_NAME = "config.json"
 COMMAND_TIMEOUT = 60.0
 REASON_LENGTH = 240
-_CONFIG_KEYS = frozenset({"approve_command", "remote_logins"})
+_CONFIG_KEYS = frozenset({"approve_command", "notifications", "remote_logins"})
 _REMOTE_KEYS = ("waypipe", "novnc")
 _PASSED_ENVIRONMENT = (
     "HOME",
@@ -212,13 +212,16 @@ def eligibility(
 class Config:
     """What ``config.json`` holds.
 
-    ``approve_command`` is an argument list, or ``None``. The switches under ``remote_logins``
+    ``approve_command`` is an argument list, or ``None``. ``notifications`` is on unless the file
+    says ``false``: whether a desktop notification with Allow and Deny buttons may ask when
+    nothing else can (see :mod:`valetkey.notify`). The switches under ``remote_logins``
     are ``waypipe`` and the one for noVNC, both off unless the file says ``true``: whether a login
     with no screen on this machine may open on a laptop through a connected bridge, or be shown
     in a web browser.
     """
 
     approve_command: tuple[str, ...] | None = None
+    notifications: bool = True
     novnc: bool = False
     waypipe: bool = False
 
@@ -247,7 +250,8 @@ def load_config(roots: Roots) -> Config:
         ConfigError: when the file belongs to another user, can be written by its group or by
             others, is not a regular file, is not a JSON object with only known keys, when
             ``approve_command`` is not a non-empty list of non-empty strings, or when
-            ``remote_logins`` is not an object holding only the boolean switches.
+            ``notifications`` is not a boolean, or ``remote_logins`` is not an object holding
+            only the boolean switches.
 
     """
     path = roots.config / "valetkey" / CONFIG_NAME
@@ -274,7 +278,20 @@ def load_config(roots: Roots) -> Config:
     if not isinstance(data, dict) or not set(data) <= _CONFIG_KEYS:
         message = f"{path}: expected an object with only these keys: {', '.join(_CONFIG_KEYS)}"
         raise ConfigError(message)
-    return Config(_approve_command(path, data.get("approve_command")), **_remote_logins(path, data))
+    return Config(
+        _approve_command(path, data.get("approve_command")),
+        _notifications(path, data.get("notifications")),
+        **_remote_logins(path, data),
+    )
+
+
+def _notifications(path: Path, value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, bool):
+        message = f"{path}: notifications must be true or false"
+        raise ConfigError(message)
+    return value
 
 
 def _approve_command(path: Path, command: object) -> tuple[str, ...] | None:

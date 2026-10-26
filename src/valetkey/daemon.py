@@ -133,6 +133,7 @@ from valetkey import (
     expiry,
     learn,
     login,
+    notify,
     sandbox,
     sessions,
     sites,
@@ -260,6 +261,7 @@ type LoginStarter = Callable[..., Awaitable[LoginWindow]]
 type DisplayStarter = Callable[..., Awaitable[display.Display]]
 type PeerUid = Callable[[socket.socket], int]
 type Announcer = Callable[[str], Awaitable[None]]
+type Notifier = Callable[..., Awaitable[str]]
 
 
 async def announce_session(
@@ -629,6 +631,7 @@ class Daemon:
         download_settle: float = downloads.SETTLE_SECONDS,
         download_wait: float = downloads.FINISH_SECONDS,
         announcer: Announcer | None = None,
+        notifier: Notifier | None = None,
         poll_interval: float = POLL_INTERVAL,
         approve_timeout: float = approvals.COMMAND_TIMEOUT,
         user_environment: Callable[[], Mapping[str, str]] = login.systemd_user_environment,
@@ -648,6 +651,7 @@ class Daemon:
         self._download_settle = download_settle
         self._download_wait = download_wait
         self._announcer = announcer or announce_session
+        self._notifier = notifier
         self._poll_interval = poll_interval
         self._watchers: set[_Watcher] = set()
         self._bridges: dict[str, _RegisteredBridge] = {}
@@ -1126,17 +1130,32 @@ class Daemon:
         could not be started.
         """
         command = await self._approve_command()
-        if command is None:
-            return "none"
-        request = {"site": site, "host": host, "seen_during_login": seen, "reason": reason}
         env = await asyncio.to_thread(
             approvals.command_environment, os.environ, self._user_environment
         )
+        if command is None:
+            return await self._notify(notify.Question(site, host, seen=seen, reason=reason), env)
+        request = {"site": site, "host": host, "seen_during_login": seen, "reason": reason}
         try:
             return await approvals.run_command(command, request, env, self._approve_timeout)
         except OSError as error:
             logger.warning("the approval command could not run: %s", error)
             return "broken"
+
+    async def _notify(self, question: notify.Question, env: Mapping[str, str]) -> str:
+        """Ask with a desktop notification when nothing else can; ``none`` if that is not on.
+
+        A person can switch it off with ``"notifications": false`` in the config file. A config
+        that cannot be read leaves it on, since that is the default.
+        """
+        try:
+            wanted = (await asyncio.to_thread(approvals.load_config, self.roots)).notifications
+        except approvals.ConfigError:
+            wanted = True
+        if not wanted:
+            return "none"
+        ask = self._notifier or notify.ask
+        return await ask(question, env, self._approve_timeout)
 
     async def _grant(self, site: str, host: str, policy: sites.Policy) -> dict[str, Any]:
         """Add ``host`` to the site's policy, save it, and give it to the live proxy."""

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from valetkey import daemon, sites
+from valetkey import daemon, notify, sites
 
 pytest_plugins = ["pytester", "require_integration"]
 
@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from typing import Any
 
 _REAL_ANNOUNCE = daemon.announce_session
+REAL_NOTIFY_ASK = notify.ask
 
 
 @pytest.fixture
@@ -69,6 +70,20 @@ def announcements(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(daemon, "announce_session", record)
     return sent
+
+
+@pytest.fixture(autouse=True)
+def no_notifications(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the tests from putting a question on the screen of a developer's desktop.
+
+    The daemon asks with a desktop notification when nothing else can; here that finds nobody.
+    The tests of :mod:`valetkey.notify` use the real function, ``REAL_NOTIFY_ASK``.
+    """
+
+    async def nobody(*_args: object, **_kwargs: object) -> str:
+        return "none"
+
+    monkeypatch.setattr(notify, "ask", nobody)
 
 
 @pytest.fixture

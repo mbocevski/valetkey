@@ -104,7 +104,7 @@ counts as a no. How the client asks depends on the MCP protocol version it speak
 both the older request in the middle of a call and the newer result that asks for input.
 
 Otherwise set `approve_command` in `$XDG_CONFIG_HOME/valetkey/config.json` to a program and its
-arguments. The file may hold no other key:
+arguments:
 
 ```json
 {"approve_command": ["/home/me/bin/ask-valetkey"]}
@@ -118,7 +118,12 @@ runs without a shell and gets a small environment: `PATH`, `HOME`, `XDG_RUNTIME_
 display and session bus variables (`WAYLAND_DISPLAY`, `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`), which
 it can use to show you a question.
 
-With neither, nobody can be asked, and the agent tells you to run `valetkey allow SITE HOST`.
+With neither, a desktop notification asks, on a desktop whose notification daemon offers buttons
+and with `notify-send` installed. It names the site and host, quotes the agent's reason, and has
+Allow and Deny buttons. Closing it, or not answering for 60 seconds, counts as unanswered, never as
+a no. Switch it off with `{"notifications": false}` in the same file.
+
+If nothing can ask, the agent tells you to run `valetkey allow SITE HOST`.
 
 ## What `browser_allow` returns
 
@@ -139,8 +144,8 @@ Each host gets a result of its own, one line per host when there are several.
 MCP lets a client show you a question or a link; the feature is called elicitation. Some clients
 do not declare it, and valetkey checks what the client declared instead of assuming.
 
-- To ask for a host, the daemon runs your `approve_command` if you set one. If not,
-  `browser_allow` returns `could_not_ask` with the exact `valetkey allow SITE HOST` command
+- To ask for a host, the daemon runs your `approve_command` if you set one, or else shows a
+  notification with Allow and Deny. If it can do neither, `browser_allow` returns `could_not_ask` with the exact `valetkey allow SITE HOST` command
   (SITE names the account, such as `sitex:work`), and the agent tells you to run it. Nothing is
   allowed until you do, or the command says yes.
 - For a login in a web browser, the client cannot show you the link, and the link never goes to

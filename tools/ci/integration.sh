@@ -13,7 +13,7 @@ set -euo pipefail
 : "${AGENT_BROWSER_VERSION:?}" "${AGENT_BROWSER_SHA256:?}"
 
 pacman -Syu --noconfirm --needed \
-  bubblewrap chromium foot grim iproute2 python strace sway uv wayvnc waypipe wtype
+  bubblewrap chromium dbus foot grim iproute2 libnotify mako python strace sway uv wayvnc waypipe wtype
 
 curl -fsSL -o /tmp/agent-browser \
   "https://github.com/vercel-labs/agent-browser/releases/download/v${AGENT_BROWSER_VERSION}/agent-browser-linux-x64"

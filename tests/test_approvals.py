@@ -309,6 +309,25 @@ def test_a_config_of_another_user_is_not_trusted(
         approvals.load_config(roots)
 
 
+def test_notifications_are_on_unless_the_config_says_false(roots: sites.Roots) -> None:
+    assert approvals.load_config(roots).notifications is True
+    write_config(roots, "{}")
+    assert approvals.load_config(roots).notifications is True
+    write_config(roots, '{"notifications": null}')
+    assert approvals.load_config(roots).notifications is True
+    write_config(roots, '{"notifications": false}')
+    assert approvals.load_config(roots).notifications is False
+    write_config(roots, '{"notifications": true, "approve_command": ["/usr/bin/true"]}')
+    assert approvals.load_config(roots).notifications is True
+
+
+@pytest.mark.parametrize("value", ['"no"', "0", "[]", '{"a": 1}'])
+def test_notifications_must_be_a_boolean(roots: sites.Roots, value: str) -> None:
+    write_config(roots, f'{{"notifications": {value}}}')
+    with pytest.raises(approvals.ConfigError, match="notifications must be true or false"):
+        approvals.load_config(roots)
+
+
 def test_an_unreadable_config_is_an_error(roots: sites.Roots) -> None:
     path = write_config(roots, "{}")
     path.chmod(0)
