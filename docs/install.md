@@ -45,7 +45,8 @@ agent-browser releases.
 `$XDG_CONFIG_HOME/systemd/user`, which is `~/.config/systemd/user` by default. It fills in the
 path of the `valetkey` program and prints the two `systemctl` commands without running them.
 `--dry-run` prints the files and writes nothing. A file that valetkey did not write is never
-replaced unless you pass `--force`.
+replaced unless you pass `--force`. With `--bridge` it writes the unit that runs the bridge on a
+laptop instead (see [Remote logins](remote.md)).
 
 The socket starts the daemon when a client first connects, so nothing runs until a session is
 wanted. The service runs with a restricted view of the system: it can write only valetkey's own
@@ -56,19 +57,25 @@ daemon is running, and that daemon keeps running so several clients can share it
 
 ## Where valetkey keeps things
 
-- Each site's allowed hosts: `$XDG_CONFIG_HOME/valetkey/sites/SITE.json`.
-- The optional approval command: `$XDG_CONFIG_HOME/valetkey/config.json`.
+- Each site's allowed hosts: `$XDG_CONFIG_HOME/valetkey/sites/SITE.json`. Another account of a
+  site has its own files, named with a dot (`sitex.work.json`).
+- The optional settings: `$XDG_CONFIG_HOME/valetkey/config.json`. It holds the approval command,
+  the notification switch, the remote login switches and `session_idle_minutes`.
 - Each site's browser profile, which holds the login, and its downloads:
   `$XDG_STATE_HOME/valetkey/`.
 - Sockets and logs of the running daemon: `$XDG_RUNTIME_DIR/valetkey/`.
 
-`valetkey forget SITE` deletes a site's policy, profile and downloads.
+`valetkey forget SITE` deletes a site's policy, profile and downloads. For one account of a site,
+name it: `valetkey forget sitex:work`.
 
 ## Check the setup
 
 `valetkey doctor` prints one line per check. It fails when bubblewrap, user namespaces, Chromium,
-agent-browser or the runtime directory are not usable. A missing Wayland display is a warning,
-because only logging in needs one. See [Troubleshooting](troubleshooting.md) when a check fails.
+agent-browser or the runtime directory are not usable, when someone else can write `config.json`,
+and when the browser view is switched on without the tools it needs. A missing Wayland display is
+a warning, because only logging in needs one, and so are a compositor that cannot restrict the
+login window and a sandbox that cannot refuse system calls. See [Troubleshooting](troubleshooting.md)
+when a check fails.
 
 ## Upgrade and remove
 

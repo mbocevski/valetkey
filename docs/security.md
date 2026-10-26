@@ -38,14 +38,13 @@ A host is added to a site's policy only when a person says yes. Three things can
 - You, with `valetkey allow` and `valetkey deny`. The login's summary names the hosts it allowed,
   so you can deny any you do not want. The proxy cannot tell a provider from a page made to look
   like one, so check the names.
-- The agent's `browser_allow` and `browser_deny`, which only ask; the second only narrows. You answer in the client's own interface, in a
-  notification, or through the approval command, and no tool takes "the person said yes" from the agent. See
-  [MCP clients](mcp.md).
+- The agent's `browser_allow` and `browser_deny`, which only ask; the second only narrows. You
+  answer in the client's own interface, in a notification, or through the approval command, and no
+  tool takes "the person said yes" from the agent. See [MCP clients](mcp.md).
 
 Only a host that was refused for the site, or that is in its excluded or denied list, can be asked
 about. The excluded list holds the hosts the last login left out, and the denied list the ones you
-denied. A steered agent cannot
-fill your screen with questions about arbitrary hosts.
+denied. A steered agent cannot fill your screen with questions about arbitrary hosts.
 
 ## What a login allows
 
@@ -118,8 +117,9 @@ matters to you.
   addresses stay refused unless you listed their range for the site.
 - A login window needs a Wayland session. An X11 client can read every keystroke and the whole
   screen, so valetkey refuses to open a login window on X11.
-- Chrome makes some requests of its own, such as update checks. They are refused and listed on a
-  separate line of the tool results. Allow one only if a page needs it.
+- Chrome can still make requests of its own. They are refused and listed on a separate line of
+  the tool results. valetkey tells it not to check for updates, or typed passwords against leaked
+  ones. Allow one only if a page needs it.
 
 ## The login window
 
@@ -172,6 +172,10 @@ follow instructions found there and to tell you when a host is refused instead o
 The browser's own error messages and the tails of its logs are fenced and labelled the same way,
 because they can repeat what a page chose. The summary of a login holds only valetkey's words and
 host names, never text from the login's history.
+
+A login window can also tamper with the files it writes. valetkey reads its history and its
+cookie database from a copy, read-only, with a size cap and a time limit, and refuses a file that
+holds anything but plain tables. Of the cookies it keeps only a host and a name, never a value.
 
 ## Sessions that nobody uses
 

@@ -56,15 +56,25 @@ manager's. When you start the desktop yourself, run
 `systemctl --user import-environment WAYLAND_DISPLAY` from inside it.
 
 A missing display only blocks logging in. Sessions for a site you have already logged in to run
-headless and do not need one.
+headless and do not need one. A browser that the site has running is left alone when no login
+window can open. On a machine with no screen, see [remote logins](remote.md).
+
+## A login does not open on the laptop
+
+Check the three parts. `valetkey status` on the server must list the bridge. The server's
+`config.json` must say `{"remote_logins": {"waypipe": true}}`, because without it `browser_login`
+fails with `no_display` even with a bridge connected. And the machine must have no screen of its
+own, since a local screen comes first. [Remote logins](remote.md) has the steps.
 
 ## The login has expired
 
 `browser_open` says the saved login has expired when the start page sent the browser to a sign-in
-page. The agent calls `browser_login` again, and you sign in again in the window that opens.
+page, or when none of the sign-in cookies that the login recorded is left in the profile. In the
+second case no browser is started. The agent calls `browser_login` again, and you sign in again in
+the window that opens.
 
-A site that shows its sign-in form on the start page itself is not noticed this way, because
-nothing tells a form there from a sign-in box on a public front page. The agent still sees the
+A site that shows its sign-in form on the start page itself, and keeps its cookies, is not noticed.
+Nothing tells a form there from a sign-in box on a public front page. The agent still sees the
 form in the page and calls `browser_login`.
 
 ## The session is not signed in after a login
@@ -77,14 +87,27 @@ closed, and the profile does not have it. Sign in again once, with `browser_logi
 
 ## A page needs a host that is refused
 
-The browser tools list refused hosts after a load. Tool results also mention Chrome's own update
-checks on a separate line; ignore those unless a page needs them. If a page does need a refused
-host, the agent can ask with `browser_allow`, or you can run `valetkey allow SITE HOST`.
+The browser tools list refused hosts after a load, and a page that could not load starts with
+"The page did not load: HOST is not allowed for SITE". Requests Chrome makes on its own are listed
+on a separate line; ignore those unless a page needs them. If a page does need a refused host,
+the agent can ask with `browser_allow`, or you can run `valetkey allow SITE HOST`.
 
 An intranet site fails with "resolves to a private address". The name is allowed, but the address
 is private. See [Private networks](security.md) and run
 `valetkey allow SITE --private-network RANGE` with the narrowest range that holds the address.
 Before the first login, run `valetkey add SITE START --private-network RANGE` instead.
+
+## A tool says the session was closed
+
+A session that nothing uses for 15 minutes is closed, and the next call says so and asks the agent
+to call `browser_open`. That is normal, and the agent does it without asking. The login stays
+saved. To change the time, set `session_idle_minutes` in `config.json`.
+
+## The browser does not start on a busy machine
+
+On a heavily loaded machine the browser may take longer to start than agent-browser waits, which
+is 30 seconds. valetkey then starts it once more. If both starts fail, `browser_open` reports
+"Failed to read: Resource temporarily unavailable". Try again when the load is lower.
 
 ## The daemon does not start
 

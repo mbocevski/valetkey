@@ -66,7 +66,7 @@ Parameters:
 ## Allowing and denying hosts
 
 `valetkey allow SITE HOST` lets a site reach another host and its subdomains, and removes any
-excluded entry that would block it. `valetkey deny SITE HOST` takes a host away and adds it to the
+excluded or denied entry that would block it. `valetkey deny SITE HOST` takes a host away and adds it to the
 site's denied hosts, which block it even under a wider allowed entry. A login never allows a denied
 host again; `valetkey allow` does.
 

@@ -45,7 +45,7 @@ valetkey doctor
 - [bubblewrap](https://github.com/containers/bubblewrap)
 - Chromium
 - [agent-browser](https://github.com/vercel-labs/agent-browser) 0.39 or newer, tested with 0.39.4
-- A Wayland desktop, to log in
+- A Wayland desktop, to log in (or a bridge or a browser view, for a server: see Remote logins)
 
 The [install page](docs/install.md) says what each route installs and how to remove it.
 
@@ -64,14 +64,16 @@ explains how the agent asks for a host.
 
 1. Ask the agent to log in to a site. A browser window opens on your desktop.
 2. Sign in, with two-factor authentication if the site asks for it, and close the window. valetkey
-   says which hosts it will allow: the site and the sign-in provider the window visited.
+   allows the hosts the login used, such as the site and its sign-in provider, apart from ads and
+   tracking, and says which.
 3. The agent opens the site in a headless browser that is already signed in. It reads pages,
    clicks, types and downloads files into the site's folder.
 4. When a page needs a host that is not allowed, the agent can ask. You answer in your client or
    through a command you set up, or you run `valetkey allow SITE HOST` yourself.
 5. When the site forgets you, `browser_open` says the login expired, and the agent logs in again.
 
-`valetkey status` shows the open sessions at any time, and nothing can hide one.
+`valetkey status` shows the open sessions at any time, and nothing can hide one. A session that
+nothing uses for 15 minutes closes itself, and `browser_open` starts it again.
 
 ## What it contains
 

@@ -22,9 +22,10 @@ Start with `browser_sites`. The others act on one site by its name.
 - `browser_sites` lists the sites you have set up, their state, the first hosts each may reach, and
   what the last login learned. With `site` it lists that one site's complete lists: hosts it may
   reach, hosts the login left out, and hosts denied.
-- `browser_login` opens a login window on your screen and returns at once. Pass `account` to add
-  another account to a site (see [accounts](#accounts)). With no screen it
-  uses a connected bridge if `remote_logins.waypipe` is on, so the window opens on your laptop.
+- `browser_login` opens a login window on your screen and returns at once. It closes the site's
+  running browser first. Pass `account` to add another account to a site (see
+  [accounts](#accounts)). With no screen it uses a connected bridge if `remote_logins.waypipe` is
+  on, so the window opens on your laptop.
   Otherwise, with `remote_logins.novnc` on, the window is shown in a web browser. The link goes to
   you, never to the agent: your client shows it, or you run `valetkey status` (see
   [remote logins](remote.md)).
@@ -57,9 +58,12 @@ a site. Text from a page is labelled as untrusted data.
 Every result starts with the site's name and the page's address. The address line shows only the
 scheme and host, which valetkey reads the way the browser does. The path and query, which the page
 chose, come below it, fenced and labelled as untrusted, cut to 200 characters, with the full length
-when they were cut. Percent-encoded text is shown as it is, never decoded. `browser_open` and
-`browser_navigate` then give only the page's title, labelled as the title, with a line that says
-to call `browser_snapshot` to read the page.
+when they were cut. Percent-encoded text is shown as it is, never decoded. When a page loaded,
+`browser_open` and `browser_navigate` then give only its title, labelled as the title, with a line
+that says to call `browser_snapshot` to read the page. When none loaded (an expired login, a
+refused start page, or an address that only started a download), the title, `URL: (none)` and an
+empty list of refused hosts are left out. A snapshot of more than 40,000 characters is cut at the
+end of a line, with a note of how much was left out.
 
 When a page could not load because its host is refused, the first line says so and names the host
 and the site, as in `The page did not load: example.org is not allowed for sitex.` The refused
@@ -88,9 +92,9 @@ Each tool carries the standard MCP hints, so a client can decide what to ask you
 `browser_sites`, `browser_downloads`, `browser_snapshot` and `browser_screenshot` only read; the
 first two touch nothing but valetkey's own state. `browser_click` and `browser_type` are marked
 destructive, because a click or Enter can submit, send or delete. `browser_open`,
-`browser_navigate`, `browser_allow`, `browser_deny` and `browser_close` are idempotent. `browser_save` writes a
-file, so it is not read-only; it never overwrites one, so it is not destructive. Every tool that touches a
-page is marked open world. They are hints, not promises.
+`browser_navigate`, `browser_allow`, `browser_deny` and `browser_close` are idempotent.
+`browser_save` writes a file, so it is not read-only; it never overwrites one, so it is not
+destructive. Every tool that touches a page is marked open world. They are hints, not promises.
 
 ## Accounts
 
@@ -230,4 +234,7 @@ the site is opened, before the browser starts, it reads the profile again. If no
 cookies is left, the login has expired and no browser is started. It says nothing when it is
 unsure: when one is still there, or the profile cannot be read.
 
-A login usually comes while the site's browser is still running. `browser_login` closes that browser first, as `browser_close` does, and says so in its result. A login window that is already open for the site is an error.
+A login usually comes while the site's browser is still running. `browser_login` closes that
+browser first, as `browser_close` does, and says so in its result, but only when a window can
+open. With no screen, no connected bridge and no browser view, it fails with `no_display` and
+leaves the browser running. A login window that is already open for the site is an error.

@@ -12,7 +12,7 @@ ssh connection to the server that forwards a socket back to it. On the server, t
 `valetkey watch` reports when it comes and goes.
 
 Nothing needs starting for each login. When the server has no screen of its own, a login opens on
-the laptop through the newest connected bridge, once you turn that on (see below). The login is
+the laptop through the newest connected bridge, once you turn that on (see "Set up the bridge"). The login is
 as contained and recorded as a local one, and closing the window finishes it the same way.
 
 ## What you need
@@ -24,35 +24,40 @@ as contained and recorded as a local one, and closing the window finishes it the
 
 A hardware security key cannot be used this way, because the key is not forwarded.
 
-## Start the bridge
+## Set up the bridge
 
-On the laptop:
+1. On the server, turn remote logins on. They are off until the server's `config.json` says
+   otherwise. Edit `$XDG_CONFIG_HOME/valetkey/config.json` on the server:
 
-```fish
-valetkey install-units --bridge
-systemctl --user daemon-reload
-systemctl --user enable --now valetkey-bridge@SERVER.service
-```
+   ```json
+   {"remote_logins": {"waypipe": true}}
+   ```
 
-Replace `SERVER` with the name you give ssh. The unit runs `valetkey bridge SERVER`, restarts it
-if it fails, and stops it when you log out. Only one bridge runs per laptop. The bridge asks the
-server for its runtime directory; pass `--remote-runtime` to name it instead.
+   Without this the bridge connects, and `valetkey status` lists it, but `browser_login` ignores
+   it and fails with `no_display`.
+2. On the laptop, start the bridge:
+
+   ```fish
+   valetkey install-units --bridge
+   systemctl --user daemon-reload
+   systemctl --user enable --now valetkey-bridge@SERVER.service
+   ```
+
+   Replace `SERVER` with the name you give ssh. The unit runs `valetkey bridge SERVER`, restarts
+   it if it fails, and stops it when you log out. Only one bridge runs per laptop. The bridge asks
+   the server for its runtime directory; pass `--remote-runtime` to name it instead.
+3. Check it. On the server, `valetkey status` lists the bridge. Then ask the agent to log in to a
+   site: the window opens on the laptop.
 
 A dropped connection is tried again after 1 second, then 2, 4 and so on up to a minute, each wait
 shortened by a random amount. A connection that lasted a minute starts the waits again.
 
-## Turn it on
+## Which route a login takes
 
-Remote logins are off until the server's `config.json` says so. Edit
-`$XDG_CONFIG_HOME/valetkey/config.json` on the server:
-
-```json
-{"remote_logins": {"waypipe": true}}
-```
-
-`browser_login` then chooses in this order. A screen on the server itself comes first. A connected
+`browser_login` chooses in this order. A screen on the server itself comes first. A connected
 bridge comes next, if `waypipe` is on. A browser view comes last, if `novnc` is on. With none of
-them, the login is refused and says why. The reply tells the agent where the window is.
+them, the login is refused and says why, and a browser the site already has running is left
+alone. The reply tells the agent where the window is.
 
 ## What it protects
 
