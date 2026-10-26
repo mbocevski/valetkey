@@ -108,11 +108,46 @@ def test_needs_readme(*, message: str, expected: bool) -> None:
 
 def test_feature_without_readme_fails(capsys: pytest.CaptureFixture[str]) -> None:
     assert readme_check.commit_msg("feat: add status", ["src/valetkey/cli.py"]) == 1
-    assert "README.md is not staged" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "neither README.md nor a page under docs/ is staged" in err
 
 
 def test_feature_with_readme_passes() -> None:
     assert readme_check.commit_msg("feat: add status", ["src/x.py", "README.md"]) == 0
+
+
+@pytest.mark.parametrize(
+    ("files", "expected"),
+    [
+        (["README.md"], True),
+        (["docs/commands.md"], True),
+        (["docs/deep/er/page.md"], True),
+        (["src/x.py", "docs/security.md"], True),
+        ([], False),
+        (["src/x.py"], False),
+        (["docs/image.png"], False),
+        (["docs/notes.txt"], False),
+        (["docs"], False),
+        (["docs.md"], False),
+        (["mydocs/page.md"], False),
+        (["src/docs/page.md"], False),
+        (["docs-old/page.md"], False),
+        (["docs/page.md.bak"], False),
+        (["README.md.orig"], False),
+        (["sub/README.md"], False),
+    ],
+)
+def test_touches_docs(files: list[str], *, expected: bool) -> None:
+    assert readme_check.touches_docs(files) is expected
+
+
+def test_feature_with_a_docs_page_passes() -> None:
+    assert readme_check.commit_msg("feat: add status", ["src/x.py", "docs/commands.md"]) == 0
+    assert readme_check.commit_msg("fix!: rename it", ["docs/mcp.md"]) == 0
+
+
+def test_feature_with_only_an_unrelated_markdown_file_fails() -> None:
+    assert readme_check.commit_msg("feat: add status", ["CHANGELOG.md", "AGENTS.md"]) == 1
 
 
 def test_feature_with_no_docs_trailer_passes() -> None:
@@ -173,9 +208,11 @@ def test_range_flags_user_visible_commits_without_the_readme() -> None:
         range_commit("c", "feat: add watch\n\nDocs: none", "src/x.py"),
         range_commit("d", "fix!: rename the socket", "src/x.py"),
         range_commit("e", "chore: tidy", "src/x.py"),
+        range_commit("f", "feat: add add", "src/x.py", "docs/commands.md"),
+        range_commit("g", "feat: add more", "src/x.py", "CHANGELOG.md"),
     ]
     problems = [p.message for p in readme_check.check_range(commits)]
-    assert [m[:12] for m in problems] == ["a" * 12, "d" * 12]
+    assert [m[:12] for m in problems] == ["a" * 12, "d" * 12, "g" * 12]
     assert "'feat: add status' changes what users can do" in problems[0]
 
 
@@ -183,7 +220,7 @@ def test_range_command(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFi
     commits = [range_commit("a", "feat: add status", "src/x.py")]
     monkeypatch.setattr(conventional, "range_commits", lambda *_: commits)
     assert readme_check.main(["range", "base", "head"]) == 1
-    assert "does not update README.md" in capsys.readouterr().err
+    assert "does not update README.md or a page under docs/" in capsys.readouterr().err
     assert readme_check.main(["range", "base", "head", "--skip"]) == 0
     monkeypatch.setattr(conventional, "range_commits", lambda *_: [])
     assert readme_check.main(["range", "base", "head"]) == 0

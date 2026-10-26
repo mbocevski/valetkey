@@ -19,9 +19,9 @@ sections, list items that open with a bold label, deeply nested lists, horizonta
 rules and walls of badges. The pages in ``docs/`` get the same shape rules and, instead of the
 budget, a limit on the words in each section. Vale checks the wording; this checks the shape.
 
-``commit-msg`` checks whether a commit should have changed the README. A ``feat``
-commit or a breaking change alters what users can do, so it must stage README.md,
-or carry a ``Docs: none`` trailer that records the README is still accurate.
+``commit-msg`` checks whether a commit should have changed the documentation. A ``feat``
+commit or a breaking change alters what users can do, so it must stage README.md or a page
+under docs/, or carry a ``Docs: none`` trailer that records the documentation is still accurate.
 ``range`` applies the same rule to every commit in ``BASE..HEAD`` (a pull request);
 ``--skip`` (a ``skip-readme`` label) waives it.
 """
@@ -40,7 +40,7 @@ import conventional
 from valetkey import sessions
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
 README = conventional.ROOT / "README.md"
 DOCS = conventional.ROOT / "docs"
@@ -306,30 +306,39 @@ def needs_readme(message: str) -> bool:
     return commit.type == "feat" or commit.breaking
 
 
+def touches_docs(files: Iterable[str]) -> bool:
+    """Return whether ``files`` (from the repository root) include README.md or a docs page."""
+    return any(
+        name == "README.md" or (name.startswith("docs/") and name.endswith(".md")) for name in files
+    )
+
+
 def missing_readme(message: str, files: list[str] | frozenset[str]) -> bool:
-    """Return whether a commit with ``message`` changing ``files`` leaves the README behind."""
+    """Return whether a commit with ``message`` changing ``files`` leaves the docs behind."""
     no_docs = conventional.parse(message).has_trailer("Docs", "none")
-    return needs_readme(message) and "README.md" not in files and not no_docs
+    return needs_readme(message) and not touches_docs(files) and not no_docs
 
 
 def commit_msg(message: str, staged: list[str]) -> int:
-    """Fail a user-visible commit that leaves the README untouched without saying so."""
+    """Fail a user-visible commit that leaves the documentation untouched without saying so."""
     if not missing_readme(message, staged):
         return 0
     print(
-        "This commit changes what users can do, but README.md is not staged.\n"
-        "Update the README, or add a 'Docs: none' trailer if it is still accurate.",
+        "This commit changes what users can do, but neither README.md nor a page under docs/ "
+        "is staged.\n"
+        "Update the documentation, or add a 'Docs: none' trailer if it is still accurate.",
         file=sys.stderr,
     )
     return 1
 
 
 def check_range(commits: list[conventional.RangeCommit]) -> list[Problem]:
-    """Return a problem for each user-visible commit in a range that left the README behind."""
+    """Return a problem for each user-visible commit in a range that left the docs behind."""
     return [
         Problem(
             f"{item.sha[:12]} '{item.header}' changes what users can do but does not update "
-            "README.md; update it, or add a 'Docs: none' trailer if it is still accurate"
+            "README.md or a page under docs/; update it, or add a 'Docs: none' trailer if the "
+            "documentation is still accurate"
         )
         for item in commits
         if missing_readme(item.commit.message, item.files)

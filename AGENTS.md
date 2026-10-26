@@ -79,10 +79,11 @@ Hooks keep the files current:
 - The README must state the Python version that `requires-python` sets and the agent-browser
   versions in `valetkey.sessions`. A relative link in the README or a page must point at a file
   that exists.
-- A `feat` commit or a breaking change (`!`, `BREAKING CHANGE:`) must stage `README.md`. If the
-  README is still accurate, add a `Docs: none` trailer to the commit message instead. A hook
-  checks each commit, and CI checks every commit in a pull request. A pull request labeled
-  `skip-readme` passes without README changes.
+- A `feat` commit or a breaking change (`!`, `BREAKING CHANGE:`) must stage `README.md` or a
+  page under `docs/` (any `docs/**/*.md`). If the documentation is still accurate, add a
+  `Docs: none` trailer to the commit message instead. A hook checks each commit, and CI checks
+  every commit in a pull request. A pull request labeled `skip-readme` passes without changes
+  to the documentation.
 
 ## Changelog
 
