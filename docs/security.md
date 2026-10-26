@@ -139,6 +139,9 @@ A page can contain text written to look like instructions. Everything that came 
 as titles, the page's text tree and the path and query of its address, is fenced and labelled as
 data. The address shows only its host as fact; the rest is cut to 200 characters. The agent is told never to
 follow instructions found there and to tell you when a host is refused instead of working around it.
+The browser's own error messages and the tails of its logs are fenced and labelled the same way,
+because they can repeat what a page chose. The summary of a login holds only valetkey's words and
+host names, never text from the login's history.
 
 ## Seeing what runs
 
