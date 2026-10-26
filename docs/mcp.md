@@ -106,6 +106,9 @@ list of hosts. You can start it with the hosts of another account using
 Files a site downloads are saved in its downloads folder, `$XDG_STATE_HOME/valetkey/downloads/SITE`.
 A new file never replaces an older one of the same name; it gets a number, as in `report (2).pdf`.
 valetkey reads the first bytes of a file to report its type and never opens or runs it.
+When two downloads under one name run at the same time, such as two hidden frames from one page,
+the browser keeps only one of the files. The result then says that downloads started and one
+file was saved, lists the names and addresses, and notes that some share a name.
 
 `browser_save` takes a reference from the latest snapshot, which saves a link's target or a media
 element's source, or an address. The picture addresses are listed by `browser_snapshot` with

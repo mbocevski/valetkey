@@ -233,6 +233,7 @@ class FakeSession:
         self.body: sessions.Body | None = None
         """What a fetch returns for a plain response; ``None`` when the browser saved it itself."""
         self.attached = 0
+        self.attach_names: list[str] | None = None
         self.passwords = 0
         self.attach_error: Exception | None = None
         self.active = 0
@@ -293,10 +294,8 @@ class FakeSession:
     def started_downloads(self) -> list[sessions.Attachment]:
         if self.attach_error is not None:
             raise self.attach_error
-        return [
-            sessions.Attachment(f"https://sitex.test/file{n}", f"file{n}.bin")
-            for n in range(self.attached)
-        ]
+        names = self.attach_names or [f"file{n}.bin" for n in range(self.attached)]
+        return [sessions.Attachment(f"https://sitex.test/{n}", n) for n in names]
 
     def fill(self, ref: str, text: str) -> None:
         self._use("fill", ref, text)
@@ -2487,7 +2486,7 @@ def test_a_download_that_started_but_saved_nothing_is_reported_as_unsaved(
                 "unsaved": 1,
                 "started": [
                     {
-                        "url": {"untrusted": True, "text": "https://sitex.test/file0"},
+                        "url": {"untrusted": True, "text": "https://sitex.test/file0.bin"},
                         "name": {"untrusted": True, "text": "file0.bin"},
                     }
                 ],
@@ -2516,6 +2515,34 @@ def test_only_the_first_unsaved_downloads_are_named_but_all_are_counted(
             result = await c.call("navigate", site="sitex", url="https://sitex.test/x")
             assert result["downloads"]["unsaved"] == daemon.MAX_STARTED + 5
             assert len(result["downloads"]["started"]) == daemon.MAX_STARTED
+
+    run(scenario())
+
+
+def test_two_downloads_under_one_name_with_one_file_saved_are_explained(
+    roots: sites.Roots,
+) -> None:
+    """The browser keeps one file when two downloads of one name run together; say so."""
+    add_site(roots)
+    folder = downloads_dir(roots)
+    incoming = incoming_dir(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.attach_names = ["same.txt", "same.txt"]
+            (incoming / "same.txt").write_text("the one that was kept", encoding="utf-8")
+            result = await c.call("navigate", site="sitex", url="https://sitex.test/x")
+            found = result["downloads"]
+            assert found["unsaved"] == 1
+            assert [Path(item["path"]["text"]).name for item in found["new"]] == ["same.txt"]
+            text = mcp_server.downloads_text(found)
+            assert "1 download started but no file was saved." in text
+            assert "Nothing was clicked: the page started them itself." in text
+            assert "keeps only one of the files" in text
+            assert "too long" not in text
+            assert [p.name for p in folder.iterdir() if p.is_file()] == ["same.txt"]
 
     run(scenario())
 
