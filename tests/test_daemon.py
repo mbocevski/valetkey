@@ -232,6 +232,8 @@ class FakeSession:
         """The file a fetch of an attachment writes, as the browser's own download would."""
         self.body: sessions.Body | None = None
         """What a fetch returns for a plain response; ``None`` when the browser saved it itself."""
+        self.tree = '- button "Go" [ref=e1]'
+        """The text of the snapshot."""
         self.attached = 0
         self.attach_names: list[str] | None = None
         self.passwords = 0
@@ -266,11 +268,9 @@ class FakeSession:
             self.on_open()
         return sessions.Page(url, f"Title of {url}")
 
-    def snapshot(self) -> sessions.Snapshot:
-        self._use("snapshot")
-        return sessions.Snapshot(
-            self.url, '- button "Go" [ref=e1]', {"e1": sessions.Ref("button", "Go")}
-        )
+    def snapshot(self, *, interactive: bool = True) -> sessions.Snapshot:
+        self._use("snapshot", interactive)
+        return sessions.Snapshot(self.url, self.tree, {"e1": sessions.Ref("button", "Go")})
 
     def outline(self) -> str:
         texts = [f'- StaticText "{text}"' for text in [f"page at {self.url}", *self.texts]]
@@ -1142,6 +1142,49 @@ def test_a_login_that_is_cancelled_while_its_window_opens_leaves_the_site_idle(
             with pytest.raises(Stopped):
                 await rig.daemon._op_login(daemon._Connection(), {"target": "sitex"})  # noqa: SLF001
             assert (await c.call("status", site="sitex"))["state"] == "idle"
+
+
+def test_cut_tree_keeps_whole_lines_and_counts_what_is_left() -> None:
+    tree = "\n".join(f"- line {n}" for n in range(10))
+    assert daemon.cut_tree(tree) == (tree, None)
+    kept, left = daemon.cut_tree(tree, 30)
+    assert kept == "- line 0\n- line 1\n- line 2"
+    assert left == (7, len(tree) - len(kept))
+    assert daemon.cut_tree(tree, len(tree)) == (tree, None)
+    assert daemon.cut_tree("x" * 50 + "\n- next", 20) == ("x" * 20, (1, 37))
+
+
+def test_a_snapshot_is_cut_and_says_how_much_was_left_out(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            rig.factory.made[0].tree = "\n".join(f'- paragraph "{n:05}"' for n in range(5000))
+            result = await c.call("snapshot", site="sitex")
+            kept = result["snapshot"]["text"]
+            assert len(kept) <= daemon.SNAPSHOT_LIMIT
+            assert kept.endswith('"')  # a whole line, not cut in its middle
+            assert result["cut"]["lines"] == 5000 - len(kept.split("\n"))
+            rig.factory.made[0].tree = '- button "Go" [ref=e1]'
+            assert "cut" not in await c.call("snapshot", site="sitex", interactive=True)
+            with pytest.raises(DaemonError) as info:
+                await c.call("snapshot", site="sitex", interactive="yes")
+            assert info.value.code == "bad_request"
+
+    run(scenario())
+
+
+def test_the_whole_tree_is_asked_for_unless_interactive_is_set(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            await c.call("snapshot", site="sitex")
+            await c.call("snapshot", site="sitex", interactive=True)
+            asked = [call for call in rig.factory.made[0].calls if call[0] == "snapshot"]
+            assert asked == [("snapshot", False), ("snapshot", True)]
 
     run(scenario())
 

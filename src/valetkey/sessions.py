@@ -938,9 +938,14 @@ class Session:
         """Navigate to an HTTP or HTTPS ``url``."""
         return parse_page(self._call("open", _check_url(url)))
 
-    def snapshot(self) -> Snapshot:
-        """Return the page's interactive elements, with references for ``click`` and ``fill``."""
-        return parse_snapshot(self._call("snapshot", "-i"))
+    def snapshot(self, *, interactive: bool = True) -> Snapshot:
+        """Return the page's accessibility tree, with references for ``click`` and ``fill``.
+
+        With ``interactive`` (the default, which a click looks its target up in) only the
+        elements one can act on are listed. Without it the whole tree is, with the page's text
+        in it: paragraphs, lists and tables. The references are the same kind either way.
+        """
+        return parse_snapshot(self._call("snapshot", *(["-i"] if interactive else [])))
 
     def outline(self) -> str:
         """Return the whole accessibility tree as text: every node, with names and page text.

@@ -305,7 +305,7 @@ EXPECTED_TOOLS = {
     "browser_sites": {"site"},
     "browser_login": {"site_or_url", "account"},
     "browser_open": {"site"},
-    "browser_snapshot": {"site", "images"},
+    "browser_snapshot": {"site", "images", "interactive"},
     "browser_click": {"site", "ref", "text", "role", "expect"},
     "browser_type": {"site", "ref", "text", "submit"},
     "browser_navigate": {"site", "url"},
@@ -826,13 +826,57 @@ def test_a_snapshot_asks_for_pictures_only_when_told_to(short_dir: Path) -> None
             )  # fmt: skip
             plain = text_of(await mcp.call_tool("browser_snapshot", {"site": "sitex"}))
             assert "Pictures and videos" not in plain
-            assert fake.requests[-1]["args"] == {"site": "sitex", "images": False}
+            assert fake.requests[-1]["args"] == {
+                "site": "sitex",
+                "images": False,
+                "interactive": False,
+            }
             more = text_of(
                 await mcp.call_tool("browser_snapshot", {"site": "sitex", "images": True})
             )
             assert "Pictures and videos on the page" in more
             assert '"url": "https://sitex.test/s.png"' in more
-            assert fake.requests[-1]["args"] == {"site": "sitex", "images": True}
+            assert fake.requests[-1]["args"] == {
+                "site": "sitex",
+                "images": True,
+                "interactive": False,
+            }
+
+    run(scenario())
+
+
+def test_a_snapshot_can_ask_for_only_what_can_be_acted_on(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["snapshot"] = lambda _a: (
+                ENVELOPE | {"snapshot": {"untrusted": True, "text": '- button "Go" [ref=e1]'}}
+            )
+            await mcp.call_tool("browser_snapshot", {"site": "sitex", "interactive": True})
+            assert fake.requests[-1]["args"]["interactive"] is True
+
+    run(scenario())
+
+
+def test_a_cut_snapshot_ends_with_how_much_was_left_out(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["snapshot"] = lambda _a: (
+                ENVELOPE
+                | {
+                    "snapshot": {"untrusted": True, "text": '- button "Go" [ref=e1]'},
+                    "cut": {"lines": 120, "characters": 9000},
+                }
+            )
+            text = text_of(await mcp.call_tool("browser_snapshot", {"site": "sitex"}))
+            assert text.endswith(
+                "The snapshot was cut here: 120 more lines (9000 characters) are left out. "
+                "Call browser_snapshot with interactive set for a smaller view."
+            )
+            fake.handlers["snapshot"] = lambda _a: (
+                ENVELOPE | {"snapshot": {"untrusted": True, "text": "- x"}}
+            )
+            whole = text_of(await mcp.call_tool("browser_snapshot", {"site": "sitex"}))
+            assert "was cut" not in whole
 
     run(scenario())
 

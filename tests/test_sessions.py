@@ -635,6 +635,7 @@ def test_every_verb_goes_through_call_command(
     session = make_session(tmp_path)
     session.open("http://a.test/")
     session.snapshot()
+    session.snapshot(interactive=False)
     session.click("e1")
     session.fill("@e1", "plain text")
     session.fill("@e1", "--proxy http://evil")
@@ -645,6 +646,7 @@ def test_every_verb_goes_through_call_command(
     assert [argv[2:] for argv, _ in run.calls] == [
         ["open", "http://a.test/"],
         ["snapshot", "-i"],
+        ["snapshot"],
         ["click", "@e1"],
         ["fill", "@e1", "plain text"],
         ["fill", "@e1", " --proxy http://evil"],

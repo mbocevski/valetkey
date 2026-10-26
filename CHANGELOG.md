@@ -58,6 +58,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- `browser_snapshot` now includes the page's text, such as paragraphs, lists and tables, cuts a very long page with a note saying so, and takes `interactive` for the short list of elements to act on.
 - `browser_login` no longer closes a running session when there is no screen to open the login on, and when a login window fails after the session was closed, the error says so.
 - The check for a lost login no longer reports a login that is still there: it follows a cookie's last update, keeps the longest-lived cookies, and a new login replaces the old record.
 - When downloads start but no file is saved, the result now lists each one's name and address, says if the page started them without a click, and explains names that repeat.

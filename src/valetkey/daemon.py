@@ -122,6 +122,7 @@ import asyncio
 import contextlib
 import fcntl
 import functools
+import itertools
 import json
 import logging
 import os
@@ -177,6 +178,8 @@ RESOLVE_SECONDS = 10.0
 _MAX_NAMED_HOSTS = 5
 MAX_REFUSED_HOSTS = 2000
 """How many refused hosts are remembered per site."""
+SNAPSHOT_LIMIT = 40_000
+"""The most characters of a page's tree a snapshot answer holds; more is cut at a node."""
 MAX_STARTED = 10
 """The most unsaved downloads a result names; the count is always complete."""
 SD_LISTEN_FDS_START = 3
@@ -219,8 +222,8 @@ class BrowserSession(Protocol):
     def open(self, url: str) -> sessions.Page:
         """Navigate to ``url``."""
 
-    def snapshot(self) -> sessions.Snapshot:
-        """Return the page's interactive elements."""
+    def snapshot(self, *, interactive: bool = True) -> sessions.Snapshot:
+        """Return the page's interactive elements, or with ``interactive`` false its whole tree."""
 
     def outline(self) -> str:
         """Return the whole accessibility tree as text."""
@@ -581,6 +584,23 @@ def _closed_for_login(error: Exception) -> DaemonError:
     mapped = map_error(error)
     mapped.details = mapped.details | {"closed_session": True}
     return mapped
+
+
+def cut_tree(tree: str, limit: int = SNAPSHOT_LIMIT) -> tuple[str, tuple[int, int] | None]:
+    """Cut a snapshot's text to ``limit`` characters at the end of a node, one to a line.
+
+    Returns the text that is kept and, when something was left out, how many lines and
+    characters. A first line that is longer than ``limit`` is cut where it is, as the one case
+    with no boundary to cut at.
+    """
+    if len(tree) <= limit:
+        return tree, None
+    lines = tree.split("\n")
+    sizes = itertools.accumulate(len(line) + 1 for line in lines)  # up to each newline
+    # The tree is longer than the limit, so some line is the first that does not fit.
+    kept = next(n for n, size in enumerate(sizes) if size - 1 > limit)
+    text = "\n".join(lines[:kept]) if kept else tree[:limit]
+    return text, (len(lines) - max(kept, 1), len(tree) - len(text))
 
 
 def _idle_message(site: str, minutes: int) -> str:
@@ -1943,8 +1963,12 @@ class Daemon:
         if not isinstance(pictures, bool):
             _fail("bad_request", '"images" must be true or false')
 
+        interactive = args.get("interactive", False)
+        if not isinstance(interactive, bool):
+            _fail("bad_request", '"interactive" must be true or false')
+
         def look(session: BrowserSession) -> tuple[sessions.Snapshot, list[dict[str, Any]]]:
-            return session.snapshot(), session.images() if pictures else []
+            return session.snapshot(interactive=interactive), session.images() if pictures else []
 
         result = await self._session_op(connection, state, look)
         snap, found = result.pop("_value")
@@ -1954,7 +1978,10 @@ class Daemon:
                 for item in found
             ]
         result["url"] = snap.url
-        result["snapshot"] = untrusted(snap.tree)
+        tree, left_out = cut_tree(snap.tree)
+        result["snapshot"] = untrusted(tree)
+        if left_out is not None:
+            result["cut"] = {"lines": left_out[0], "characters": left_out[1]}
         result["refs"] = {ref: element.role for ref, element in snap.refs.items()}
         connection.refs[state.name] = (
             state.generation,

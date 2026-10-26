@@ -30,8 +30,9 @@ Start with `browser_sites`. The others act on one site by its name.
   [remote logins](remote.md)).
 - `browser_open` starts the signed-in browser for a site, or joins the running one. It says when
   the saved login has expired.
-- `browser_snapshot` reads the page as a text tree, with a reference such as `e3` for each element
-  to click or fill. With `images` set it also lists the biggest pictures and videos.
+- `browser_snapshot` reads the page as a text tree with its text and a reference such as `e3`
+  for each element to act on. A long page is cut, and `interactive` lists only those elements.
+  `images` adds the biggest pictures and videos.
 - `browser_click` clicks an element by reference, or by visible text and role. It looks the
   element up again at click time, and checks an `expect` of `text_appears`, `text_gone` or
   `url_changes`. Only a click with an `expect` is ever repeated, and only when the first attempt
