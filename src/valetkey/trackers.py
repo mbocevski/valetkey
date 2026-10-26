@@ -50,6 +50,7 @@ SUPPLEMENT: frozenset[str] = frozenset(
         "bidtheatre.com",
         "bombora.com",
         "bugsnag.com",
+        "c.bing.com",
         "clarity.ms",
         "clicktale.net",
         "contentsquare.net",
@@ -68,6 +69,7 @@ SUPPLEMENT: frozenset[str] = frozenset(
         "logrocket.com",
         "mouseflow.com",
         "mplat-ppcprotect.com",
+        "myvisitors.se",
         "newrelic.com",
         "ppcprotect.com",
         "pubmatic.com",
@@ -100,16 +102,31 @@ TRACKING_LABELS = re.compile(
 """A host-name label that says the host is for ads or tracking, such as ``ads``, ``track-2``."""
 
 
-BROWSER_BACKGROUND: frozenset[str] = frozenset({"update.googleapis.com", "gvt1.com"})
-"""Domains the browser contacts on its own, for its updates, and that no site needs. A login
-never allows them. ``update.googleapis.com`` is the component updater and ``gvt1.com`` is the
-download service it fetches updates from (``edgedl.me.gvt1.com``). This is not the tracking list:
-they are not counted as tracking. Each was seen in a login window on a blank page, as the one
-check Chromium makes at start-up whatever ``--disable-component-update`` says (see
-:data:`valetkey.sandbox.CHROME_POLICY`, which now stops it). This is a second line, for a
-browser that asks anyway. The hosts that Chromium contacts
-and that sign-ins also use, such as ``accounts.google.com``, are not here, because a host name
-cannot tell the two apart."""
+BROWSER_BACKGROUND: frozenset[str] = frozenset(
+    {"update.googleapis.com", "gvt1.com", "passwordsleakcheck-pa.googleapis.com"}
+)
+"""Domains the browser contacts on its own and that no site needs. A login never allows them.
+``update.googleapis.com`` is the component updater and ``gvt1.com`` is the download service it
+fetches updates from (``edgedl.me.gvt1.com``). ``passwordsleakcheck-pa.googleapis.com`` is the
+check of a typed password against leaked ones. This is not the tracking list: they are not
+counted as tracking. Each was seen in a login window, the first two as the check Chromium makes
+at start-up whatever ``--disable-component-update`` says and the third after a sign-in form. The
+policy in :data:`valetkey.sandbox.CHROME_POLICY` stops all three, so this is a second line, for
+a browser that asks anyway. The hosts that Chromium contacts and that sign-ins also use, such as
+``accounts.google.com``, are not here, because a host name cannot tell the two apart. Nor is
+``www.google.com``, which reCAPTCHA needs."""
+
+CONDITIONAL: frozenset[str] = frozenset({"facebook.com", "facebook.net"})
+"""Domains of a social network whose hosts are mostly its tracking pixel and its share buttons,
+which a page loads whether or not anyone uses Facebook. A login leaves them out, unless its
+window navigated to one of them: "Sign in with Facebook" is a page of ``facebook.com``, and its
+script comes from ``connect.facebook.net``. See :func:`is_conditional`."""
+
+
+def is_conditional(host: str) -> bool:
+    """Tell whether ``host`` is under a domain of :data:`CONDITIONAL`."""
+    labels = sites.normalize_host(host).split(".")
+    return any(".".join(labels[start:]) in CONDITIONAL for start in range(len(labels)))
 
 
 def is_browser_background(host: str) -> bool:

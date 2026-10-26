@@ -422,7 +422,9 @@ def classify(
     (``seen_hosts``), and one the browser navigated to, whether it showed a page (``shown_hosts``)
     or only redirected (``passed_hosts``). The exceptions are the hosts that look like ads or
     tracking (see :mod:`valetkey.trackers`), which are excluded as themselves and counted in
-    ``tracking``, and anything under the site's own domain, which is never excluded. The hosts that
+    ``tracking``, and anything under the site's own domain, which is never excluded. The hosts of
+    ``trackers.CONDITIONAL`` (Facebook's) count as tracking too, unless the login window navigated
+    to one of them, so that signing in with Facebook still works. The hosts that
     have the site's owner by name (see :func:`same_owner`) are named in ``owned``, for the
     summary. An IP address is never covered by a domain, so it follows the rules of any other
     host. The hosts the browser contacts on its own for updates (``trackers.BROWSER_BACKGROUND``)
@@ -435,7 +437,13 @@ def classify(
     background = {host for host in reached if trackers.is_browser_background(host)}
     reached -= background
     others = {host for host in reached if not sites.host_matches(host, [domain])}
-    tracking = {host for host in others if trackers.is_tracking(host)}
+    navigated = _hosts(shown_hosts) | _hosts(passed_hosts)
+    social = any(trackers.is_conditional(host) for host in navigated)
+    tracking = {
+        host
+        for host in others
+        if trackers.is_tracking(host) or (trackers.is_conditional(host) and not social)
+    }
     allow = {domain} | (others - tracking)
     allow = {host for host in allow if not sites.host_matches(host, allow - {host})}
     excluded = {host for host in tracking if not sites.excluded_conflicts(host, allow)}

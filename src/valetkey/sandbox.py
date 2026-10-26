@@ -103,7 +103,11 @@ host stays here in case a browser asks anyway. Every other background request is
 flags below and by the policy, so a host that is refused for a page is a host the page asked
 for."""
 
-CHROME_POLICY = {"DefaultSearchProviderEnabled": False, "ComponentUpdatesEnabled": False}
+CHROME_POLICY = {
+    "DefaultSearchProviderEnabled": False,
+    "ComponentUpdatesEnabled": False,
+    "PasswordLeakDetectionEnabled": False,
+}
 """Chrome enterprise policy applied to every contained browser.
 
 Without a default search engine Chrome stops contacting ``www.google.com`` on its own: the new
@@ -119,7 +123,13 @@ here). The flag only stops the scheduled updates, and Chromium checks once at st
 it says. The policy stops that too: a login window on a blank page then contacts nothing but the
 page (measured by hand, in a login window: with the policy only the page; without it
 ``edgedl.me.gvt1.com`` within eight seconds). The cost is that Chromium's components, such as
-its revocation list, stay as they were installed."""
+its revocation list, stay as they were installed.
+
+``PasswordLeakDetectionEnabled`` off stops the check of a typed password against Google's list of
+leaked ones, which a form that signs in sends to ``passwordsleakcheck-pa.googleapis.com`` as soon
+as the page moves on. A login would record that host as one the site used. Measured in a login
+window with a local sign-in form: with the policy only the page is contacted, without it that
+host is, and no other host is, with an address and card form filled in too."""
 
 _POLICY_DESTINATIONS = ("/etc/chromium/policies", "/etc/opt/chrome/policies")
 """Where Chromium and Google Chrome read policy from. Each reads only its own."""

@@ -112,6 +112,7 @@ def test_only_the_updater_is_left_as_background_noise() -> None:
     assert sandbox.CHROME_POLICY == {
         "DefaultSearchProviderEnabled": False,
         "ComponentUpdatesEnabled": False,
+        "PasswordLeakDetectionEnabled": False,
     }
 
 

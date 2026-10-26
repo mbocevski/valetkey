@@ -1523,3 +1523,29 @@ def test_the_summary_counts_the_browsers_own_hosts_apart_from_tracking() -> None
     assert learn.summary(saved, two).endswith(
         "Never allowed: 2 hosts the browser contacts on its own, for its updates."
     )
+
+
+def test_facebook_hosts_are_left_out_unless_the_window_went_to_a_facebook_page() -> None:
+    seen = ["app.sitex.com", "connect.facebook.net", "www.facebook.com", "www.google.com"]
+    without = learn.classify(START, seen, ["app.sitex.com"])
+    assert without.allow == ("sitex.com", "www.google.com")
+    assert without.excluded == ("connect.facebook.net", "www.facebook.com")
+    assert without.tracking == without.excluded
+    for shown, passed in ((["www.facebook.com"], []), ([], ["m.facebook.com"])):
+        sign_in = learn.classify(START, seen, shown, passed)
+        assert {"connect.facebook.net", "www.facebook.com", "www.google.com"} <= set(sign_in.allow)
+        assert sign_in.excluded == ()
+
+
+def test_the_password_leak_check_host_is_the_browsers_and_recaptchas_host_is_allowed() -> None:
+    seen = ["passwordsleakcheck-pa.googleapis.com", "www.google.com", "www.gstatic.com"]
+    result = learn.classify(START, seen, [])
+    assert result.background == ("passwordsleakcheck-pa.googleapis.com",)
+    assert result.allow == ("sitex.com", "www.google.com", "www.gstatic.com")
+    assert result.excluded == ()
+
+
+def test_the_new_trackers_are_left_out_of_a_login() -> None:
+    result = learn.classify(START, ["c.bing.com", "t.myvisitors.se", "login.live.com"], [])
+    assert result.allow == ("login.live.com", "sitex.com")
+    assert result.excluded == ("c.bing.com", "t.myvisitors.se")

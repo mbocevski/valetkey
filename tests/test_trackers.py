@@ -101,6 +101,11 @@ def test_the_supplement_covers_what_the_list_lacks() -> None:
     assert trackers.is_tracking("o1.ingest.sentry.io")
     assert trackers.is_tracking("api.segment.io")
     assert trackers.is_tracking("c.bannerflow.net")
+    assert trackers.is_tracking("c.bing.com")
+    assert trackers.is_tracking("t.myvisitors.se")
+    assert trackers.is_tracking("myvisitors.se")
+    assert not trackers.is_tracking("www.bing.com")
+    assert not trackers.is_tracking("login.live.com")
     assert trackers.is_tracking("click.prod.mplat-ppcprotect.com")
 
 
@@ -221,7 +226,13 @@ def test_download_reads_the_body_of_a_url(monkeypatch: pytest.MonkeyPatch) -> No
 
 @pytest.mark.parametrize(
     "host",
-    ["edgedl.me.gvt1.com", "gvt1.com", "r1---sn-abc.gvt1.com", "update.googleapis.com"],
+    [
+        "edgedl.me.gvt1.com",
+        "gvt1.com",
+        "r1---sn-abc.gvt1.com",
+        "update.googleapis.com",
+        "passwordsleakcheck-pa.googleapis.com",
+    ],
 )
 def test_the_hosts_the_browser_contacts_for_its_updates_are_background(host: str) -> None:
     assert trackers.is_browser_background(host)
@@ -234,8 +245,10 @@ def test_the_hosts_the_browser_contacts_for_its_updates_are_background(host: str
         "www.googleapis.com",
         "accounts.google.com",
         "www.google.com",
+        "fonts.googleapis.com",
         "notgvt1.com",
         "gvt1.com.example.org",
+        "passwordsleakcheck-pa.googleapis.com.example.org",
     ],
 )
 def test_other_google_hosts_are_not_background(host: str) -> None:
@@ -245,3 +258,21 @@ def test_other_google_hosts_are_not_background(host: str) -> None:
 @pytest.mark.parametrize("host", PROTECTED)
 def test_no_protected_host_is_taken_for_the_browsers_own(host: str) -> None:
     assert not trackers.is_browser_background(host)
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("www.facebook.com", True),
+        ("facebook.com", True),
+        ("connect.facebook.net", True),
+        ("facebook.net", True),
+        ("www.facebook.com.example.org", False),
+        ("notfacebook.com", False),
+        ("fbcdn.net", False),
+        ("accounts.google.com", False),
+    ],
+)
+def test_the_hosts_that_depend_on_a_page_of_the_network(host: str, expected: bool) -> None:  # noqa: FBT001
+    assert trackers.is_conditional(host) is expected
+    assert not trackers.is_tracking(host)  # the login decides, from where its window went

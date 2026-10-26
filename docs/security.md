@@ -52,7 +52,8 @@ fill your screen with questions about arbitrary hosts.
 Signing in goes through more than the site: a provider, its CDN, a token exchange. A session that
 lost one of those hosts would lose its sign-in. So a login allows every host its proxy recorded
 and every host the browser navigated to, each as itself. The exceptions are hosts that look like
-ads or tracking, which it leaves out and counts.
+ads or tracking, which it leaves out and counts. The Facebook hosts are left out too, unless the
+login window went to a Facebook page. That keeps signing in with Facebook working.
 
 That costs some trust. The proxy sees only host names, because HTTPS is opaque to it, so it cannot
 tell a provider from a page that a site or an ad sent the login through. The summary names every
@@ -68,8 +69,9 @@ The sorting of ads and tracking reads the host name only. It uses Peter Lowe's l
 tracking server domains (pgl.yoyo.org/adservers), kept in the package as the site serves it. It
 adds a short list of more services, and names such as `ads` or `analytics`. A test keeps sign-in
 providers, CDNs and payment services out of it. A tracker it misses is allowed, so check the
-summary. The browser's own update hosts are never allowed: the browser is told not to update its
-components, and a host it still asks for on its own is left out of every login.
+summary. The browser's own hosts are never allowed. It is told not to update its components and
+not to check typed passwords against leaked ones. A host it still asks for on its own is left
+out of every login.
 
 ## Private networks
 
