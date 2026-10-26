@@ -29,6 +29,7 @@ Changes that affect users of valetkey. The format follows
 - A `PKGBUILD` in `packaging/arch` that builds an Arch Linux package with the daemon's systemd units.
 - `valetkey allow SITE --private-network RANGE` and `valetkey deny` let a site's allowed hosts resolve to addresses in a private range you list, for that site only; `valetkey sites` shows the ranges.
 - The `valetkey add` command, which creates a site with its private address ranges before the first login, so a site on a private network can be logged in to.
+- The `valetkey bridge` command and `valetkey install-units --bridge`, which connect a laptop to a daemon on a server so login windows can open on the laptop; `valetkey status` and `watch` show connected bridges.
 
 ### Changed
 

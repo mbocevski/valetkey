@@ -2306,7 +2306,7 @@ def test_status_without_a_site_says_what_is_running(roots: sites.Roots) -> None:
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
-            assert await c.call("status") == {"sessions": [], "logins": []}
+            assert await c.call("status") == {"sessions": [], "logins": [], "bridges": []}
             await c.call("open", site="sitex")
             await c.call("login", target="another")
             assert await c.call("status") == {
@@ -2319,6 +2319,7 @@ def test_status_without_a_site_says_what_is_running(roots: sites.Roots) -> None:
                     }
                 ],
                 "logins": [{"site": "another", "since": "2026-10-27T12:00:00Z"}],
+                "bridges": [],
             }
             await c.call("close", site="sitex")
             assert (await c.call("status"))["sessions"] == []
@@ -3181,6 +3182,7 @@ def test_no_operation_widens_a_policy_except_the_ones_that_ask(roots: sites.Root
     ops = [
         "sites", "open", "snapshot", "click", "type", "navigate", "screenshot", "status",
         "close", "reload_policy", "downloads", "allow_check", "allow_apply", "allow_ask",
+        "bridge_register",
     ]  # fmt: skip
     arguments = {
         "site": "sitex",

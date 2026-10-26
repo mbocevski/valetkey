@@ -94,7 +94,7 @@ package() {
   # directory. `valetkey install-units` still works; its copies in ~/.config take precedence.
   units="$site/valetkey/units"
   install -d "$pkgdir/usr/lib/systemd/user"
-  for unit in valetkeyd.socket valetkeyd.service; do
+  for unit in valetkeyd.socket valetkeyd.service 'valetkey-bridge@.service'; do
     sed -e '1s|.*|# Installed by the valetkey package. `valetkey install-units` writes copies that override it.|' \
         -e 's|@EXECUTABLE@|/usr/bin/valetkey|' \
         "$units/$unit" > "$pkgdir/usr/lib/systemd/user/$unit"

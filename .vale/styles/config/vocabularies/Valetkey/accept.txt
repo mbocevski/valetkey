@@ -22,3 +22,9 @@ session_started
 session_ended
 login_opened
 login_closed
+waypipe
+sshd
+bridge_connected
+bridge_disconnected
+remote_runtime
+print_runtime

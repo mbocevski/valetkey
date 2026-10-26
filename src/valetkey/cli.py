@@ -27,6 +27,9 @@ from valetkey import (
     sessions,
     sites,
 )
+from valetkey import (
+    bridge as bridging,
+)
 from valetkey.wayland import MANAGER, WaylandError, compositor_globals
 
 if TYPE_CHECKING:
@@ -610,6 +613,7 @@ def run_daemon(
 # -- systemd units -------------------------------------------------------------------------
 
 UNIT_NAMES = ("valetkeyd.socket", "valetkeyd.service")
+BRIDGE_UNIT_NAMES = ("valetkey-bridge@.service",)
 UNIT_MARKER = "# Written by `valetkey install-units`."
 """The first words of every unit file valetkey writes. A file without them is not valetkey's."""
 EXECUTABLE_PLACEHOLDER = "@EXECUTABLE@"
@@ -619,6 +623,10 @@ SYSTEM_UNIT_DIRS = (Path("/etc/systemd/user"), Path("/usr/lib/systemd/user"))
 NEXT_COMMANDS = (
     "systemctl --user daemon-reload",
     f"systemctl --user enable --now {SOCKET_UNIT}",
+)
+BRIDGE_NEXT_COMMANDS = (
+    "systemctl --user daemon-reload",
+    "systemctl --user enable --now valetkey-bridge@SERVER.service",
 )
 
 
@@ -673,12 +681,14 @@ def valetkey_executable(which: Callable[[str], str | None] = shutil.which) -> st
     return str(Path(found).absolute())
 
 
-def plan_units(directory: Path, executable: str, *, force: bool) -> dict[str, str]:
+def plan_units(
+    directory: Path, executable: str, *, force: bool, names: tuple[str, ...] = UNIT_NAMES
+) -> dict[str, str]:
     """Return the text of each unit file to write, or refuse to replace a file that is not ours."""
-    files = {name: render_unit(name, executable) for name in UNIT_NAMES}
+    files = {name: render_unit(name, executable) for name in names}
     foreign = [
         str(directory / name)
-        for name in UNIT_NAMES
+        for name in names
         if (directory / name).exists() and not is_ours(directory / name) and not force
     ]
     if foreign:
@@ -701,16 +711,26 @@ def install_units(
         bool,
         Parameter(name="--force", negative="", help="Replace files that valetkey did not write."),
     ] = False,
+    bridge: Annotated[
+        bool,
+        Parameter(
+            name="--bridge",
+            negative="",
+            help="Write the unit of the bridge for logins from a server, on your laptop.",
+        ),
+    ] = False,
 ) -> int:
     """Write the systemd user units that run the valetkey daemon.
 
     The units go to the systemd user directory (``$XDG_CONFIG_HOME/systemd/user``). The command
     refuses to replace a file it did not write, and prints the commands that start the
-    socket. It never runs them.
+    socket. It never runs them. With --bridge it writes the one unit that runs the bridge
+    for logins from a server, ``valetkey-bridge@.service``, and not the daemon's units.
     """
     directory = unit_directory(sites.roots_from_env())
+    names = BRIDGE_UNIT_NAMES if bridge else UNIT_NAMES
     try:
-        files = plan_units(directory, valetkey_executable(), force=force)
+        files = plan_units(directory, valetkey_executable(), force=force, names=names)
     except CommandError as error:
         return _fail(error)
     if dry_run:
@@ -723,14 +743,104 @@ def install_units(
         (directory / name).write_text(text, encoding="utf-8")
         _say(f"Wrote {directory / name}")
     packaged = next(
-        (d for d in SYSTEM_UNIT_DIRS if all((d / name).is_file() for name in UNIT_NAMES)), None
+        (d for d in SYSTEM_UNIT_DIRS if all((d / name).is_file() for name in names)), None
     )
     if packaged is not None:
         _say(f"\nNote: the units in {packaged} are replaced by these copies.")
-    _say("\nTo start the daemon, run:\n")
-    for command in NEXT_COMMANDS:
+    if bridge:
+        _say("\nTo start the bridge, replace SERVER with its ssh host name and run:\n")
+    else:
+        _say("\nTo start the daemon, run:\n")
+    for command in BRIDGE_NEXT_COMMANDS if bridge else NEXT_COMMANDS:
         _say(f"    {command}")
     return 0
+
+
+# -- the bridge ----------------------------------------------------------------------------
+
+
+@app.command
+def bridge(
+    host: str,
+    *,
+    remote_runtime: Annotated[
+        Path | None,
+        Parameter(
+            name="--remote-runtime",
+            help="The server's XDG_RUNTIME_DIR, such as /run/user/1000. Asked for by default.",
+        ),
+    ] = None,
+) -> int:
+    """Take login windows from a server onto this desktop, until stopped.
+
+    Run it on the machine you sit at, as the service ``valetkey-bridge@HOST`` (see
+    ``valetkey install-units --bridge``). It starts waypipe here and keeps an ssh connection to
+    HOST, which needs valetkey, key-based login and no password. A login that valetkeyd on HOST
+    starts then opens as a window here. waypipe always runs with a security context, so the
+    server's programs cannot capture your screen. A dropped connection is tried again, after
+    waits of up to a minute.
+
+    Parameters
+    ----------
+    host
+        The server, as ssh knows it.
+    remote_runtime
+        The server's runtime directory.
+
+    """
+    roots = sites.roots_from_env()
+    stop = asyncio.Event()
+
+    async def serve() -> None:
+        bridging.install_stop_signals(stop)
+        await bridging.run_bridge(host, roots, remote_runtime=remote_runtime, stop=stop)
+
+    try:
+        asyncio.run(serve())
+    except (bridging.BridgeError, sites.RuntimeDirUnavailableError) as error:
+        return _fail(CommandError(str(error)))
+    return 0
+
+
+@app.command(name="bridge-hold", show=False)
+def bridge_hold(
+    name: str | None = None,
+    *,
+    print_runtime: Annotated[
+        bool, Parameter(name="--print-runtime", negative="", help="Print the runtime directory.")
+    ] = False,
+) -> int:
+    """Hold a bridge connection open for valetkeyd; ssh runs this, you do not.
+
+    It registers the socket that the bridge forwards, keeps it registered while the connection
+    lasts and removes the socket when the connection ends. With --print-runtime it only prints
+    the runtime directory (making sure ``valetkey`` exists in it) and exits.
+
+    Parameters
+    ----------
+    name
+        The random part of the connection's socket name.
+    print_runtime
+        Print the runtime directory and exit.
+
+    """
+    roots = sites.roots_from_env()
+    try:
+        if print_runtime:
+            sites.ensure_runtime(roots)
+            _say(str(roots.runtime))
+            return 0
+        if name is None:
+            return _fail(CommandError("give the connection name, or --print-runtime"))
+        stop = asyncio.Event()
+
+        async def serve() -> int:
+            bridging.install_stop_signals(stop)
+            return await bridging.hold(name, roots, stop=stop)
+
+        return asyncio.run(serve())
+    except (bridging.BridgeError, CommandError, sites.RuntimeDirUnavailableError) as error:
+        return _fail(CommandError(str(error)))
 
 
 # -- doctor --------------------------------------------------------------------------------
@@ -965,8 +1075,13 @@ async def _daemon_status() -> dict[str, Any]:
 
 def _activity_rows(activity: dict[str, Any]) -> list[list[str]]:
     return [
-        [kind, entry["site"], entry["since"] or "-", entry.get("host") or "-"]
-        for kind, key in (("session", "sessions"), ("login", "logins"))
+        [
+            kind,
+            entry.get("site") or entry["bridge"],
+            entry["since"] or "-",
+            entry.get("host") or "-",
+        ]
+        for kind, key in (("session", "sessions"), ("login", "logins"), ("bridge", "bridges"))
         for entry in activity.get(key, [])
     ]
 
@@ -978,16 +1093,18 @@ def show_status(
         bool, Parameter(name="--json", negative="", help="Print JSON instead of a table.")
     ] = False,
 ) -> int:
-    """Show the browser sessions and login windows that are open.
+    """Show the browser sessions, login windows and bridges that are open.
 
     The daemon reports what its own processes are doing, and nothing can hide a session from
     it. A browser that was killed disappears within a second or two. The daemon is not started:
     when none runs, this says so and exits 0.
 
-    With --json the output is an object with two lists. "sessions" holds objects with the keys
-    site, since, contained and host. "logins" holds objects with the keys site and since. since is
-    a UTC time like 2026-10-26T09:00:00Z. contained is always true. host is the host of the page
-    the browser was last reported at, never the whole address, which may carry a token.
+    With --json the output is an object with three lists. "sessions" holds objects with the keys
+    site, since, contained and host. "logins" holds objects with the keys site and since.
+    "bridges" holds objects with the keys bridge and since, one for each laptop connected to
+    take login windows. since is a UTC time like 2026-10-26T09:00:00Z. contained is always true.
+    host is the host of the page the browser was last reported at, never the whole address,
+    which may carry a token.
     """
     try:
         activity = asyncio.run(_daemon_status())
@@ -1027,13 +1144,14 @@ async def _watch_daemon() -> int:
 
 @app.command
 def watch() -> int:
-    """Print one JSON line for every change to the sessions and login windows.
+    """Print one JSON line for every change to the sessions, login windows and bridges.
 
     The first line is a snapshot of what is open, as `status --json` shows it, with "event" set
     to "snapshot" and an "at" time. After that each line has the keys event, site and at, where
-    event is session_started, session_ended, login_opened or login_closed. Bars and indicators
-    can read the lines as they come. The command runs until it is interrupted or the daemon
-    stops; it exits 1 when no daemon is running, and does not start one.
+    event is session_started, session_ended, login_opened or login_closed. For a bridge the key
+    is bridge instead of site, and event is bridge_connected or bridge_disconnected. Bars and
+    indicators can read the lines as they come. The command runs until it is interrupted or the
+    daemon stops; it exits 1 when no daemon is running, and does not start one.
     """
     try:
         return asyncio.run(_watch_daemon())

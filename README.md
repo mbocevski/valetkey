@@ -87,6 +87,7 @@ a shell away from the agent if that matters. The [security page](docs/security.m
 - [Commands](docs/commands.md): every command with its help, and adding a site on a private network
 - [MCP clients](docs/mcp.md): the tools, approvals and private networks
 - [Security](docs/security.md): what is contained, and who decides
+- [Remote logins](docs/remote.md): log in on your laptop for a daemon on a server
 - [Troubleshooting](docs/troubleshooting.md): when `valetkey doctor` fails or a login does not open
 
 ## Development and license

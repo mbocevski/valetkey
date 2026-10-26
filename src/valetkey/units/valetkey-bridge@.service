@@ -1,0 +1,35 @@
+# Written by `valetkey install-units`. Running it again replaces this file.
+[Unit]
+Description=valetkey bridge to %I
+Documentation=man:waypipe(1)
+After=graphical-session.target network-online.target
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=@EXECUTABLE@ bridge %I
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+
+# Hardening for a waypipe client and an ssh. The options that give a service its own view of the
+# file system (ProtectSystem, ProtectHome, PrivateTmp and the like) and CapabilityBoundingSet are
+# left out on purpose. In a user service they put the program in a user namespace, where the files
+# of root belong to nobody, and ssh then refuses to read its system configuration. PrivateDevices
+# is left out too, because waypipe shares buffers through the graphics devices. Each option below
+# was tried with the real waypipe and ssh.
+NoNewPrivileges=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=graphical-session.target

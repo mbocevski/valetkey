@@ -1568,3 +1568,178 @@ def test_add_accepts_a_site_that_lives_at_an_address(
     )
     saved = sites.load_policy(roots, "lab")
     assert (status, saved.allow, saved.private_networks) == (0, ("10.20.0.7",), ("10.20.0.7/32",))
+
+
+# -- the bridge ----------------------------------------------------------------------------
+
+
+def test_status_lists_a_connected_bridge(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    activity = ACTIVITY | {"bridges": [{"bridge": "bridge-abc", "since": "2026-10-26T09:10:00Z"}]}
+    connect_to(monkeypatch, FakeConnection(status=activity))
+    rows = run(capsys, "status")[1].splitlines()
+    assert rows[-1].split() == ["bridge", "bridge-abc", "2026-10-26T09:10:00Z", "-"]
+    connect_to(monkeypatch, FakeConnection(status=activity))
+    assert json.loads(run(capsys, "status", "--json")[1]) == activity
+
+
+def test_bridge_runs_until_stopped_and_cleans_up(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def fake_run(host: str, given: sites.Roots, **options: Any) -> None:  # noqa: ANN401
+        seen.update(host=host, roots=given, **options)
+        assert not options["stop"].is_set()
+
+    monkeypatch.setattr(cli.bridging, "run_bridge", fake_run)
+    monkeypatch.setattr(cli.bridging, "install_stop_signals", lambda stop: seen.update(sig=stop))
+    assert main(["bridge", "server1", "--remote-runtime", "/run/user/1000"]) == 0
+    assert (seen["host"], seen["roots"]) == ("server1", roots)
+    assert seen["remote_runtime"] == Path("/run/user/1000")
+    assert seen["sig"] is seen["stop"]
+    seen.clear()
+    assert main(["bridge", "server1"]) == 0
+    assert seen["remote_runtime"] is None
+
+
+@pytest.mark.usefixtures("roots")
+def test_bridge_says_why_it_cannot_run(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["bridge", "-oProxyCommand=x"])  # an option the command does not know
+    assert exit_info.value.code == 2
+    status, out, err = run(capsys, "bridge", "bad host")
+    assert (status, out) == (1, "")
+    assert "not a host name" in err
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    status, _, err = run(capsys, "bridge", "server1")
+    assert (status, "XDG_RUNTIME_DIR" in err) == (1, True)
+
+
+def test_bridge_hold_prints_the_runtime_directory_and_makes_the_folder(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert roots.runtime is not None
+    status, out, _ = run(capsys, "bridge-hold", "--print-runtime")
+    assert (status, out) == (0, f"{roots.runtime}\n")
+    assert (roots.runtime / "valetkey").is_dir()
+
+
+def test_bridge_hold_holds_the_named_connection(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def fake_hold(name: str, given: sites.Roots, **options: Any) -> int:  # noqa: ANN401
+        seen.update(name=name, roots=given, **options)
+        return 7
+
+    monkeypatch.setattr(cli.bridging, "hold", fake_hold)
+    monkeypatch.setattr(cli.bridging, "install_stop_signals", lambda stop: seen.update(sig=stop))
+    assert main(["bridge-hold", "abcdef0123456789"]) == 7
+    assert (seen["name"], seen["roots"]) == ("abcdef0123456789", roots)
+    assert seen["sig"] is seen["stop"]
+
+
+@pytest.mark.usefixtures("roots")
+def test_bridge_hold_needs_a_name_and_a_good_one(capsys: pytest.CaptureFixture[str]) -> None:
+    status, out, err = run(capsys, "bridge-hold")
+    assert (status, out) == (1, "")
+    assert "connection name" in err
+    status, _, err = run(capsys, "bridge-hold", "no/good")
+    assert (status, "8 to 64" in err) == (1, True)
+
+
+def test_bridge_hold_is_not_listed_in_the_help(capsys: pytest.CaptureFixture[str]) -> None:
+    out = run(capsys, "--help")[1]
+    assert "bridge:" in out
+    assert "bridge-hold" not in out
+
+
+def test_install_units_bridge_writes_only_the_bridge_unit(
+    units_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, err = run(capsys, "install-units", "--bridge")
+    assert (status, err) == (0, "")
+    assert sorted(p.name for p in units_home.iterdir()) == ["valetkey-bridge@.service"]
+    unit = (units_home / "valetkey-bridge@.service").read_text(encoding="utf-8")
+    assert unit.startswith(cli.UNIT_MARKER)
+    assert "ExecStart=/opt/bin/valetkey bridge %I\n" in unit
+    assert "@EXECUTABLE@" not in unit
+    assert out.splitlines()[-2:] == [
+        "    systemctl --user daemon-reload",
+        "    systemctl --user enable --now valetkey-bridge@SERVER.service",
+    ]
+    assert "replace SERVER" in out
+
+
+def test_install_units_bridge_dry_run_and_foreign_files(
+    units_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, _ = run(capsys, "install-units", "--bridge", "--dry-run")
+    assert (status, "Would write" in out, units_home.exists()) == (0, True, False)
+    units_home.mkdir(parents=True)
+    foreign = units_home / "valetkey-bridge@.service"
+    foreign.write_text("[Service]\n", encoding="utf-8")
+    status, _, err = run(capsys, "install-units", "--bridge")
+    assert (status, str(foreign) in err) == (1, True)
+    assert run(capsys, "install-units", "--bridge", "--force")[0] == 0
+
+
+@pytest.mark.usefixtures("units_home")
+def test_install_units_bridge_notes_a_packaged_unit(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    packaged = tmp_path / "packaged"
+    packaged.mkdir()
+    (packaged / "valetkey-bridge@.service").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(cli, "SYSTEM_UNIT_DIRS", (packaged,))
+    assert "the units in" in run(capsys, "install-units", "--bridge")[1]
+
+
+def test_the_bridge_unit_is_hardened_without_hiding_what_ssh_and_waypipe_need() -> None:
+    unit = cli.render_unit("valetkey-bridge@.service", "/usr/bin/valetkey")
+    lines = unit.splitlines()
+    for line in (
+        "NoNewPrivileges=yes",
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+        "SystemCallFilter=@system-service",
+        "WantedBy=graphical-session.target",
+        "PartOf=graphical-session.target",
+        "Restart=on-failure",
+        "ExecStart=/usr/bin/valetkey bridge %I",
+    ):
+        assert line in lines
+    # These put a user service in a user namespace, in which ssh refuses root's configuration, or
+    # hide the graphics devices that waypipe shares buffers through.
+    settings = {line.split("=")[0] for line in lines if "=" in line and not line.startswith("#")}
+    assert not settings & {
+        "ProtectSystem",
+        "ProtectHome",
+        "PrivateTmp",
+        "PrivateDevices",
+        "CapabilityBoundingSet",
+        "ReadWritePaths",
+        "ProtectKernelTunables",
+    }
+
+
+@pytest.mark.skipif(shutil.which("systemd-analyze") is None, reason="systemd-analyze is missing")
+def test_systemd_accepts_the_bridge_unit(tmp_path: Path) -> None:
+    unit = tmp_path / "valetkey-bridge@.service"
+    unit.write_text(cli.render_unit(unit.name, "/usr/bin/true"), encoding="utf-8")
+    result = subprocess.run(  # noqa: S603  # fixed argument list
+        ["systemd-analyze", "--user", "verify", str(unit)],  # noqa: S607  # resolved from PATH
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    unit_problems = [
+        line
+        for line in result.stderr.splitlines()
+        if "valetkey-bridge" in line and "Unknown" in line
+    ]
+    assert unit_problems == []

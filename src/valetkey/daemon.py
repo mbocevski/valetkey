@@ -28,13 +28,21 @@ profile.
   downloaded (``in_progress``). A ``click`` or ``navigate`` answer carries the same under
   ``downloads``: the files that arrived since this client last looked.
 * ``status`` with no ``site``: what is running now. ``{"sessions": [{"site", "since",
-  "contained", "host"}], "logins": [{"site", "since"}]}``, sorted by site. ``since`` is a UTC
-  time, ``host`` is the host of the page the browser was last reported at (never the whole
-  URL, which may carry a token). It is read from the processes the daemon owns.
+  "contained", "host"}], "logins": [{"site", "since"}], "bridges": [{"bridge", "since"}]}``, the
+  first two sorted by site. ``since`` is a UTC time, ``host`` is the host of the page the
+  browser was last reported at (never the whole URL, which may carry a token). It is read from
+  the processes the daemon owns.
 * ``watch``: the connection stays open. The first answer is ``{"event": "snapshot", "at",
   "sessions", "logins"}`` as for ``status``; then one answer per change, each
   ``{"event": "session_started" | "session_ended" | "login_opened" | "login_closed",
-  "site", "at"}``, all with the request's ``id``. Nothing can hide a session from it.
+  "site", "at"}``, or ``{"event": "bridge_connected" | "bridge_disconnected", "bridge", "at"}``,
+  all with the request's ``id``. Nothing can hide a session from it.
+* ``bridge_register`` ``{rand}``: record the bridge ``bridge-<rand>``, whose socket the ssh
+  connection forwards to ``<runtime>/valetkey/bridge-<rand>.sock``. The socket must already be
+  there, a real socket of this user (``no_socket``), and the name must be free
+  (``bridge_exists``). The caller keeps the connection open: the bridge is forgotten when it
+  closes. Asking again on the same connection is harmless and answers ``registered: false``.
+  See :mod:`valetkey.bridge`.
 * ``close`` ``{site}``: end the site's session or login. ``{site, closed}``.
 * ``reload_policy`` ``{site}``: read the policy file again and give it to the live proxy.
 * ``login`` ``{target}``: ``target`` is a known site name or a host or URL. Opens a login
@@ -54,7 +62,8 @@ can tell it from anything the daemon says itself.
 
 **Errors** are ``{code, message}``: ``bad_request``, ``request_too_large``, ``unknown_op``,
 ``unknown_site``, ``unknown_ref``, ``target_not_found``, ``target_ambiguous``,
-``login_in_progress``, ``session_running``, ``no_session``, ``session_ended``, ``session_failed``,
+``login_in_progress``, ``private_address``, ``bridge_exists``, ``no_socket``,
+``session_running``, ``no_session``, ``session_ended``, ``session_failed``,
 ``browser_error``, ``no_display``, ``x11_only``, ``bad_policy`` and ``internal``.
 
 **Liveness.** A task polls every session twice a second. A session whose browser has been
@@ -83,10 +92,12 @@ import fcntl
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
 import sqlite3
+import stat
 import struct
 from collections import Counter
 from dataclasses import dataclass, field
@@ -123,6 +134,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_BRIDGE_RAND = re.compile(r"[A-Za-z0-9]{8,64}")
 RESOLVE_SECONDS = 10.0
 """The longest to wait for the start host of a login to resolve."""
 _MAX_NAMED_HOSTS = 5
@@ -508,10 +520,13 @@ class _Site:
     since: datetime | None = None
     host: str | None = None
     refused_hosts: dict[str, None] = field(default_factory=dict)
-    address_hosts: dict[str, None] = field(default_factory=dict)
-    address_floor: int = 0  # refusals up to this number of the live proxy predate a reload
     """Hosts the proxy refused for this site because the policy did not allow them, in any
     session since the daemon started. Only these can be asked about."""
+    address_hosts: dict[str, None] = field(default_factory=dict)
+    """Hosts the proxy refused for the private address they resolve to, since the policy was
+    last loaded. Only the person can do something about those."""
+    address_floor: int = 0
+    """Refusals up to this number of the live proxy predate the last reload of the policy."""
     denied_hosts: set[str] = field(default_factory=set)
     """Hosts the approval command said no to, so the agent is not allowed to ask again."""
     ask_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -537,6 +552,17 @@ class _Connection:
     this client last received. A click by reference means the element it was in that snapshot."""
     seen_downloads: dict[str, dict[str, downloads.Signature]] = field(default_factory=dict)
     """For each site, the finished downloads this client has already been told about."""
+    bridges: set[str] = field(default_factory=set)
+    """The bridges this connection registered. They end with the connection."""
+
+
+@dataclass(frozen=True, slots=True)
+class _RegisteredBridge:
+    """A laptop's waypipe bridge, reachable on a socket in the runtime directory."""
+
+    name: str
+    path: Path
+    since: datetime
 
 
 class Daemon:
@@ -585,6 +611,7 @@ class Daemon:
         self._announcer = announcer or announce_session
         self._poll_interval = poll_interval
         self._watchers: set[_Watcher] = set()
+        self._bridges: dict[str, _RegisteredBridge] = {}
         self._monitor: asyncio.Task[None] | None = None
         self._background: set[asyncio.Task[None]] = set()
         self._uid = os.getuid()
@@ -609,6 +636,7 @@ class Daemon:
             "allow_check": self._op_allow_check,
             "allow_apply": self._op_allow_apply,
             "allow_ask": self._op_allow_ask,
+            "bridge_register": self._op_bridge_register,
         }
 
     # -- serving --
@@ -736,6 +764,15 @@ class Daemon:
 
     async def _converse(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         connection = _Connection()
+        try:
+            await self._exchange(connection, reader, writer)
+        finally:
+            for name in connection.bridges:
+                self._unregister_bridge(name)
+
+    async def _exchange(
+        self, connection: _Connection, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
         while True:
             try:
                 line = await reader.readline()
@@ -804,9 +841,14 @@ class Daemon:
             gone.cancel()
             self._watchers.discard(watcher)
 
-    def _emit(self, event: str, site: str) -> None:
-        """Tell every `watch` client that ``event`` happened to ``site``."""
-        message = {"event": event, "site": site, "at": self._now().strftime(_TIME_FORMAT)}
+    def _emit(self, event: str, site: str | None = None, *, bridge: str | None = None) -> None:
+        """Tell every `watch` client that ``event`` happened to ``site`` or to ``bridge``."""
+        message: dict[str, Any] = {"event": event}
+        if site is not None:
+            message["site"] = site
+        if bridge is not None:
+            message["bridge"] = bridge
+        message["at"] = self._now().strftime(_TIME_FORMAT)
         for watcher in list(self._watchers):
             try:
                 watcher.queue.put_nowait(message)
@@ -828,7 +870,15 @@ class Daemon:
                 )
             elif state.kind == "login":
                 logins_now.append({"site": name, "since": since})
-        result: dict[str, Any] = {"sessions": sessions_now, "logins": logins_now}
+        bridges_now = [
+            {"bridge": bridge.name, "since": bridge.since.strftime(_TIME_FORMAT)}
+            for bridge in self._bridges.values()
+        ]
+        result: dict[str, Any] = {
+            "sessions": sessions_now,
+            "logins": logins_now,
+            "bridges": bridges_now,
+        }
         if event is not None:
             result = {"event": event, "at": self._now().strftime(_TIME_FORMAT)} | result
         return result
@@ -1038,6 +1088,47 @@ class Daemon:
             state.proxy.update_policy(changed)
         logger.info("allowed %s for %s", host, site)
         return _answer(site, host, "allowed", f"{host} is now allowed for {site}.")
+
+    # -- operations: bridges --
+
+    async def _op_bridge_register(
+        self, connection: _Connection, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Record a bridge and tie it to this connection, which the caller then keeps open.
+
+        ``rand`` names the bridge ``bridge-<rand>`` and its socket
+        ``<runtime>/valetkey/bridge-<rand>.sock``. The daemon builds the path itself, and the
+        socket must already be there: a real socket the user owns. Registering a name this
+        connection already holds changes nothing, so the caller can repeat it. Another
+        connection's name is refused. The bridge is forgotten when the connection closes.
+        """
+        rand = _string_arg(args, "rand")
+        if not _BRIDGE_RAND.fullmatch(rand):
+            _fail("bad_request", "rand must be 8 to 64 letters and digits")
+        name = f"bridge-{rand}"
+        if name in connection.bridges:
+            return {"bridge": name, "registered": False}
+        if name in self._bridges:
+            _fail("bridge_exists", f"{name} is already registered")
+        path = sites.runtime_path(self.roots) / f"{name}.sock"
+        try:
+            found = await asyncio.to_thread(path.lstat)
+        except OSError:
+            found = None
+        if found is None or not stat.S_ISSOCK(found.st_mode) or found.st_uid != self._uid:
+            _fail("no_socket", f"{path} is not a socket of this user; is the ssh forward up?")
+        self._bridges[name] = _RegisteredBridge(name, path, self._now())
+        connection.bridges.add(name)
+        self._emit("bridge_connected", bridge=name)
+        return {"bridge": name, "registered": True}
+
+    def _unregister_bridge(self, name: str) -> None:
+        del self._bridges[name]
+        self._emit("bridge_disconnected", bridge=name)
+
+    def bridge_sockets(self) -> list[Path]:
+        """Return the sockets of the registered bridges, the newest last."""
+        return [bridge.path for bridge in self._bridges.values()]
 
     # -- operations: login --
 

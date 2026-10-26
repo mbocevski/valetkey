@@ -12,6 +12,7 @@ A logged-in browser for MCP clients, contained to the sites it may reach.
 Commands:
   add: Create a site before its first login, for one on a private network.
   allow: Allow a host, and its subdomains, for a site.
+  bridge: Take login windows from a server onto this desktop, until stopped.
   daemon: Run the valetkeyd daemon in the foreground.
   deny: Stop allowing a host for a site.
   doctor: Check that this machine can run valetkey.
@@ -19,8 +20,9 @@ Commands:
   install-units: Write the systemd user units that run the valetkey daemon.
   mcp: Serve the browser tools to an MCP client over standard input and output.
   sites: List the sites valetkey knows.
-  status: Show the browser sessions and login windows that are open.
-  watch: Print one JSON line for every change to the sessions and login windows.
+  status: Show the browser sessions, login windows and bridges that are open.
+  watch: Print one JSON line for every change to the sessions, login windows and
+bridges.
   --help, -h: Display this message and exit.
   --version: Display application version.
 ```
@@ -133,6 +135,33 @@ Parameters:
 ```
 <!-- end: valetkey add --help -->
 
+## Bridging a server
+
+`valetkey bridge SERVER` takes login windows from a daemon on a server onto this desktop. It runs
+until stopped, usually as a service. [Remote logins](remote.md) explains what it does and what
+you need. `valetkey install-units --bridge` writes the unit that runs it. The `bridge-hold` command
+is what ssh runs on the server; you never run it yourself.
+
+<!-- begin: valetkey bridge --help -->
+```text
+Usage: valetkey bridge [OPTIONS] HOST
+
+Take login windows from a server onto this desktop, until stopped.
+
+Run it on the machine you sit at, as the service valetkey-bridge@HOST (see
+valetkey install-units --bridge). It starts waypipe here and keeps an ssh
+connection to HOST, which needs valetkey, key-based login and no password. A
+login that valetkeyd on HOST starts then opens as a window here. waypipe always
+runs with a security context, so the server's programs cannot capture your
+screen. A dropped connection is tried again, after waits of up to a minute.
+
+Parameters:
+  HOST, --host: The server, as ssh knows it. [required]
+  --remote-runtime PATH: The server's XDG_RUNTIME_DIR, such as /run/user/1000.
+Asked for by default.
+```
+<!-- end: valetkey bridge --help -->
+
 ## Forgetting a site
 
 `valetkey forget SITE` deletes the site's policy, login profile and downloads after asking. It
@@ -168,11 +197,15 @@ Write the systemd user units that run the valetkey daemon.
 
 The units go to the systemd user directory ($XDG_CONFIG_HOME/systemd/user). The
 command refuses to replace a file it did not write, and prints the commands that
-start the socket. It never runs them.
+start the socket. It never runs them. With --bridge it writes the one unit that
+runs the bridge for logins from a server, valetkey-bridge@.service, and not the
+daemon's units.
 
 Parameters:
   --dry-run: Print the files instead of writing them. [default: False]
   --force: Replace files that valetkey did not write. [default: False]
+  --bridge: Write the unit of the bridge for logins from a server, on your
+laptop. [default: False]
 ```
 <!-- end: valetkey install-units --help -->
 
@@ -208,17 +241,18 @@ notification if it is installed.
 ```text
 Usage: valetkey status [OPTIONS]
 
-Show the browser sessions and login windows that are open.
+Show the browser sessions, login windows and bridges that are open.
 
 The daemon reports what its own processes are doing, and nothing can hide a
 session from it. A browser that was killed disappears within a second or two.
 The daemon is not started: when none runs, this says so and exits 0.
 
-With --json the output is an object with two lists. "sessions" holds objects
+With --json the output is an object with three lists. "sessions" holds objects
 with the keys site, since, contained and host. "logins" holds objects with the
-keys site and since. since is a UTC time like 2026-10-26T09:00:00Z. contained is
-always true. host is the host of the page the browser was last reported at,
-never the whole address, which may carry a token.
+keys site and since. "bridges" holds objects with the keys bridge and since, one
+for each laptop connected to take login windows. since is a UTC time like
+2026-10-26T09:00:00Z. contained is always true. host is the host of the page the
+browser was last reported at, never the whole address, which may carry a token.
 
 Parameters:
   --json: Print JSON instead of a table. [default: False]
@@ -229,14 +263,15 @@ Parameters:
 ```text
 Usage: valetkey watch
 
-Print one JSON line for every change to the sessions and login windows.
+Print one JSON line for every change to the sessions, login windows and bridges.
 
 The first line is a snapshot of what is open, as status --json shows it, with
 "event" set to "snapshot" and an "at" time. After that each line has the keys
 event, site and at, where event is session_started, session_ended, login_opened
-or login_closed. Bars and indicators can read the lines as they come. The
-command runs until it is interrupted or the daemon stops; it exits 1 when no
-daemon is running, and does not start one.
+or login_closed. For a bridge the key is bridge instead of site, and event is
+bridge_connected or bridge_disconnected. Bars and indicators can read the lines
+as they come. The command runs until it is interrupted or the daemon stops; it
+exits 1 when no daemon is running, and does not start one.
 ```
 <!-- end: valetkey watch --help -->
 
