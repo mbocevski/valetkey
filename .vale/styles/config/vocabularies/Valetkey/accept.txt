@@ -36,3 +36,4 @@ RFB
 setpriv
 copy_hosts_from
 srcset
+as_json

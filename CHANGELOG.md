@@ -8,6 +8,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Added
 
+- `valetkey sites SITE` prints one site's complete allowed, excluded and denied hosts, as text or with `--json`.
 - The `browser_deny` tool, which asks you to stop a site reaching hosts it reaches now, and `browser_sites` takes a `site` to list its complete host lists.
 - With no client prompt and no approval command, `browser_allow` asks with a desktop notification that has Allow and Deny buttons; `"notifications": false` in the config turns it off.
 - A login allows every host it used, such as a sign-in provider and its CDN, except ads and tracking, which it counts; a host you deny with `valetkey deny` stays denied through later logins.
@@ -41,6 +42,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Changed
 
+- A login leaves out the ad and tracking hosts of Peter Lowe's list, kept in the package, and more of those a page loads; after an upgrade, restart your MCP client.
 - A policy file without a `denied` list keeps its excluded hosts as left out, and the next login builds that list again.
 - `browser_allow` takes up to ten hosts in one call and asks about them in one question, with a box for each.
 - The browser tools now say, with the standard MCP hints, which ones only read, which can change a page and which reach the web, so a client can ask you only when it matters.

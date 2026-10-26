@@ -78,6 +78,10 @@ After an upgrade, restart the daemon so that it runs the new version:
 systemctl --user try-restart valetkeyd.service
 ```
 
+Then restart your MCP client too, whatever it is: a terminal agent or a desktop app. The client
+keeps its own `valetkey mcp` process running, and that process is still the old version until the
+client starts it again.
+
 To remove valetkey, run `valetkey forget` for each site, disable the socket with
 `systemctl --user disable --now valetkeyd.socket`, delete the unit files if you wrote them, and
 remove the package or run `uv tool uninstall valetkey`.

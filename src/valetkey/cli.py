@@ -180,6 +180,7 @@ def _learned(policy: sites.Policy) -> str | None:
 
 @app.command(name="sites")
 def list_sites(
+    site: str | None = None,
     *,
     as_json: Annotated[
         bool, Parameter(name="--json", negative="", help="Print a JSON array instead of a table.")
@@ -193,8 +194,27 @@ def list_sites(
     object with the keys site, account (the part after the colon of ``sitex:work``, or null),
     host, allowed, excluded, denied, learned (a UTC time, or null), ``private_networks`` (a list)
     and profile (true or false). A site with several accounts has a line for each.
+
+    With a site, it prints that one site's complete lists instead: the hosts it may reach, the
+    hosts its last login left out and the hosts you denied, one to a line. With --json, that is
+    one object with the keys of a row above, but with ``allow``, ``excluded`` and ``denied`` as
+    lists of hosts.
+
+    Parameters
+    ----------
+    site
+        One site, as shown by ``valetkey sites``, with its account (``sitex:work``) when the site
+        has more than one. Leave it out to list every site.
+    as_json
+        Print JSON instead of text.
+
     """
     roots = sites.roots_from_env()
+    if site is not None:
+        try:
+            return _show_site(roots, _load(roots, site), as_json=as_json)
+        except CommandError as error:
+            return _fail(error)
     rows: list[dict[str, object]] = []
     found = _known_sites(roots)
     for name in found:
@@ -223,6 +243,44 @@ def list_sites(
         _say("No sites yet.")
     else:
         _print_sites(rows)
+    return 0
+
+
+def _show_site(roots: sites.Roots, policy: sites.Policy, *, as_json: bool) -> int:
+    """Print one site's complete lists, as text or as one JSON object."""
+    found = _known_sites(roots)
+    shown = sites.listed_name(policy.site, found)
+    if as_json:
+        _say(
+            json.dumps(
+                {
+                    "site": shown,
+                    "account": shown.partition(sites.ACCOUNT_SEPARATOR)[2] or None,
+                    "start": policy.start,
+                    "host": sites.host_of(policy.start),
+                    "allow": list(policy.allow),
+                    "excluded": list(policy.excluded),
+                    "denied": list(policy.denied),
+                    "learned": _learned(policy),
+                    "private_networks": list(policy.private_networks),
+                    "profile": sites.profile_path(roots, policy.site).is_dir(),
+                },
+                indent=2,
+            )
+        )
+        return 0
+    profile = "yes" if sites.profile_path(roots, policy.site).is_dir() else "no"
+    _say(f"{shown}: starts at {policy.start}")
+    _say(f"Learned: {_learned(policy) or 'never'}. Login profile: {profile}.")
+    for label, hosts in (
+        ("Allowed", policy.allow),
+        ("Excluded (left out by a login)", policy.excluded),
+        ("Denied (by you)", policy.denied),
+        ("Private networks", policy.private_networks),
+    ):
+        _say(f"{label} ({len(hosts)}):")
+        for host in hosts:
+            _say(f"  {host}")
     return 0
 
 

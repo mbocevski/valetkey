@@ -2065,3 +2065,101 @@ def test_add_copy_from_a_site_that_is_not_there_writes_nothing(
     assert status == 1
     assert "nosuch" in err
     assert not sites.policy_path(roots, "sitex:work").exists()
+
+
+# -- one site in full ----------------------------------------------------------------------
+
+
+def make_full_site(roots: sites.Roots) -> None:
+    sites.save_policy(
+        roots,
+        sites.Policy(
+            "sitex",
+            "https://app.sitex.com/",
+            ("sitex.com", "login.okta.com"),
+            ("t.example",),
+            datetime(2026, 10, 26, 9, 0, tzinfo=UTC),
+            denied=("no.example",),
+            private_networks=("10.0.0.0/8",),
+        ),
+    )
+    sites.ensure_profile(roots, "sitex")
+
+
+def test_sites_with_a_site_prints_every_host_of_its_three_lists(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_full_site(roots)
+    make_site(roots, "another")
+    status, out, _ = run(capsys, "sites", "sitex")
+    assert status == 0
+    assert out.splitlines() == [
+        "sitex: starts at https://app.sitex.com/",
+        "Learned: 2026-10-26T09:00:00Z. Login profile: yes.",
+        "Allowed (2):",
+        "  sitex.com",
+        "  login.okta.com",
+        "Excluded (left out by a login) (1):",
+        "  t.example",
+        "Denied (by you) (1):",
+        "  no.example",
+        "Private networks (1):",
+        "  10.0.0.0/8",
+    ]
+
+
+def test_sites_with_a_site_and_nothing_learned_says_so(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots, "another")
+    _, out, _ = run(capsys, "sites", "another")
+    assert out.splitlines()[:3] == [
+        "another: starts at https://app.another.com/",
+        "Learned: never. Login profile: no.",
+        "Allowed (1):",
+    ]
+    assert "Denied (by you) (0):" in out
+
+
+def test_sites_with_a_site_as_json_is_one_object(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_full_site(roots)
+    _, out, _ = run(capsys, "sites", "sitex", "--json")
+    assert json.loads(out) == {
+        "site": "sitex",
+        "account": None,
+        "start": "https://app.sitex.com/",
+        "host": "app.sitex.com",
+        "allow": ["sitex.com", "login.okta.com"],
+        "excluded": ["t.example"],
+        "denied": ["no.example"],
+        "learned": "2026-10-26T09:00:00Z",
+        "private_networks": ["10.0.0.0/8"],
+        "profile": True,
+    }
+
+
+def test_sites_with_an_account_names_it_and_with_a_bare_name_asks_which(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_accounts(roots)
+    _, out, _ = run(capsys, "sites", "sitex:work", "--json")
+    assert json.loads(out)["site"] == "sitex:work"
+    assert json.loads(out)["account"] == "work"
+    _, out, _ = run(capsys, "sites", "sitex:main", "--json")
+    assert (json.loads(out)["site"], json.loads(out)["account"]) == ("sitex:main", "main")
+    assert run(capsys, "sites", "sitex") == (
+        1,
+        "",
+        "valetkey: sitex has accounts sitex:main, sitex:work. Say which.\n",
+    )
+
+
+def test_sites_with_an_unknown_site_is_an_error(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    status, out, err = run(capsys, "sites", "nosuch")
+    assert (status, out) == (1, "")
+    assert "nosuch" in err

@@ -32,11 +32,13 @@ bridges.
 
 `valetkey sites` lists each site with its start host, how many hosts it allows, excludes and denies, the
 private address ranges it may reach, when the hosts were last learned and whether a login
-profile exists. Add `--json` for a script.
+profile exists. Add `--json` for a script. `valetkey sites SITE` prints that one site's complete
+lists instead, one host to a line: the hosts it may reach, the hosts its last login left out and
+the hosts you denied. With `--json` that is one object.
 
 <!-- begin: valetkey sites --help -->
 ```text
-Usage: valetkey sites [OPTIONS]
+Usage: valetkey sites [OPTIONS] [ARGS]
 
 List the sites valetkey knows.
 
@@ -48,7 +50,15 @@ account (the part after the colon of sitex:work, or null), host, allowed,
 excluded, denied, learned (a UTC time, or null), private_networks (a list) and
 profile (true or false). A site with several accounts has a line for each.
 
+With a site, it prints that one site's complete lists instead: the hosts it may
+reach, the hosts its last login left out and the hosts you denied, one to a
+line. With --json, that is one object with the keys of a row above, but with
+allow, excluded and denied as lists of hosts.
+
 Parameters:
+  SITE, --site: One site, as shown by valetkey sites, with its account
+(sitex:work) when the
+  site has more than one. Leave it out to list every site.
   --json: Print a JSON array instead of a table. [default: False]
 ```
 <!-- end: valetkey sites --help -->

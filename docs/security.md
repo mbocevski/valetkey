@@ -64,8 +64,11 @@ the next login builds it again. `denied` is what you turned down with `valetkey 
 never changes it and never allows a host it blocks; `valetkey allow` lifts it. A policy written
 before `denied` existed has none, and its excluded hosts are built again by the next login.
 
-The sorting of ads and tracking reads the host name against a short list in the source and names
-such as `ads` or `analytics`. It never includes a sign-in provider, a CDN or a font service.
+The sorting of ads and tracking reads the host name only. It uses Peter Lowe's list of ad and
+tracking server domains (pgl.yoyo.org/adservers), kept in the package as the site serves it. It
+adds a short list of more services, and names such as `ads` or `analytics`. A test keeps sign-in
+providers, CDNs and payment services out of it. A tracker it misses is allowed, so check the
+summary.
 
 ## Private networks
 
