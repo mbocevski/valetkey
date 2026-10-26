@@ -95,6 +95,41 @@ def test_ssh_has_its_own_connection_and_fails_when_the_forward_does() -> None:
     assert "-T" in argv
 
 
+def test_ssh_never_forwards_the_agent_or_x11_whatever_the_config_says() -> None:
+    forward = "/run/user/1000/valetkey/bridge-x.sock:/l/wp.sock"
+    assert bridge.ssh_argv(["ssh"], "server1", forward, RAND) == [
+        "ssh",
+        "-S",
+        "none",
+        "-T",
+        "-a",
+        "-x",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ForwardX11=no",
+        "-o",
+        "PermitLocalCommand=no",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-R",
+        forward,
+        "server1",
+        "valetkey",
+        "bridge-hold",
+        RAND,
+    ]
+    probe = bridge.probe_argv(["ssh"], "server1")
+    assert all(word in probe for word in bridge.NO_FORWARDING)
+    assert "-R" not in probe  # the probe asks one question and forwards nothing
+
+
 def test_the_remote_command_may_be_a_path() -> None:
     argv = bridge.ssh_argv(["ssh"], "server1", "a:b", RAND, ["/usr/bin/valetkey"])
     assert argv[-3:] == ["/usr/bin/valetkey", "bridge-hold", RAND]

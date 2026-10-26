@@ -45,6 +45,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- `valetkey bridge` never forwards your ssh agent or X11 to the server, whatever your ssh configuration says.
 - The daemon's service and each browser sandbox now have limits on open files, tasks and memory, so a runaway browser cannot take down your session.
 - The bridge that carries the browser's connections to the proxy relays 128 at a time and closes the rest.
 - A flood of connections to a site's proxy can no longer use up the daemon's file descriptors; the proxy serves 128 at a time and closes the rest.

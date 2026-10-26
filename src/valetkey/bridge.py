@@ -76,6 +76,19 @@ HOLD_WAIT = 15.0
 """Seconds ``bridge-hold`` waits for the forwarded socket to appear."""
 HOLD_INTERVAL = 2.0
 """How often ``bridge-hold`` registers again, which also mends a lost connection to valetkeyd."""
+NO_FORWARDING = (
+    "-a",
+    "-x",
+    "-o",
+    "ForwardAgent=no",
+    "-o",
+    "ForwardX11=no",
+    "-o",
+    "PermitLocalCommand=no",
+)
+"""What ssh is told on every connection so that the person's ``ssh_config`` cannot hand the server
+more than the one socket: the agent, X11 and local commands are all off, and ``-R`` below is the
+only forward."""
 _RAND = re.compile(r"[A-Za-z0-9]{8,64}")
 _HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@-]*")
 
@@ -133,6 +146,7 @@ def ssh_argv(
         "-S",
         "none",
         "-T",
+        *NO_FORWARDING,
         "-o",
         "ExitOnForwardFailure=yes",
         "-o",
@@ -157,6 +171,7 @@ def probe_argv(ssh: Sequence[str], host: str, valetkey: Sequence[str] = ("valetk
         "-S",
         "none",
         "-T",
+        *NO_FORWARDING,
         "-o",
         "BatchMode=yes",
         "-o",
