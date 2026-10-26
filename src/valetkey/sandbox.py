@@ -23,9 +23,13 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import valetkey
 from valetkey import sites
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 PROXY_ADDRESS = "127.0.0.1:3128"
 """Where the forwarder listens inside the namespace, and what the browser uses as its proxy."""
@@ -343,6 +347,47 @@ def bwrap_argv(
         argv += ["--setenv", name, value]
     argv += ["--chdir", home, *command]
     return argv
+
+
+def isolated_call_argv(  # noqa: PLR0913  # each is a distinct thing the caller knows
+    argv: list[str],
+    environment: dict[str, str],
+    *,
+    runtime_dir: Path,
+    driver_dir: Path,
+    read_only: Sequence[Path] = (),
+    system_links: list[str] | None = None,
+) -> list[str]:
+    """Return a ``bwrap`` command line that runs one call of the browser driver without a network.
+
+    The call is made from outside the sandbox and talks to the driver's daemon inside it through
+    a Unix socket in ``driver_dir``, which crosses network namespaces. Should the daemon be
+    gone, the driver starts one of its own, and a browser. Run like this, those have no
+    network (only a loopback that is down), cannot see the profile, the downloads or the
+    person's files, and are killed when the call ends: the PID namespace goes with its first
+    process, and ``--die-with-parent`` covers valetkey itself.
+
+    ``read_only`` lists files the call reads that are not under ``/usr``: the driver's binary
+    when it lives elsewhere, and its configuration file. ``environment`` is what the call gets,
+    except for ``PATH`` and ``HOME``, which name the namespace's own.
+    """
+    result = ["bwrap", "--unshare-all", "--new-session", "--hostname", "valetkey"]
+    result += ["--die-with-parent", "--ro-bind", "/usr", "/usr"]
+    result += system_links if system_links is not None else system_link_args()
+    for name in default_etc_entries():
+        result += ["--ro-bind", f"/etc/{name}", f"/etc/{name}"]
+    result += ["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]  # noqa: S108  # in the namespace
+    result += ["--tmpfs", str(runtime_dir), "--tmpfs", SANDBOX_HOME]
+    result += ["--bind", str(driver_dir), str(driver_dir)]
+    for path in read_only:
+        resolved = str(path)
+        if not resolved.startswith("/usr/"):
+            result += ["--ro-bind", resolved, resolved]
+    result += ["--clearenv", "--setenv", "PATH", "/usr/bin", "--setenv", "HOME", SANDBOX_HOME]
+    for name, value in environment.items():
+        if name not in {"PATH", "HOME"}:
+            result += ["--setenv", name, value]
+    return [*result, "--chdir", SANDBOX_HOME, *argv]
 
 
 def start(sandbox: Sandbox, command: list[str]) -> subprocess.Popen[bytes]:

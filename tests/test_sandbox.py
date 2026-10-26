@@ -724,3 +724,47 @@ def test_the_browser_finds_its_policy_inside_the_namespace(box: sandbox.Sandbox)
     status, log = run_python(inside, code)
     assert status == 0, log
     assert log.splitlines() == [str(sandbox.CHROME_POLICY)] * 2 + ["Read-only file system"]
+
+
+def test_a_driver_call_runs_in_a_namespace_without_network_or_the_persons_files(
+    tmp_path: Path,
+) -> None:
+    driver = tmp_path / "rt" / "agent-browser" / "namespaces" / "demo"
+    config = tmp_path / "rt" / "valetkey" / "agent-browser.json"
+    environment = {"PATH": "/home/me/bin", "HOME": "/home/me", "AGENT_BROWSER_SESSION": "s"}
+    argv = sandbox.isolated_call_argv(
+        ["/opt/ab/agent-browser", "--json", "snapshot"],
+        environment,
+        runtime_dir=tmp_path / "rt",
+        driver_dir=driver,
+        read_only=[Path("/usr/bin/other"), config, Path("/opt/ab/agent-browser")],
+        system_links=["--symlink", "usr/bin", "/bin"],
+    )
+    assert argv[:7] == [
+        "bwrap",
+        "--unshare-all",
+        "--new-session",
+        "--hostname",
+        "valetkey",
+        "--die-with-parent",
+        "--ro-bind",
+    ]
+    binds = [argv[i : i + 3] for i, word in enumerate(argv) if word in {"--bind", "--ro-bind"}]
+    assert ["--bind", str(driver), str(driver)] in binds
+    assert ["--ro-bind", str(config), str(config)] in binds
+    assert ["--ro-bind", "/opt/ab/agent-browser", "/opt/ab/agent-browser"] in binds
+    assert ["--ro-bind", "/usr/bin/other", "/usr/bin/other"] not in binds  # /usr is bound anyway
+    assert not [b for b in binds if b[1].startswith(("/home", "/root"))]
+    assert argv[argv.index("--clearenv") :][:7] == [
+        "--clearenv",
+        "--setenv",
+        "PATH",
+        "/usr/bin",
+        "--setenv",
+        "HOME",
+        sandbox.SANDBOX_HOME,
+    ]
+    assert argv[
+        argv.index("AGENT_BROWSER_SESSION") - 1 : argv.index("AGENT_BROWSER_SESSION") + 2
+    ] == ["--setenv", "AGENT_BROWSER_SESSION", "s"]
+    assert argv[-3:] == ["/opt/ab/agent-browser", "--json", "snapshot"]

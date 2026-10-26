@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import json
 import logging
 import os
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -60,6 +62,32 @@ def make_session(base: Path) -> sessions.Session:
     roots = make_roots(base)
     paths = sessions.session_paths(roots, "demo")
     return sessions.Session(paths, base / "rt", "/usr/bin/agent-browser", 5, sessions.Page("", ""))
+
+
+REAL_ISOLATED = sessions.Session._isolated  # noqa: SLF001
+REAL_DRIVER_ANSWERS = sessions.Session._driver_answers  # noqa: SLF001
+
+
+@pytest.fixture(autouse=True)
+def _no_driver_probe(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the tests with a stand-in for agent-browser call it without a daemon's socket.
+
+    The integration tests have the real agent-browser, so they get the real checks too.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+    monkeypatch.setattr(sessions.Session, "_driver_answers", lambda _self: True)
+    monkeypatch.setattr(sessions.Session, "_isolated", lambda _self, argv, _env: argv)
+
+
+def listen_as_the_driver(session: sessions.Session) -> socket.socket:
+    """Return a listening socket where the sandbox's agent-browser daemon would be."""
+    path = session.paths.driver_dir / "run" / f"{sessions.SESSION_NAME}.sock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(path))
+    server.listen()
+    return server
 
 
 class FakeRun:
@@ -296,6 +324,64 @@ def test_the_holder_script_reports_a_failed_open_and_exits_with_its_status(tmp_p
     result = subprocess.run(["bash", "-c", script], capture_output=True, check=False, timeout=30)  # noqa: S603, S607
     assert result.returncode == 4
     assert json.loads(ready.read_text())["error"] == "boom"
+
+
+def test_a_call_waits_for_nothing_when_the_driver_is_gone(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """agent-browser would start a daemon and a browser on the host, outside the sandbox."""
+    monkeypatch.setattr(sessions.Session, "_driver_answers", REAL_DRIVER_ANSWERS)
+    run = FakeRun(answer({}))
+    monkeypatch.setattr(sessions.subprocess, "run", run)
+    session = make_session(short_dir)
+    for verb in (session.snapshot, session.current_url, lambda: session.open("http://a.test/")):
+        with pytest.raises(sessions.SessionError, match="driver in the sandbox is gone"):
+            verb()
+    assert run.calls == []  # agent-browser was never run
+
+    path = session.paths.driver_dir / "run" / f"{sessions.SESSION_NAME}.sock"
+    path.parent.mkdir(parents=True)
+    path.write_text("a file is not a socket")
+    with pytest.raises(sessions.SessionError, match="driver in the sandbox is gone"):
+        session.snapshot()
+    assert run.calls == []
+
+    path.unlink()
+    with listen_as_the_driver(session):
+        session.current_url()
+    assert len(run.calls) == 1
+
+
+def test_a_call_runs_without_a_network_and_ends_with_the_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sessions.Session, "_isolated", REAL_ISOLATED)
+    run = FakeRun(answer({}))
+    monkeypatch.setattr(sessions.subprocess, "run", run)
+    session = make_session(tmp_path)
+    session.current_url()
+    argv, env = run.calls[0]
+    assert argv[:2] == ["bwrap", "--unshare-all"]
+    assert "--unshare-net" not in argv  # --unshare-all covers the network
+    assert "--die-with-parent" in argv
+    assert argv[argv.index("--chdir") + 2 :] == ["/usr/bin/agent-browser", "--json", "get", "url"]
+    assert ["--bind", str(session.paths.driver_dir)] == argv[
+        argv.index("--bind") : argv.index("--bind") + 2
+    ]
+    assert env["AGENT_BROWSER_NAMESPACE"] == "demo"
+
+
+def test_close_does_not_run_agent_browser_without_a_driver(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sessions.Session, "_driver_answers", REAL_DRIVER_ANSWERS)
+    run = FakeRun(answer({}))
+    monkeypatch.setattr(sessions.subprocess, "run", run)
+    session = make_session(short_dir)
+    session._holder = subprocess.Popen(["sleep", "59.5"])  # noqa: S607, SLF001
+    session.close()
+    assert run.calls == []
+    assert session._holder.poll() is not None  # noqa: SLF001
 
 
 def test_call_command_carries_the_session_name_and_no_launch_option(tmp_path: Path) -> None:
@@ -592,7 +678,7 @@ def test_close_stops_the_holder_and_removes_the_files(
         directory.mkdir(parents=True)
     session.paths.log_file.write_text("log")
     session.paths.config_file.write_text("{}")
-    session._holder = subprocess.Popen(["sleep", "60"])  # noqa: S607, SLF001
+    session._holder = subprocess.Popen(["sleep", "59.5"])  # noqa: S607, SLF001
     assert session.is_alive()
     session.close()
     assert not session.is_alive()
@@ -682,7 +768,7 @@ def test_is_alive_looks_for_the_browser_only_when_asked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     session = make_session(tmp_path)
-    session._holder = subprocess.Popen(["sleep", "60"])  # noqa: S607, SLF001
+    session._holder = subprocess.Popen(["sleep", "59.5"])  # noqa: S607, SLF001
     lines: list[list[str]] = []
     monkeypatch.setattr(procs, "command_lines", lambda: lines)
     try:
@@ -696,6 +782,23 @@ def test_is_alive_looks_for_the_browser_only_when_asked(
     finally:
         session.close()
     assert not session.is_alive()
+
+
+def test_a_watched_session_is_gone_when_the_driver_stops_answering(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sessions.Session, "_driver_answers", REAL_DRIVER_ANSWERS)
+    session = make_session(short_dir)
+    session._holder = subprocess.Popen(["sleep", "59.5"])  # noqa: S607, SLF001
+    session._watch_browser = True  # noqa: SLF001
+    monkeypatch.setattr(procs, "command_lines", lambda: browser_lines(session))
+    try:
+        assert not session.is_alive()  # the browser runs, the driver does not
+        with listen_as_the_driver(session):
+            assert session.is_alive()
+        assert not session.is_alive()
+    finally:
+        session.close()
 
 
 def test_start_can_watch_the_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -920,6 +1023,105 @@ def test_a_real_session_from_start_to_close(short_dir: Path) -> None:
         assert not paths.directory.exists() or not any(paths.directory.glob("*.*"))
         assert paths.profile_dir.is_dir()
         session.close()  # idempotent
+
+
+def processes_of(runtime: Path) -> set[int]:
+    """The processes whose environment says they run under ``runtime`` (``XDG_RUNTIME_DIR``)."""
+    wanted = f"XDG_RUNTIME_DIR={runtime}".encode()
+    found = set()
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            with contextlib.suppress(OSError):
+                if wanted in (entry / "environ").read_bytes().split(b"\0"):
+                    found.add(int(entry.name))
+    return found
+
+
+def kill_the_driver(session: sessions.Session) -> None:
+    """Do to the daemon in the sandbox what code running in the sandbox can do."""
+    holder = session._holder  # noqa: SLF001
+    assert holder is not None
+    daemons = [
+        p
+        for p in descendants(holder.pid)
+        if command_line(p).startswith("/usr/lib/agent-browser/bin/agent-browser")
+    ]
+    assert daemons
+    for daemon in daemons:
+        os.kill(daemon, signal.SIGKILL)
+    deadline = time.monotonic() + 10
+    while any(Path(f"/proc/{p}").exists() and "Z" not in _state(p) for p in daemons):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+
+
+def new_outside_the_sandbox(runtime: Path, before: set[int]) -> list[str]:
+    """Return the agent-browser and browser processes since ``before`` in the host's network."""
+    host_net = Path("/proc/self/ns/net").readlink()
+    found = []
+    for pid in processes_of(runtime) - before:
+        with contextlib.suppress(OSError):
+            if Path(f"/proc/{pid}/ns/net").readlink() == host_net and (
+                "agent-browser" in command_line(pid) or "chromium" in command_line(pid)
+            ):
+                found.append(command_line(pid))
+    return found
+
+
+@pytest.mark.integration
+@needs_everything
+def test_a_dead_driver_ends_the_session_and_starts_nothing_on_the_host(short_dir: Path) -> None:
+    roots = make_roots(short_dir)
+    paths = sessions.session_paths(roots, "demo")
+    paths.proxy_socket.parent.mkdir(parents=True)
+    with PageServer(PAGES) as pages, ProxyStub(paths.proxy_socket, pages.address):
+        session = sessions.Session.start(
+            roots, "demo", "http://site.test/", timeout=60, watch_browser=True
+        )
+        try:
+            before = processes_of(short_dir / "rt")
+            assert session.is_alive()
+            kill_the_driver(session)
+            deadline = time.monotonic() + 10
+            while session.is_alive():  # the browser may run on a moment, but nothing drives it
+                assert time.monotonic() < deadline
+                time.sleep(0.1)
+            with pytest.raises(sessions.SessionError, match="driver in the sandbox is gone"):
+                session.snapshot()
+            assert new_outside_the_sandbox(short_dir / "rt", before) == []
+        finally:
+            session.close()
+        assert new_outside_the_sandbox(short_dir / "rt", before) == []
+
+
+@pytest.mark.integration
+@needs_everything
+def test_a_driver_that_stops_during_a_call_leaves_nothing_on_the_host(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the check, the call would start a daemon and a browser, which die with it."""
+    roots = make_roots(short_dir)
+    paths = sessions.session_paths(roots, "demo")
+    paths.proxy_socket.parent.mkdir(parents=True)
+    with PageServer(PAGES) as pages, ProxyStub(paths.proxy_socket, pages.address):
+        session = sessions.Session.start(roots, "demo", "http://site.test/", timeout=60)
+        try:
+            before = processes_of(short_dir / "rt")
+            kill_the_driver(session)
+            monkeypatch.setattr(sessions.Session, "_driver_answers", lambda _self: True)
+            started = time.monotonic()
+            with contextlib.suppress(sessions.AgentBrowserError, sessions.SessionError):
+                session.snapshot()
+            assert time.monotonic() - started < 60
+            time.sleep(0.5)
+            assert new_outside_the_sandbox(short_dir / "rt", before) == []
+            assert not [
+                p
+                for p in processes_of(short_dir / "rt") - before
+                if "chromium" in command_line(p) or "agent-browser" in command_line(p)
+            ]
+        finally:
+            session.close()
 
 
 def _state(pid: int) -> str:

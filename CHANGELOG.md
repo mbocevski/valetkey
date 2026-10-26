@@ -40,5 +40,6 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- A browser session no longer falls back to a browser outside the sandbox when the sandboxed browser driver stops; the call fails and the session ends instead.
 - The install instructions name the ways valetkey ships, the Arch package and `uv tool install .` from a checkout, and commands, MCP tools and security have pages in `docs/`.
 - `valetkey allow` and `valetkey deny` no longer forget a site's login pages.

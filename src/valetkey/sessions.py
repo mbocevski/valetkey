@@ -30,6 +30,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import threading
@@ -59,6 +60,7 @@ SESSION_NAME = "s"
 DRIVER_DIR = "agent-browser"
 READY_FILE = "ready.json"
 DEFAULT_EXECUTABLE = "/usr/bin/chromium"
+PROBE_TIMEOUT = 2.0
 STOP_GRACE = 5.0
 """Seconds the holder gets after SIGTERM before SIGKILL."""
 DEFAULT_TIMEOUT = 60.0
@@ -552,8 +554,9 @@ class Session:
         """
         if self._holder is None or self._holder.poll() is not None:
             return False
-        return not self._watch_browser or procs.browser_running(
-            self.paths.profile_dir, procs.command_lines()
+        return not self._watch_browser or (
+            self._driver_answers()
+            and procs.browser_running(self.paths.profile_dir, procs.command_lines())
         )
 
     def close(self) -> None:
@@ -618,6 +621,8 @@ class Session:
             message = "the session is closed"
             raise SessionError(message)
         argv, environment = call_command(self._binary, self.paths, self._runtime, *verb)
+        self._require_driver()
+        argv = self._isolated(argv, environment)
         try:
             result = subprocess.run(  # noqa: S603  # built by call_command, no shell
                 argv,
@@ -632,6 +637,43 @@ class Session:
             message = f"agent-browser {verb[0]} timed out"
             raise AgentBrowserError(message) from error
         return parse_response(result.stdout or "{}")
+
+    def _isolated(self, argv: list[str], environment: dict[str, str]) -> list[str]:
+        """Wrap ``argv`` so that it runs without a network and ends with the call.
+
+        :meth:`_require_driver` makes the sandbox's daemon the one this call talks to. If it
+        stopped between that check and the call anyway, agent-browser would start a daemon and a
+        browser of its own. Here they have no network, and nothing outlives the call.
+        """
+        return sandbox.isolated_call_argv(
+            argv,
+            environment,
+            runtime_dir=self._runtime,
+            driver_dir=self.paths.driver_dir,
+            read_only=[Path(self._binary), self.paths.config_file],
+        )
+
+    def _require_driver(self) -> None:
+        """Raise ``SessionError`` unless agent-browser's daemon in the sandbox answers.
+
+        The sandbox can write the daemon's directory and kill the daemon. Without a daemon,
+        the call below would start one on the host, and a browser with it, outside the sandbox
+        and the proxy. So the call is made only when something is listening where the sandboxed
+        daemon listens. :data:`NO_HOST_BROWSER` covers the moment between this check and the call.
+        """
+        if not self._driver_answers():
+            message = "the browser's driver in the sandbox is gone; end the session and open again"
+            raise SessionError(message)
+
+    def _driver_answers(self) -> bool:
+        path = self.paths.driver_dir / "run" / f"{SESSION_NAME}.sock"
+        try:
+            with socket.socket(socket.AF_UNIX) as probe:
+                probe.settimeout(PROBE_TIMEOUT)
+                probe.connect(str(path))
+        except OSError:
+            return False
+        return True
 
     def open(self, url: str) -> Page:
         """Navigate to an HTTP or HTTPS ``url``."""
