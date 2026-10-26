@@ -42,6 +42,7 @@ import ipaddress
 import logging
 import socket
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
 from http import HTTPStatus
@@ -61,6 +62,8 @@ logger = logging.getLogger(__name__)
 MAX_HEAD_BYTES = 16 * 1024
 HEAD_TIMEOUT = 10.0
 CONNECT_TIMEOUT = 10.0
+RESOLVE_TIMEOUT = 5.0
+RESOLVE_WORKERS = 4
 MAX_REFUSALS = 1000
 MAX_SEEN_HOSTS = 5000
 CONNECT_PORT = 443
@@ -297,10 +300,33 @@ def private_address_allowed(address: str, networks: Iterable[str]) -> bool:
     )
 
 
-async def system_resolver(host: str, port: int) -> list[str]:
-    """Resolve ``host`` with the system resolver and return its addresses, in order, once each."""
-    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    return list(dict.fromkeys(str(info[4][0]) for info in infos))
+class ThreadedResolver:
+    """Resolve host names with the system resolver on threads of its own.
+
+    A lookup that never returns holds its thread, and nothing can interrupt it. So these threads
+    are not the default pool, which the rest of the process also uses, and there are only
+    ``workers`` of them: a page that makes lookups hang can hold up other lookups through this
+    resolver, and nothing else. Lookups beyond ``workers`` wait their turn, and one
+    cancelled before its turn never runs.
+    """
+
+    def __init__(self, workers: int = RESOLVE_WORKERS) -> None:
+        """Create a resolver with ``workers`` threads, started as lookups need them."""
+        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="valetkey-dns")
+
+    async def __call__(self, host: str, port: int) -> list[str]:
+        """Return the addresses of ``host`` in the order the system gives, once each."""
+        lookup = self._executor.submit(socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM)
+        infos = await asyncio.wrap_future(lookup)
+        return list(dict.fromkeys(str(info[4][0]) for info in infos))
+
+    def close(self) -> None:
+        """Drop the lookups still waiting for a thread. The running ones end on their own."""
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+system_resolver = ThreadedResolver()
+"""A resolver for callers outside a proxy, such as the check before a login."""
 
 
 # -- the proxy -------------------------------------------------------------------------------
@@ -315,7 +341,9 @@ class Proxy:
 
     The keyword arguments tune or replace the parts that touch the network:
 
-    * ``resolver`` turns a host name into addresses (default: the system resolver).
+    * ``resolver`` turns a host name into addresses (default: the system resolver, on threads
+      of the proxy's own, see :class:`ThreadedResolver`). ``resolve_timeout`` is the seconds one
+      lookup may take; a host that takes longer is answered as one that does not resolve.
     * ``connector`` opens a connection to ``(address, port)`` (default:
       :func:`asyncio.open_connection`).
     * ``address_check`` returns a reason to refuse an address, or ``None`` (default:
@@ -339,7 +367,8 @@ class Proxy:
         policy: sites.Policy,
         mode: Mode = Mode.ENFORCE,
         *,
-        resolver: Resolver = system_resolver,
+        resolver: Resolver | None = None,
+        resolve_timeout: float = RESOLVE_TIMEOUT,
         connector: Connector = asyncio.open_connection,
         address_check: AddressCheck = address_refusal,
         head_timeout: float = HEAD_TIMEOUT,
@@ -351,7 +380,9 @@ class Proxy:
         """Create a proxy. Nothing listens until :meth:`start`."""
         self._policy = policy
         self._mode = mode
-        self._resolver = resolver
+        self._owned_resolver = ThreadedResolver() if resolver is None else None
+        self._resolver = cast("Resolver", resolver or self._owned_resolver)
+        self._resolve_timeout = resolve_timeout
         self._connector = connector
         self._address_check = address_check
         self._head_timeout = head_timeout
@@ -446,6 +477,8 @@ class Proxy:
         server.close_clients()
         server.close()
         await server.wait_closed()
+        if self._owned_resolver is not None:
+            self._owned_resolver.close()
         await asyncio.to_thread(socket_path.unlink, missing_ok=True)
 
     @contextlib.asynccontextmanager
@@ -514,8 +547,10 @@ class Proxy:
         if sites.is_ip_literal(request.host):
             return [request.host]
         try:
-            addresses = await self._resolver(request.host, request.port)
-        except OSError:
+            addresses = await asyncio.wait_for(
+                self._resolver(request.host, request.port), self._resolve_timeout
+            )
+        except OSError, TimeoutError:
             addresses = []
         if not addresses:
             msg = f"could not resolve {request.host}"

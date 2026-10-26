@@ -6,6 +6,8 @@ import logging
 import socket
 import stat
 import sys
+import threading
+import time
 import warnings
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
@@ -30,7 +32,7 @@ from valetkey.proxy import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable
+    from collections.abc import AsyncGenerator, Awaitable, Iterator
     from pathlib import Path
 
 POLICY = sites.Policy(
@@ -1292,3 +1294,78 @@ async def _local_resolver(_host: str, _port: int) -> list[str]:
 
 async def _refusing_connector(_address: str, _port: int) -> proxy_module.Streams:
     raise OSError
+
+
+# -- lookups that never return ---------------------------------------------------------------
+
+
+@pytest.fixture
+def hung_lookups(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """Make ``socket.getaddrinfo`` block until the test ends; the list holds the hosts asked."""
+    release = threading.Event()
+    asked: list[str] = []
+
+    def lookup(host: str, *_args: object) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        asked.append(host)
+        release.wait(30)
+        raise socket.gaierror(host)
+
+    monkeypatch.setattr(socket, "getaddrinfo", lookup)
+    yield asked
+    release.set()
+
+
+def test_hung_lookups_do_not_stall_the_rest_of_the_process(
+    sock: Path, hung_lookups: list[str]
+) -> None:
+    """A page asks for many names of an allowed domain while the resolver does not answer."""
+
+    async def scenario() -> None:
+        async with Proxy(POLICY, resolve_timeout=0.3).serving(sock):
+            started = time.monotonic()
+            requests = [
+                send(sock, connect_request(f"h{number}.sitex.test:443")) for number in range(30)
+            ]
+            answers = asyncio.gather(*requests)
+            await asyncio.sleep(0.1)
+            # Work on the default thread pool still answers at once.
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: 1), 1) == 1
+            assert {status_of(answer) for answer in await answers} == {502}
+            assert time.monotonic() - started < 5
+            assert len(hung_lookups) <= proxy_module.RESOLVE_WORKERS
+
+    run(scenario())
+
+
+def test_a_slow_resolver_is_answered_as_a_host_that_does_not_resolve(sock: Path) -> None:
+    async def resolve(_host: str, _port: int) -> list[str]:
+        await asyncio.sleep(30)
+        return ["93.184.216.34"]
+
+    async def scenario() -> None:
+        async with Proxy(POLICY, resolver=resolve, resolve_timeout=0.1).serving(sock) as served:
+            response = await send(sock, connect_request("sitex.test:443"))
+            assert status_of(response) == 502
+            assert served.refused_since() == ([], 0)  # a failed lookup is not a refusal
+
+    run(scenario())
+
+
+def test_the_proxy_closes_its_own_resolver_and_leaves_one_it_was_given(sock: Path) -> None:
+    async def resolve(_host: str, _port: int) -> list[str]:
+        return ["93.184.216.34"]
+
+    own = Proxy(POLICY)
+    assert isinstance(own._resolver, proxy_module.ThreadedResolver)  # noqa: SLF001
+    given = Proxy(POLICY, resolver=resolve)
+    assert given._owned_resolver is None  # noqa: SLF001
+
+    async def scenario() -> None:
+        async with given.serving(sock):
+            pass
+        async with own.serving(sock):
+            pass
+
+    run(scenario())
+    with pytest.raises(RuntimeError, match="shutdown"):
+        run(own._resolver("sitex.test", 443))  # noqa: SLF001
