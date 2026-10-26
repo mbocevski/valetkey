@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import json
 import os
+import secrets
+import signal
 import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from environment import unusable_reason
+from environment import processes_with, unusable_reason
 from proxy_stub import ProxyStub, host_of_request
 
 from valetkey import sandbox, sites
@@ -632,12 +635,16 @@ for path in ("/usr/valetkey-probe", "/etc/valetkey-probe"):
 @integration
 @needs_namespaces
 def test_background_processes_end_with_the_first_command(box: sandbox.Sandbox) -> None:
-    status, log = run_inside(box, ["/usr/bin/sh", "-c", "sleep 300 & echo started"])
+    # Only this test's sleeper carries this number, so a sleeper of someone else's is not mistaken
+    # for it.
+    sleeper = f"sleep 300.{secrets.randbelow(10**9):09d}"
+    status, log = run_inside(box, ["/usr/bin/sh", "-c", f"{sleeper} & echo started"])
     assert status == 0, log
-    ps = subprocess.run(  # fixed argument list
-        ["/usr/bin/pgrep", "-f", "sleep 300"], capture_output=True, text=True, check=False
-    )
-    assert ps.stdout.strip() == ""
+    left = processes_with(sleeper)
+    for pid in left:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)  # a failure here must not leave it running
+    assert left == []
 
 
 _CHROMIUM_DRIVER = """
