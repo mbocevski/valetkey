@@ -5355,19 +5355,40 @@ def test_a_login_records_the_cookies_that_look_like_its_sign_in(roots: sites.Roo
     run(scenario())
 
 
-def test_a_later_login_that_records_no_cookie_keeps_the_ones_before(roots: sites.Roots) -> None:
-    sites.save_policy(
-        roots,
-        sites.Policy(
-            "sitex", "https://sitex.test/", ("sitex.test",), login_cookies=("sitex.test session",)
-        ),
-    )
+def test_a_later_login_that_finds_no_cookie_replaces_the_list_and_the_site_opens(
+    roots: sites.Roots,
+) -> None:
+    recorded_site(roots, "sitex.test session")
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("login", target="sitex")
             (window,) = rig.logins.windows
-            await window.close_window([SeenHost("sitex.test", 1)], roots.state / "profile")
+            profile = roots.state / "profile"
+            jar(profile)  # a readable database with nothing that looks like a sign-in
+            await window.close_window([SeenHost("sitex.test", 1)], profile)
+            await eventually(lambda: rig.daemon._sites["sitex"].kind == "idle")  # noqa: SLF001
+            assert sites.load_policy(roots, "sitex").login_cookies == ()
+            answer = await c.call("open", site="sitex")
+            assert "login_expired" not in answer
+            assert len(rig.factory.made) == 1
+
+    run(scenario())
+
+
+def test_a_later_login_that_cannot_read_the_cookies_keeps_the_ones_before(
+    roots: sites.Roots,
+) -> None:
+    recorded_site(roots, "sitex.test session")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("login", target="sitex")
+            (window,) = rig.logins.windows
+            profile = roots.state / "profile"
+            (profile / "Default").mkdir(parents=True)
+            (profile / "Default" / "Cookies").write_bytes(b"not a database")
+            await window.close_window([SeenHost("sitex.test", 1)], profile)
             await eventually(lambda: rig.daemon._sites["sitex"].kind == "idle")  # noqa: SLF001
             assert sites.load_policy(roots, "sitex").login_cookies == ("sitex.test session",)
 

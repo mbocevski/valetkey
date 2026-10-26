@@ -43,6 +43,7 @@ def cookie(  # noqa: PLR0913 - a row of the table
     name: str,
     *,
     created: datetime = SUBMITTED + timedelta(seconds=1),
+    updated: datetime | None = None,
     expires: int | None = None,
     secure: bool = False,
     http_only: bool = True,
@@ -65,7 +66,7 @@ def cookie(  # noqa: PLR0913 - a row of the table
         -1,
         2,
         443,
-        learn.chrome_time(created),
+        learn.chrome_time(updated or created),
         0,
         0,
     )

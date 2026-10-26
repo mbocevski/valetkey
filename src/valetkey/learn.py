@@ -519,7 +519,7 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
     *,
     site: str | None = None,
     pages: Iterable[str] = (),
-    login_cookies: Iterable[str] = (),
+    login_cookies: Iterable[str] | None = None,
 ) -> sites.Policy:
     """Fold ``classification`` into ``existing``, keeping everything already approved.
 
@@ -531,8 +531,10 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
     becomes ``now`` in UTC, rounded down to whole seconds (``now`` must carry a time zone). The
     site name is ``existing``'s, else ``site``, else one derived from ``start_url``. ``pages`` are
     the login pages this login recorded (see :func:`login_pages`); they replace the old ones, and
-    if none were recorded the old ones are kept. The same goes for ``login_cookies``, the cookies
-    this login set that look like its sign-in (see :mod:`valetkey.cookies`). The person's
+    if none were recorded the old ones are kept. ``login_cookies`` are the cookies this login set
+    that look like its sign-in (see :mod:`valetkey.cookies`). They replace the old ones even when
+    there are none, because cookies that are gone must not keep a site from opening; ``None``
+    means they could not be read, and the old ones are kept. The person's
     ``private_networks`` are kept as they are; a login never adds to them.
     """
     old_allow = existing.allow if existing else ()
@@ -557,8 +559,11 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
         denied=old_denied,
         learned=now.astimezone(UTC).replace(microsecond=0),
         login_pages=tuple(sorted(set(pages))) or (existing.login_pages if existing else ()),
-        login_cookies=tuple(sorted(set(login_cookies)))
-        or (existing.login_cookies if existing else ()),
+        login_cookies=(
+            tuple(sorted(set(login_cookies)))
+            if login_cookies is not None
+            else (existing.login_cookies if existing else ())
+        ),
         private_networks=existing.private_networks if existing else (),
     )
 

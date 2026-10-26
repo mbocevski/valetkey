@@ -1560,6 +1560,11 @@ def test_a_login_replaces_the_recorded_cookies_only_when_it_recorded_some() -> N
         old, result, START, NOW, login_cookies=["b.sitex.com new", "a.sitex.com new"]
     )
     assert fresh.login_cookies == ("a.sitex.com new", "b.sitex.com new")
+    # A read that worked and found none replaces the list: the old cookies are gone.
+    assert learn.merge(old, result, START, NOW, login_cookies=()).login_cookies == ()
+    assert learn.merge(old, result, START, NOW, login_cookies=None).login_cookies == (
+        "app.sitex.com old",
+    )
     assert learn.merge(None, result, START, NOW).login_cookies == ()
 
 

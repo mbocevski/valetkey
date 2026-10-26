@@ -16,7 +16,7 @@ def own(host: str) -> bool:
     return sites.host_matches(host, ["sitex.com"])
 
 
-def record(profile: Path) -> tuple[str, ...]:
+def record(profile: Path) -> tuple[str, ...] | None:
     return cookies.recorded(profile, profile / "Default" / "History", since=BEGAN, now=NOW, own=own)
 
 
@@ -49,6 +49,47 @@ def test_the_margin_keeps_a_cookie_stamped_a_moment_before_the_form_page(tmp_pat
     assert record(tmp_path) == ("app.sitex.com close",)
 
 
+def test_a_session_cookie_the_sign_in_overwrote_is_recorded_and_a_csrf_cookie_does_not_matter(
+    tmp_path: Path,
+) -> None:
+    """The browser keeps a cookie's first creation time when a site sets it again."""
+    history_with_a_form(tmp_path)
+    first_visit = BEGAN + timedelta(seconds=6)
+    after = SUBMITTED + timedelta(seconds=1)
+    rows = (
+        cookie("app.sitex.com", "sid", created=first_visit, updated=after),
+        cookie("app.sitex.com", "csrf", created=after, expires=learn.chrome_time(NOW)),
+        cookie("app.sitex.com", "anonymous", created=first_visit),  # never set again
+    )
+    jar(tmp_path, *rows)
+    recorded_now = cookies.recorded(
+        tmp_path,
+        tmp_path / "Default" / "History",
+        since=BEGAN,
+        now=NOW - timedelta(minutes=1),
+        own=own,
+    )
+    assert recorded_now == ("app.sitex.com csrf", "app.sitex.com sid")
+    # A little later the CSRF cookie has run out. The sign-in cookie has not: nothing is reported.
+    assert not cookies.gone(tmp_path, recorded_now, now=NOW + timedelta(minutes=1))
+
+
+def test_the_cap_keeps_the_longest_lived_cookies_not_the_first_by_name(tmp_path: Path) -> None:
+    short = learn.chrome_time(NOW + timedelta(hours=1))
+    jar(
+        tmp_path,
+        *(cookie("app.sitex.com", f"a{n:02d}", expires=short + n) for n in range(24)),
+        cookie("app.sitex.com", "zz_session"),  # no expiry: it lasts as long as the browser
+    )
+    found = record(tmp_path)
+    assert found is not None
+    assert len(found) == sites.MAX_LOGIN_COOKIES
+    assert "app.sitex.com zz_session" in found
+    # Of the ones with an expiry, the latest come first.
+    assert "app.sitex.com a23" in found
+    assert "app.sitex.com a00" not in found
+
+
 def test_without_a_form_in_the_history_every_sign_in_looking_cookie_counts(tmp_path: Path) -> None:
     jar(
         tmp_path,
@@ -63,16 +104,17 @@ def test_without_a_form_in_the_history_every_sign_in_looking_cookie_counts(tmp_p
 def test_at_most_twenty_are_recorded(tmp_path: Path) -> None:
     jar(tmp_path, *(cookie("app.sitex.com", f"s{n:02d}") for n in range(30)))
     found = record(tmp_path)
+    assert found is not None
     assert len(found) == sites.MAX_LOGIN_COOKIES
     assert found == tuple(f"app.sitex.com s{n:02d}" for n in range(20))
 
 
 def test_nothing_is_recorded_from_a_missing_or_unreadable_database(tmp_path: Path) -> None:
-    assert record(tmp_path) == ()
+    assert record(tmp_path) == ()  # a login that set no cookie replaces the list with none
     path = cookies.database(tmp_path)
     path.parent.mkdir(parents=True)
     path.write_bytes(b"not a database")
-    assert record(tmp_path) == ()
+    assert record(tmp_path) is None  # nothing is known: the caller keeps what it had
 
 
 def test_the_cookies_table_is_all_that_is_read(tmp_path: Path) -> None:
@@ -80,7 +122,7 @@ def test_the_cookies_table_is_all_that_is_read(tmp_path: Path) -> None:
     with closing(sqlite3.connect(path)) as database:
         database.execute("CREATE VIEW sneaky AS SELECT * FROM cookies")
         database.commit()
-    assert record(tmp_path) == ()  # a view is not trusted: the database is refused
+    assert record(tmp_path) is None  # a view is not trusted: the database is refused
 
 
 # -- gone -----------------------------------------------------------------------------------

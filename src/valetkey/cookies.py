@@ -12,14 +12,18 @@ gives every visitor an anonymous cookie of the same name, which would hide the l
 
 **Which cookies.** One that the login set on the site's own domain (or a domain with the same
 owner), that is ``HttpOnly`` or ``Secure``, whose name is not an analytics or consent cookie, and
-that was created after the first form was submitted, when the history shows one. The history
-cannot say which cookie is the sign-in, so several are kept (at most
-:data:`valetkey.sites.MAX_LOGIN_COOKIES`), and the login counts as gone only when all of them
-are. A site that rotates the name of one (``wordpress_logged_in_<hash>``) while another stays
-raises no alarm.
+that was set after the first form was submitted, when the history shows one. That is the
+cookie's last update, not its creation: a site gives every visitor a session cookie and sets the
+same cookie again at sign-in, and the browser keeps the first creation time. The history cannot
+say which cookie is the sign-in, so several are kept (at most
+:data:`valetkey.sites.MAX_LOGIN_COOKIES`, the longest-lived first, session cookies ahead of
+those with an expiry), and the login counts as gone only when all of them are. A site that
+rotates the name of one (``wordpress_logged_in_<hash>``) while another stays raises no alarm.
 
-**When to say nothing.** When nothing was recorded, when the database is missing or cannot be
-read or trusted, and when any recorded cookie is still there and has not run out. A site that
+**When to say nothing.** When nothing was recorded, when the database exists but cannot be read
+or trusted, and when any recorded cookie is still there and has not run out. A login that finds
+no cookie to record replaces the list with none, so a site is never kept shut by cookies that are
+gone. A site that
 keeps its session somewhere other than cookies is the one case this misses, or mistakes: the
 recorded cookies are then harmless ones, and losing them would look like a lost login. Keeping
 to cookies that look like a sign-in is the guard against that.
@@ -54,8 +58,8 @@ IGNORED = re.compile(
 )
 """Names of cookies that are never the sign-in: analytics, advertising and consent."""
 _RECORDED = (
-    "SELECT host_key, name, creation_utc, expires_utc, has_expires, is_secure, is_httponly "
-    "FROM cookies WHERE creation_utc >= ? LIMIT 100000"
+    "SELECT host_key, name, last_update_utc, expires_utc, has_expires, is_secure, is_httponly "
+    "FROM cookies WHERE last_update_utc >= ? LIMIT 100000"
 )
 _PRESENT = "SELECT host_key, name, expires_utc, has_expires FROM cookies LIMIT 100000"
 
@@ -77,12 +81,13 @@ def recorded(
     since: datetime,
     now: datetime,
     own: Callable[[str], bool],
-) -> tuple[str, ...]:
+) -> tuple[str, ...] | None:
     """Return the cookies to record for the login that began at ``since`` and has just ended.
 
     ``own`` tells whether a host is the site's own (or has its owner). A profile with no cookie
-    database, or one that cannot be read, gives ``()``, and so does a history that cannot be
-    read when it is needed for the first form's time.
+    database gives ``()``: the login set no cookie, and the list it replaces must not outlive
+    cookies that are gone. ``None`` means the database could not be read, so nothing is known and
+    the caller keeps what it had. A history that cannot be read costs only the first form's time.
     """
     path = database(profile)
     if not path.is_file():
@@ -95,10 +100,10 @@ def recorded(
     try:
         (rows,) = learn.query_database(path, TABLES, (_RECORDED, (learn.chrome_time(since),)))
     except learn.HistoryError:
-        return ()
+        return None
     current = learn.chrome_time(now)
-    found: set[str] = set()
-    for host, name, created, expires, has_expires, secure, http_only in rows:
+    found: dict[str, tuple[int, int]] = {}
+    for host, name, updated, expires, has_expires, secure, http_only in rows:
         if not (isinstance(host, str) and isinstance(name, str)):
             continue
         written = entry(host, name)
@@ -107,11 +112,12 @@ def recorded(
             and not IGNORED.fullmatch(name)
             and own(host.lstrip("."))
             and not (has_expires and learn.as_int(expires) <= current)
-            and (anchor is None or learn.as_int(created) >= anchor - MARGIN_US)
+            and (anchor is None or learn.as_int(updated) >= anchor - MARGIN_US)
             and sites.is_login_cookie(written)
         ):
-            found.add(written)
-    return tuple(sorted(found)[: sites.MAX_LOGIN_COOKIES])
+            found[written] = (1, -learn.as_int(expires)) if has_expires else (0, 0)
+    longest_lived = sorted(found, key=lambda written: (found[written], written))
+    return tuple(sorted(longest_lived[: sites.MAX_LOGIN_COOKIES]))
 
 
 def gone(profile: Path, login_cookies: tuple[str, ...], *, now: datetime) -> bool:
