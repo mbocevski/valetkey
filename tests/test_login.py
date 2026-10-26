@@ -4,7 +4,6 @@ import contextlib
 import json
 import os
 import shlex
-import shutil
 import signal
 import socket
 import stat
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from environment import unusable_reason
 
 from valetkey import login, sandbox, sites
 from valetkey.proxy import SeenHost
@@ -634,33 +634,7 @@ def test_bad_arguments_fail_before_anything_is_created(roots: sites.Roots) -> No
 # -- integration: a real window in a private sway -----------------------------------------
 
 
-def _usable() -> str | None:
-    for program in ("bwrap", "chromium", "sway", "swaymsg"):
-        if shutil.which(program) is None:
-            return f"{program} is not installed"
-    probe = subprocess.run(  # noqa: S603  # fixed argument list
-        [
-            shutil.which("bwrap") or "bwrap",
-            "--unshare-all",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib",
-            "/lib64",
-            "/usr/bin/true",
-        ],
-        capture_output=True,
-        check=False,
-        timeout=30,
-    )
-    return None if probe.returncode == 0 else "unprivileged user namespaces are unavailable"
-
-
-_SKIP_REASON = _usable()
+_SKIP_REASON = unusable_reason("bwrap", "chromium", "sway", "swaymsg")
 integration = pytest.mark.integration
 needs_desktop = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 

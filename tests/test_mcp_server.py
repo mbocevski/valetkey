@@ -4,7 +4,6 @@ import base64
 import contextlib
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import pytest
+from environment import unusable_reason
 from mcp import Client as McpClient
 from mcp.client.stdio import StdioServerParameters
 from mcp_types import ImageContent
@@ -855,19 +855,7 @@ def test_stdout_carries_only_json_rpc() -> None:
 # -- integration: the whole chain ----------------------------------------------------------
 
 
-def _usable() -> str | None:
-    for program in ("bwrap", "chromium", "agent-browser"):
-        if shutil.which(program) is None:
-            return f"{program} is not installed"
-    probe = subprocess.run(  # noqa: S603  # fixed argument list
-        [shutil.which("bwrap") or "bwrap", "--unshare-all", "--ro-bind", "/usr", "/usr",
-         "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64", "/usr/bin/true"],
-        capture_output=True, check=False, timeout=30,
-    )  # fmt: skip
-    return None if probe.returncode == 0 else "unprivileged user namespaces are unavailable"
-
-
-_SKIP_REASON = _usable()
+_SKIP_REASON = unusable_reason("bwrap", "chromium", "agent-browser")
 needs_everything = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 PAGES = {"/": "<title>One</title><button>Go</button>", "/two": "<title>Two</title><h1>second</h1>"}
 

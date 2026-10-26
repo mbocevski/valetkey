@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from valetkey import __version__, cli, daemon, mcp_server, sites
+from valetkey import __version__, cli, daemon, mcp_server, sandbox, sites
 from valetkey.cli import main
 
 if TYPE_CHECKING:
@@ -1089,7 +1089,7 @@ def test_bubblewrap_still_works_under_the_service_hardening() -> None:
         "systemd-run", "--user", "--wait", "--pipe", "--collect", "--quiet",
         *hardening_properties(),
         shutil.which("bwrap") or "bwrap", "--unshare-all", "--ro-bind", "/usr", "/usr",
-        "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64",
+        *sandbox.system_link_args(),
         "--dev", "/dev", "--proc", "/proc", "/usr/bin/true",
     ]  # fmt: skip
     result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=60)  # noqa: S603

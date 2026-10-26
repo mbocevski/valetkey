@@ -21,7 +21,11 @@ just test    # pytest with branch coverage
 Both must pass. Coverage must stay at 90% or above.
 
 To run the CI workflow locally, use `just ci`. It needs Docker and
-[act](https://github.com/nektos/act).
+[act](https://github.com/nektos/act). Run one job with `just ci -j integration`; `.actrc` starts the
+containers privileged, which bubblewrap needs.
+
+`just test-integration` runs only the tests that need bubblewrap, a browser and a desktop, and
+fails when one of them skips.
 
 ## Code
 

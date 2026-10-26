@@ -3,7 +3,6 @@
 import json
 import logging
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -12,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from environment import unusable_reason
 from proxy_stub import PageServer, ProxyStub, host_of_request
 
 from valetkey import sandbox, sessions, sites
@@ -609,19 +609,7 @@ def test_resolve_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 # --- integration: a real session ----------------------------------------------------------
 
 
-def _usable() -> str | None:
-    for program in ("bwrap", "chromium", "agent-browser"):
-        if shutil.which(program) is None:
-            return f"{program} is not installed"
-    probe = subprocess.run(  # noqa: S603  # fixed argument list
-        [shutil.which("bwrap") or "bwrap", "--unshare-all", "--ro-bind", "/usr", "/usr",
-         "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64", "/usr/bin/true"],
-        capture_output=True, check=False, timeout=30,
-    )  # fmt: skip
-    return None if probe.returncode == 0 else "unprivileged user namespaces are unavailable"
-
-
-_SKIP_REASON = _usable()
+_SKIP_REASON = unusable_reason("bwrap", "chromium", "agent-browser")
 needs_everything = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 
 PAGES = {

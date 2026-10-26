@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+pytest_plugins = ["pytester", "require_integration"]
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 

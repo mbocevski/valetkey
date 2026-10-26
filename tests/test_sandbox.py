@@ -2,13 +2,13 @@
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from environment import unusable_reason
 from proxy_stub import ProxyStub, host_of_request
 
 from valetkey import sandbox, sites
@@ -368,34 +368,7 @@ def test_start_sends_output_to_the_log_file_and_not_to_a_pipe(
 # --- integration: a real namespace --------------------------------------------------------
 
 
-def _usable() -> str | None:
-    """Return why the sandbox cannot run here, or ``None`` when it can."""
-    for program in ("bwrap", "chromium"):
-        if shutil.which(program) is None:
-            return f"{program} is not installed"
-    probe = subprocess.run(  # noqa: S603  # fixed argument list
-        [
-            shutil.which("bwrap") or "bwrap",
-            "--unshare-all",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib",
-            "/lib64",
-            "/usr/bin/true",
-        ],
-        capture_output=True,
-        check=False,
-        timeout=30,
-    )
-    return None if probe.returncode == 0 else "unprivileged user namespaces are unavailable"
-
-
-_SKIP_REASON = _usable()
+_SKIP_REASON = unusable_reason("bwrap", "chromium")
 integration = pytest.mark.integration
 needs_namespaces = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 

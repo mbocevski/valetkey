@@ -3,7 +3,6 @@ import asyncio
 import contextlib
 import json
 import os
-import shutil
 import signal
 import socket
 import sqlite3
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from environment import unusable_reason
 from proxy_stub import PageServer
 
 from valetkey import client, daemon, login, sessions, sites
@@ -1416,19 +1416,7 @@ def test_two_calls_that_find_the_browser_dead_end_it_once(roots: sites.Roots) ->
 # -- integration: a real session through the daemon ----------------------------------------
 
 
-def _usable() -> str | None:
-    for program in ("bwrap", "chromium", "agent-browser"):
-        if shutil.which(program) is None:
-            return f"{program} is not installed"
-    probe = subprocess.run(  # noqa: S603  # fixed argument list
-        [shutil.which("bwrap") or "bwrap", "--unshare-all", "--ro-bind", "/usr", "/usr",
-         "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64", "/usr/bin/true"],
-        capture_output=True, check=False, timeout=30,
-    )  # fmt: skip
-    return None if probe.returncode == 0 else "unprivileged user namespaces are unavailable"
-
-
-_SKIP_REASON = _usable()
+_SKIP_REASON = unusable_reason("bwrap", "chromium", "agent-browser")
 needs_everything = pytest.mark.skipif(_SKIP_REASON is not None, reason=_SKIP_REASON or "")
 PAGES = {
     "/": (

@@ -57,3 +57,98 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - run: uv build
       - run: uvx --from dist/valetkey-*.whl valetkey --version
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      # Google's package signing key (the primary key's fingerprint, from
+      # https://dl.google.com/linux/linux_signing_key.pub).
+      GOOGLE_KEY_FINGERPRINT: EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796
+      # The tested agent-browser release and the SHA-256 of its linux-x64 binary.
+      AGENT_BROWSER_VERSION: 0.39.2
+      AGENT_BROWSER_SHA256: 0f68e74e792bf7d0814c58ee4b86dbcacfd3997c27805cd12c2d15e0ca38638e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      # Ubuntu 24.04 stops unprivileged processes from creating user namespaces, which is all
+      # bubblewrap needs. The setting is per virtual machine and the machine is thrown away
+      # afterwards. An AppArmor profile that allows only bwrap would be narrower, but it also has
+      # to cover the browser that bwrap starts, and the sysctl is the documented, tested route.
+      # The file is missing on kernels without the setting, such as the one behind a local act run.
+      - name: Allow unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Install bubblewrap, strace and sway
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap strace sway
+      # The snap that Ubuntu's chromium-browser package installs cannot run inside bubblewrap, so
+      # the browser is Google Chrome from Google's apt repository, checked against a pinned key.
+      # The sandbox only sees /usr and the code looks for /usr/bin/chromium, so the tree moves
+      # from /opt/google/chrome to /usr/lib/chromium and the binary is renamed to match.
+      # /usr/bin/chromium is a one-line script rather than a link, because Google Chrome names its
+      # Wayland windows google-chrome and the login tests look for a window named chromium.
+      - name: Install Chrome as chromium
+        run: |
+          curl -fsSL https://dl.google.com/linux/linux_signing_key.pub -o google.pub
+          fingerprint=$(gpg --show-keys --with-colons google.pub | awk -F: '/^fpr/ {print $10; exit}')
+          if [ "$fingerprint" != "$GOOGLE_KEY_FINGERPRINT" ]; then
+            echo "unexpected signing key $fingerprint" >&2
+            exit 1
+          fi
+          sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg google.pub
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" |
+            sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo mkdir -p /etc/default
+          echo 'repo_add_once="false"' | sudo tee /etc/default/google-chrome
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends google-chrome-stable
+          sudo mv /opt/google/chrome /usr/lib/chromium
+          sudo mv /usr/lib/chromium/chrome /usr/lib/chromium/chromium
+          printf '#!/bin/sh\nexec /usr/lib/chromium/chromium --class=chromium "$@"\n' |
+            sudo tee /usr/bin/chromium >/dev/null
+          sudo chmod 755 /usr/bin/chromium
+          chromium --version
+      - name: Install agent-browser
+        run: |
+          curl -fsSL -o agent-browser "https://github.com/vercel-labs/agent-browser/releases/download/v${AGENT_BROWSER_VERSION}/agent-browser-linux-x64"
+          echo "${AGENT_BROWSER_SHA256}  agent-browser" | sha256sum --check -
+          sudo install -m 0755 agent-browser /usr/local/bin/agent-browser
+          agent-browser --version
+      # One test starts a transient service with the unit file's hardening, so it needs a systemd
+      # user manager. The hosted runner has systemd; lingering starts the user's manager and the
+      # two variables let this job's shell reach it. A local act run has no systemd at all, and
+      # the run step below leaves that one test out.
+      - name: Start the systemd user manager
+        if: ${{ !env.ACT }}
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          uid=$(id -u)
+          until [ -S "/run/user/$uid/bus" ]; do sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+      # A skipped integration test fails the job: a skip here means something was not installed.
+      # Chrome will not run as root. The hosted runner is not root, but a local act run is, so
+      # there the tests run as a throwaway user.
+      - name: Run the integration tests
+        run: |
+          as=""
+          if [ "$(id -u)" -eq 0 ]; then
+            useradd --create-home ci
+            chown -R ci "$GITHUB_WORKSPACE"
+            as="sudo -u ci -H env PATH=$PATH UV_LOCKED=$UV_LOCKED"
+          fi
+          $as uv sync
+          deselect=""
+          if [ -n "${ACT:-}" ]; then
+            deselect="--deselect tests/test_cli.py::test_bubblewrap_still_works_under_the_service_hardening"
+          fi
+          $as uv run pytest -m integration --require-integration -rs --no-cov $deselect

@@ -20,6 +20,10 @@ check:
 test *args:
     uv run pytest {{ args }}
 
+# Run the tests that need bubblewrap, a browser and a desktop; a skipped one fails.
+test-integration:
+    uv run pytest -m integration --require-integration -rs --no-cov
+
 # Cut a release from the changelog: version, commit and signed tag. Does not push.
 release version:
     uv run python tools/release.py {{ version }}

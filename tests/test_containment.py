@@ -8,9 +8,7 @@ and a separate run without a network namespace shows that the same check does fi
 
 import asyncio
 import dataclasses
-import ipaddress
 import re
-import shutil
 import socket
 import subprocess
 import tempfile
@@ -20,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from environment import unusable_reason
 from proxy_stub import PageServer, RunningProxy
 
 from valetkey import proxy as proxy_module
@@ -170,19 +169,7 @@ def test_a_clean_trace_has_no_leaks() -> None:
 # --- the real thing -----------------------------------------------------------------------
 
 
-def _usable() -> str | None:
-    for program in ("bwrap", "chromium", "agent-browser", "strace"):
-        if shutil.which(program) is None:
-            return f"{program} is not installed"
-    probe = subprocess.run(  # noqa: S603  # fixed argument list
-        [shutil.which("bwrap") or "bwrap", "--unshare-all", "--ro-bind", "/usr", "/usr",
-         "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64", "/usr/bin/true"],
-        capture_output=True, check=False, timeout=30,
-    )  # fmt: skip
-    return None if probe.returncode == 0 else "unprivileged user namespaces are unavailable"
-
-
-_SKIP = _usable()
+_SKIP = unusable_reason("bwrap", "chromium", "agent-browser", "strace")
 needs_everything = pytest.mark.skipif(_SKIP is not None, reason=_SKIP or "")
 integration = pytest.mark.integration
 
@@ -435,14 +422,17 @@ def test_the_check_finds_the_leak_when_there_is_no_namespace(tmp_path: Path) -> 
     """Run Chromium with only a proxy flag, outside any namespace, and look for the leak."""
     with PageServer({"/": CONTROL_PAGE}) as page:
         url = f"http://127.0.0.1:{page.address[1]}/"
-        outside = _run_without_namespace(tmp_path, url)
-    # Chrome's DNS and WebRTC ignore the proxy flag, so something reaches an outside address.
+        outside = _run_without_namespace(tmp_path, url, page.address[1])
+    # Chrome's DNS and WebRTC ignore the proxy flag, so a lookup reaches the machine's resolver.
     assert outside, (
         "the check found no leak in a browser that is not contained, so it cannot be trusted"
     )
 
 
-def _run_without_namespace(tmp_path: Path, url: str) -> list[Attempt]:
+def _run_without_namespace(tmp_path: Path, url: str, page_port: int) -> list[Attempt]:
+    # The dummy proxy and the page server are ours; anything else, a resolver on the
+    # loopback included, is the machine's network.
+    ours = {("127.0.0.1", 9), ("127.0.0.1", page_port)}
     outside: list[Attempt] = []
     for attempt in range(3):  # Chrome's own lookups start at slightly different times
         trace = tmp_path / f"trace{attempt}.txt"
@@ -454,9 +444,7 @@ def _run_without_namespace(tmp_path: Path, url: str) -> list[Attempt]:
         ]  # fmt: skip
         subprocess.run(command, capture_output=True, check=False, timeout=60)  # noqa: S603  # fixed list
         outside = [
-            a
-            for a in leaks(parse_strace(trace.read_text()))
-            if not ipaddress.ip_address(a.address).is_loopback
+            a for a in leaks(parse_strace(trace.read_text())) if (a.address, a.port) not in ours
         ]
         if outside:
             break
