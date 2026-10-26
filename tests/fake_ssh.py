@@ -9,8 +9,9 @@ and acts like the part of ssh the bridge relies on:
   connection with status 255, and it never removes the socket, however it ends.
 * The command runs in ``/bin/sh -c``, on this machine, with the environment in the JSON in
   ``FAKE_SSH_REMOTE_ENV`` added, so the "server" can have its own runtime directory. Its standard
-  input is a pipe that stays open for as long as this process lives, so the command sees
-  end-of-file when this process is killed, as a command run by sshd does when the link drops.
+  input is what this process is given on its own standard input, as with ``ssh -T``: the command
+  sees end-of-file when that input ends (immediately, if it is ``/dev/null``), and when this
+  process is killed, as a command run by sshd does when the link drops.
 * ``FAKE_SSH_LOG``, if set, gets one line of JSON per call: the words it was given.
 
 Run it as ``python fake_ssh.py OPTIONS HOST COMMAND...``.
@@ -22,6 +23,7 @@ import json
 import os
 import signal
 import sys
+import threading
 from pathlib import Path
 
 
@@ -57,6 +59,36 @@ async def forward(local: str, reader: asyncio.StreamReader, writer: asyncio.Stre
     await asyncio.gather(pump(reader, far_writer), pump(far_reader, writer))
 
 
+def relay(loop: asyncio.AbstractEventLoop, process: asyncio.subprocess.Process) -> None:
+    """Hand this process's standard input to the command, and its end with it, as ssh does.
+
+    A thread reads, because the input may be ``/dev/null`` or a pipe, and the loop cannot wait on
+    both. It is a daemon thread, so that a read nobody will ever finish does not keep this process
+    from ending.
+    """
+
+    def close() -> None:
+        if process.stdin is not None:
+            process.stdin.close()
+
+    def write(data: bytes) -> None:
+        if process.stdin is not None:
+            process.stdin.write(data)
+
+    def read() -> None:
+        while True:
+            try:
+                data = os.read(0, 65536)
+            except OSError:
+                data = b""
+            if not data:
+                loop.call_soon_threadsafe(close)
+                return
+            loop.call_soon_threadsafe(write, data)
+
+    threading.Thread(target=read, daemon=True).start()
+
+
 async def main(arguments: list[str]) -> int:
     forwards, _host, command = parse(arguments)
     log = os.environ.get("FAKE_SSH_LOG")
@@ -84,6 +116,7 @@ async def main(arguments: list[str]) -> int:
         env=environment,
     )
     loop = asyncio.get_running_loop()
+    relay(loop, process)
     ended = asyncio.Event()
     loop.add_signal_handler(signal.SIGTERM, ended.set)
     waiting = asyncio.ensure_future(process.wait())

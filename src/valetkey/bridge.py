@@ -219,8 +219,16 @@ async def _terminate(process: asyncio.subprocess.Process) -> None:
 
 
 async def _spawn(run: _Run, argv: Sequence[str]) -> asyncio.subprocess.Process:
+    """Start one of the bridge's programs, with an input that stays open and carries nothing.
+
+    ``ssh -T`` hands its own standard input to the remote command, and ends it when that input
+    ends. ``valetkey bridge-hold`` at the other end takes the end of its input for the link
+    dropping. So ssh must not read ``/dev/null``, which ends at once: it is given the read end
+    of a pipe whose write end this process keeps open, and writes nothing to. The remote command
+    sees the end only when this process, or ssh, is gone.
+    """
     process = await asyncio.create_subprocess_exec(
-        *argv, stdin=asyncio.subprocess.DEVNULL, env=dict(run.environ)
+        *argv, stdin=asyncio.subprocess.PIPE, env=dict(run.environ)
     )
     run.children.add(process)
     return process
