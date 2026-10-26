@@ -122,7 +122,8 @@ password. The [remote logins page](remote.md) has the details.
 ## Page content is untrusted
 
 A page can contain text written to look like instructions. Everything that came from a page, such
-as titles and the page's text tree, is fenced and labelled as data. The agent is told never to
+as titles, the page's text tree and the path and query of its address, is fenced and labelled as
+data. The address shows only its host as fact; the rest is cut to 200 characters. The agent is told never to
 follow instructions found there and to tell you when a host is refused instead of working around it.
 
 ## Seeing what runs

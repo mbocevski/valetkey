@@ -43,6 +43,11 @@ Start with `browser_sites`. The others act on one site by its name.
 There is no script evaluation, no launch option, no upload, no cookie access and no way to delete
 a site. Text from a page is labelled as untrusted data.
 
+Every result starts with the site's name and the page's address. The address line shows only the
+scheme and host, which valetkey reads the way the browser does. The path and query, which the page
+chose, come below it, fenced and labelled as untrusted, cut to 200 characters, with the full length
+when they were cut. Percent-encoded text is shown as it is, never decoded.
+
 ## Downloads
 
 Files a site downloads are saved in its downloads folder, `$XDG_STATE_HOME/valetkey/downloads/SITE`.

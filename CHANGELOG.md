@@ -34,6 +34,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Changed
 
+- Tool results show a page's address as its scheme and host, and put the path and query below it, cut to 200 characters and fenced as untrusted page data.
 - `valetkey allow` and `valetkey deny` now apply to a running session at once, and `valetkey forget` closes a running session before it deletes.
 - The proxy refuses a host when any address it resolves to is private or otherwise not public, not only when all are, because a mixed answer is how DNS rebinding looks.
 
