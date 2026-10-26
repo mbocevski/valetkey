@@ -4,15 +4,20 @@ import io
 import json
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from valetkey import __version__, cli, daemon, sites
 from valetkey.cli import main
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def test_without_arguments_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -555,3 +560,492 @@ def test_daemon_command_reports_why_it_cannot_start(
     monkeypatch.setattr(daemon, "run", fake_run)
     assert main(["daemon"]) == 1
     assert str(error) in capsys.readouterr().err
+
+
+# -- systemd units -------------------------------------------------------------------------
+
+SERVICE = cli.unit_template("valetkeyd.service")
+SOCKET = cli.unit_template("valetkeyd.socket")
+
+KEPT = [
+    "Requires=valetkeyd.socket",
+    "After=valetkeyd.socket",
+    "Restart=on-failure",
+    "NoNewPrivileges=yes",
+    "PrivateTmp=yes",
+    "PrivateDevices=yes",
+    "ProtectSystem=strict",
+    "ProtectHome=read-only",
+    "ProtectControlGroups=yes",
+    "ProtectKernelModules=yes",
+    "ProtectClock=yes",
+    "ProtectProc=invisible",
+    "ProcSubset=pid",
+    "RestrictNamespaces=user net pid ipc uts cgroup mnt",
+    "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+    "RestrictRealtime=yes",
+    "LockPersonality=yes",
+    "SystemCallArchitectures=native",
+    "SystemCallFilter=~@debug @obsolete @cpu-emulation @raw-io @reboot @swap @module",
+    "CapabilityBoundingSet=",
+    "UMask=0077",
+    "ExecStartPre=+/usr/bin/mkdir -p -m 0700 %S/valetkey %E/valetkey",
+    "ReadWritePaths=%S/valetkey %E/valetkey",
+    "RuntimeDirectory=valetkey agent-browser",
+    "RuntimeDirectoryPreserve=yes",
+]
+REJECTED = [
+    "MemoryDenyWriteExecute",  # Chromium's JIT hangs
+    "ProtectKernelTunables",  # bwrap cannot mount /proc
+    "ProtectKernelLogs",  # bwrap cannot mount /proc
+    "ProtectHostname",  # bwrap cannot set the sandbox hostname
+    "RestrictSUIDSGID",  # bwrap fails to start
+    "PrivateUsers",  # a user namespace inside a user namespace, and the peer's user ID
+    "PrivateIPC",  # a user manager cannot set it up; systemd ignores it with a warning
+    "StateDirectory",  # with a config directory of the same name it links state to config
+    "ConfigurationDirectory",  # the same compatibility link, and a mode warning
+]
+
+
+def directives(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line and not line.startswith(("#", "["))]
+
+
+@pytest.mark.parametrize("line", KEPT)
+def test_service_has_every_decided_directive(line: str) -> None:
+    assert line in directives(SERVICE)
+
+
+@pytest.mark.parametrize("name", REJECTED)
+def test_service_leaves_out_the_directives_that_break_the_sandbox(name: str) -> None:
+    assert not any(line.startswith(f"{name}=") for line in directives(SERVICE))
+    assert not any(
+        line.startswith("RestrictNamespaces=") and "yes" in line for line in SERVICE.splitlines()
+    )
+
+
+def test_service_is_socket_activated_and_has_no_install_section() -> None:
+    assert "[Install]" not in SERVICE
+    assert "ExecStart=@EXECUTABLE@ daemon" in SERVICE
+
+
+def test_socket_matches_the_daemon_contract() -> None:
+    assert directives(SOCKET) == [
+        "Description=valetkey daemon socket",
+        "ListenStream=%t/valetkey/daemon.sock",
+        "SocketMode=0600",
+        "DirectoryMode=0700",
+        "RemoveOnStop=yes",
+        "WantedBy=sockets.target",
+    ]
+
+
+@pytest.mark.parametrize("name", cli.UNIT_NAMES)
+def test_units_start_with_the_marker(name: str) -> None:
+    assert cli.unit_template(name).startswith(cli.UNIT_MARKER)
+
+
+def test_render_fills_in_the_executable() -> None:
+    text = cli.render_unit("valetkeyd.service", "/home/me/.local/bin/valetkey")
+    assert "ExecStart=/home/me/.local/bin/valetkey daemon\n" in text
+    assert cli.EXECUTABLE_PLACEHOLDER not in text
+    assert cli.render_unit("valetkeyd.socket", "/x") == SOCKET
+
+
+@pytest.mark.parametrize(
+    ("path", "word"),
+    [
+        ("/usr/bin/valetkey", "/usr/bin/valetkey"),
+        ("/home/a b/valetkey", '"/home/a b/valetkey"'),
+        ("/home/100%/valetkey", "/home/100%%/valetkey"),
+        ("/home/$x/valetkey", "/home/$$x/valetkey"),
+        ('/home/a"b/valetkey', '"/home/a\\"b/valetkey"'),
+        ("/home/a\\b/valetkey", '"/home/a\\\\b/valetkey"'),
+    ],
+)
+def test_exec_start_word_quotes_what_systemd_would_expand(path: str, word: str) -> None:
+    assert cli.exec_start_word(path) == word
+
+
+@pytest.mark.parametrize("path", ["/a\nb", "/a\0b"])
+def test_exec_start_word_refuses_a_path_it_cannot_write(path: str) -> None:
+    with pytest.raises(cli.CommandError):
+        cli.exec_start_word(path)
+
+
+def test_valetkey_executable_is_absolute_and_unresolved(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.write_text("", encoding="utf-8")
+    link = tmp_path / "bin" / "valetkey"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    assert cli.valetkey_executable(lambda _name: str(link)) == str(link)
+    assert cli.valetkey_executable(lambda _name: "bin/valetkey") == str(
+        Path("bin/valetkey").absolute()
+    )
+    with pytest.raises(cli.CommandError, match="not on PATH"):
+        cli.valetkey_executable(lambda _name: None)
+
+
+@pytest.fixture
+def units_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(cli, "valetkey_executable", lambda: "/opt/bin/valetkey")
+    return tmp_path / "config" / "systemd" / "user"
+
+
+def test_install_units_writes_both_files_and_prints_the_next_steps(
+    units_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, err = run(capsys, "install-units")
+    assert (status, err) == (0, "")
+    assert (units_home / "valetkeyd.socket").read_text(encoding="utf-8") == SOCKET
+    service = (units_home / "valetkeyd.service").read_text(encoding="utf-8")
+    assert "ExecStart=/opt/bin/valetkey daemon\n" in service
+    assert f"Wrote {units_home / 'valetkeyd.socket'}" in out
+    assert out.splitlines()[-2:] == [
+        "    systemctl --user daemon-reload",
+        "    systemctl --user enable --now valetkeyd.socket",
+    ]
+
+
+def test_install_units_replaces_its_own_files(
+    units_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run(capsys, "install-units")
+    (units_home / "valetkeyd.service").write_text(cli.UNIT_MARKER + " old\n", encoding="utf-8")
+    assert run(capsys, "install-units")[0] == 0
+    assert "ExecStart=/opt/bin/valetkey daemon" in (units_home / "valetkeyd.service").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_install_units_refuses_to_replace_a_file_it_did_not_write(
+    units_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    units_home.mkdir(parents=True)
+    mine = units_home / "valetkeyd.socket"
+    theirs = units_home / "valetkeyd.service"
+    theirs.write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
+    status, out, err = run(capsys, "install-units")
+    assert (status, out) == (1, "")
+    assert str(theirs) in err
+    assert "--force" in err
+    assert theirs.read_text(encoding="utf-8") == "[Service]\nExecStart=/bin/true\n"
+    assert not mine.exists()
+
+
+def test_install_units_refuses_a_file_that_is_not_text(
+    units_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    units_home.mkdir(parents=True)
+    (units_home / "valetkeyd.socket").write_bytes(b"\xff\xfe")
+    assert run(capsys, "install-units")[0] == 1
+
+
+def test_install_units_force_replaces_a_foreign_file(
+    units_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    units_home.mkdir(parents=True)
+    (units_home / "valetkeyd.service").write_text("mine\n", encoding="utf-8")
+    assert run(capsys, "install-units", "--force")[0] == 0
+    assert (
+        (units_home / "valetkeyd.service").read_text(encoding="utf-8").startswith(cli.UNIT_MARKER)
+    )
+
+
+def test_install_units_dry_run_prints_and_writes_nothing(
+    units_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, _ = run(capsys, "install-units", "--dry-run")
+    assert status == 0
+    assert f"Would write {units_home / 'valetkeyd.socket'}:" in out
+    assert "ExecStart=/opt/bin/valetkey daemon" in out
+    assert out.endswith("Nothing was written.\n")
+    assert not units_home.exists()
+
+
+def test_install_units_needs_valetkey_on_the_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    status, _, err = run(capsys, "install-units")
+    assert status == 1
+    assert "not on PATH" in err
+
+
+def test_install_units_uses_the_program_found_on_the_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    program = tmp_path / "bin" / "valetkey"
+    program.parent.mkdir()
+    program.write_text("#!/bin/sh\n", encoding="utf-8")
+    program.chmod(0o755)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("PATH", str(program.parent))
+    assert run(capsys, "install-units")[0] == 0
+    service = tmp_path / "config" / "systemd" / "user" / "valetkeyd.service"
+    assert f"ExecStart={program} daemon\n" in service.read_text(encoding="utf-8")
+
+
+# -- doctor --------------------------------------------------------------------------------
+
+BWRAP_PROBE = "--unshare-all"
+System = cli.System
+
+
+class FakeSystem:
+    """Answers the questions ``doctor`` asks from a table."""
+
+    def __init__(self, tmp_path: Path, **overrides: object) -> None:
+        self.tools = {
+            "bwrap": "/usr/bin/bwrap",
+            "chromium": "/usr/bin/chromium",
+            "agent-browser": "/usr/bin/agent-browser",
+        }
+        self.outputs: dict[str, tuple[int, str]] = {
+            "/usr/bin/bwrap --version": (0, "bubblewrap 0.13.1\n"),
+            "/usr/bin/chromium --version": (0, "Chromium 156.0.8078.47 Arch Linux\n"),
+            "/usr/bin/agent-browser --version": (0, "agent-browser 0.39.2\n"),
+            "systemctl --user is-active valetkeyd.socket": (3, "inactive\n"),
+        }
+        self.probe: tuple[int, str] = (0, "")
+        self.environ: dict[str, str] = {"XDG_RUNTIME_DIR": "/run/user/1000"}
+        self.display: Path | cli.login.DisplayError = Path("/run/user/1000/wayland-1")
+        self.units = tmp_path / "units"
+        self.calls: list[list[str]] = []
+        for key, value in overrides.items():
+            setattr(self, key, value)
+
+    def which(self, name: str) -> str | None:
+        return self.tools.get(name)
+
+    def run(self, args: Sequence[str]) -> tuple[int, str]:
+        self.calls.append(list(args))
+        if BWRAP_PROBE in args:
+            return self.probe
+        return self.outputs.get(" ".join(args), (-1, "no such program"))
+
+    def wayland(self) -> Path:
+        if isinstance(self.display, Exception):
+            raise self.display
+        return self.display
+
+    def system(self) -> cli.System:
+        return System(
+            which=self.which,
+            run=self.run,
+            environ=self.environ,
+            wayland=self.wayland,
+            units=self.units,
+        )
+
+
+def results(fake: FakeSystem) -> dict[str, tuple[str, str]]:
+    return {c.name: (c.status, c.detail) for c in cli.run_checks(fake.system())}
+
+
+def test_doctor_all_good(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path)
+    assert results(fake) == {
+        "bwrap": ("ok", "bwrap 0.13.1"),
+        "namespaces": ("ok", "unprivileged user namespaces work"),
+        "chromium": ("ok", "chromium 156"),
+        "agent-browser": ("ok", "agent-browser 0.39.2"),
+        "runtime-dir": ("ok", "XDG_RUNTIME_DIR=/run/user/1000"),
+        "display": ("ok", "Wayland display /run/user/1000/wayland-1"),
+        "units": ("info", "systemd units not installed; run `valetkey install-units`"),
+        "socket": ("info", "valetkeyd.socket is inactive"),
+    }
+    probe = next(call for call in fake.calls if BWRAP_PROBE in call)
+    assert probe[0] == "/usr/bin/bwrap"
+    assert probe[-1] == "/usr/bin/true"
+    assert all(flag in probe for flag in ("--ro-bind", "--dev", "--proc"))
+
+
+def test_doctor_bwrap_missing(tmp_path: Path) -> None:
+    found = results(FakeSystem(tmp_path, tools={"chromium": "/usr/bin/chromium"}))
+    assert found["bwrap"] == ("fail", "bwrap not found; install bubblewrap")
+    assert found["namespaces"] == ("fail", "bwrap is missing")
+
+
+def test_doctor_bwrap_without_a_version(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path)
+    fake.outputs["/usr/bin/bwrap --version"] = (1, "")
+    assert results(fake)["bwrap"] == ("ok", "bwrap version unknown")
+
+
+def test_doctor_namespaces_blocked(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path, probe=(1, "bwrap: No permissions to create a new namespace\n"))
+    assert results(fake)["namespaces"] == (
+        "fail",
+        "bwrap cannot make a sandbox: bwrap: No permissions to create a new namespace",
+    )
+    fake.probe = (1, "")
+    assert results(fake)["namespaces"][1].endswith("no output")
+
+
+def test_doctor_chromium_problems(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path)
+    fake.tools.pop("chromium")
+    assert results(fake)["chromium"] == ("fail", "chromium not found")
+    fake.tools["chromium"] = "/usr/bin/chromium"
+    fake.outputs["/usr/bin/chromium --version"] = (0, "garbage\n")
+    assert results(fake)["chromium"] == ("fail", "cannot read the version of /usr/bin/chromium")
+
+
+def test_doctor_agent_browser_problems(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path)
+    fake.tools.pop("agent-browser")
+    assert results(fake)["agent-browser"] == ("fail", "agent-browser not found")
+    fake.tools["agent-browser"] = "/usr/bin/agent-browser"
+    fake.outputs["/usr/bin/agent-browser --version"] = (0, "agent-browser 0.38.9\n")
+    status, detail = results(fake)["agent-browser"]
+    assert status == "fail"
+    assert "too old" in detail
+    fake.outputs["/usr/bin/agent-browser --version"] = (0, "nope\n")
+    assert results(fake)["agent-browser"] == (
+        "fail",
+        "cannot read the version of /usr/bin/agent-browser",
+    )
+
+
+@pytest.mark.parametrize("environ", [{}, {"XDG_RUNTIME_DIR": ""}, {"XDG_RUNTIME_DIR": "run"}])
+def test_doctor_needs_a_runtime_dir(tmp_path: Path, environ: dict[str, str]) -> None:
+    assert results(FakeSystem(tmp_path, environ=environ))["runtime-dir"] == (
+        "fail",
+        "XDG_RUNTIME_DIR is not set to an absolute path",
+    )
+
+
+def test_doctor_a_missing_display_is_only_a_warning(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path, display=cli.login.NoDisplayError("no desktop session"))
+    status, detail = results(fake)["display"]
+    assert status == "warn"
+    assert "no desktop session" in detail
+
+
+def test_doctor_reports_installed_units_and_an_active_socket(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path)
+    fake.units.mkdir()
+    for name in cli.UNIT_NAMES:
+        (fake.units / name).write_text("x", encoding="utf-8")
+    fake.outputs["systemctl --user is-active valetkeyd.socket"] = (0, "active\n")
+    found = results(fake)
+    assert found["units"] == ("info", f"systemd units installed in {fake.units}")
+    assert found["socket"] == ("info", "valetkeyd.socket is active")
+
+
+def test_doctor_when_systemd_cannot_be_reached(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path)
+    fake.outputs["systemctl --user is-active valetkeyd.socket"] = (-1, "no such file")
+    assert results(fake)["socket"] == ("info", "systemd user session not reachable")
+    fake.outputs["systemctl --user is-active valetkeyd.socket"] = (1, "")
+    assert results(fake)["socket"] == ("info", "systemd user session not reachable")
+
+
+def test_doctor_command_output_and_exit_status(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeSystem(tmp_path, tools={"bwrap": "/usr/bin/bwrap"})
+    monkeypatch.setattr(cli, "System", fake.system)
+    status, out, _ = run(capsys, "doctor")
+    assert status == 1
+    lines = out.splitlines()
+    assert lines[0] == "ok    bwrap 0.13.1"
+    assert "FAIL  chromium not found" in lines
+    assert "FAIL  agent-browser not found" in lines
+    assert lines[-1] == "info  valetkeyd.socket is inactive"
+
+
+def test_doctor_exit_status_is_zero_when_only_warnings_remain(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeSystem(tmp_path, display=cli.login.NoDisplayError("none"))
+    monkeypatch.setattr(cli, "System", fake.system)
+    status, out, _ = run(capsys, "doctor")
+    assert status == 0
+    assert any(line.startswith("warn  ") for line in out.splitlines())
+
+
+def test_doctor_json_shape(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "System", FakeSystem(tmp_path).system)
+    status, out, _ = run(capsys, "doctor", "--json")
+    rows = json.loads(out)
+    assert status == 0
+    assert rows[0] == {"check": "bwrap", "status": "ok", "detail": "bwrap 0.13.1"}
+    assert [row["check"] for row in rows] == [
+        "bwrap",
+        "namespaces",
+        "chromium",
+        "agent-browser",
+        "runtime-dir",
+        "display",
+        "units",
+        "socket",
+    ]
+    assert {row["status"] for row in rows} <= {"ok", "fail", "warn", "info"}
+
+
+def test_default_system_asks_the_machine(tmp_path: Path) -> None:
+    status, output = cli._run([sys.executable, "-c", "print('hi')"])  # noqa: SLF001 - the default runner
+    assert (status, output) == (0, "hi\n")
+    assert cli._run([str(tmp_path / "missing")])[0] == -1  # noqa: SLF001
+    system = cli.System()
+    assert system.which("sh") is not None
+    assert system.units.name == "user"
+
+
+# -- the units under real systemd ----------------------------------------------------------
+
+
+def _systemd_user_usable() -> bool:
+    if shutil.which("systemd-run") is None or shutil.which("bwrap") is None:
+        return False
+    state = subprocess.run(
+        ["systemctl", "--user", "is-system-running"],  # noqa: S607 - from PATH
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return state.stdout.strip() in {"running", "degraded"}
+
+
+SKIPPED_PROPERTIES = {
+    "ExecStart", "ExecStartPre", "ReadWritePaths", "Type", "Restart", "TimeoutStopSec"
+}  # fmt: skip
+
+
+def hardening_properties() -> list[str]:
+    """The sandboxing lines of the service file, as ``systemd-run -p`` arguments."""
+    properties: list[str] = []
+    for line in directives(SERVICE.split("[Service]")[1]):
+        name = line.split("=")[0]
+        if name in {
+            "ExecStart",
+            "ExecStartPre",
+            "ReadWritePaths",
+            "Type",
+            "Restart",
+            "TimeoutStopSec",
+        }:
+            continue
+        properties += ["-p", line]
+    return properties
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _systemd_user_usable(), reason="needs systemd --user and bwrap")
+def test_bubblewrap_still_works_under_the_service_hardening() -> None:
+    command = [
+        "systemd-run", "--user", "--wait", "--pipe", "--collect", "--quiet",
+        *hardening_properties(),
+        shutil.which("bwrap") or "bwrap", "--unshare-all", "--ro-bind", "/usr", "/usr",
+        "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64",
+        "--dev", "/dev", "--proc", "/proc", "/usr/bin/true",
+    ]  # fmt: skip
+    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=60)  # noqa: S603
+    assert result.returncode == 0, result.stderr

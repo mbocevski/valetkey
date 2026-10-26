@@ -7,16 +7,19 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
+from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path  # the command-line framework reads the annotation at runtime
 from typing import TYPE_CHECKING, Annotated
 
 from cyclopts import App, Parameter
 
-from valetkey import __version__, daemon, sites
+from valetkey import __version__, daemon, login, sandbox, sessions, sites
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 app = App(
     name="valetkey",
@@ -351,6 +354,304 @@ def run_daemon(
     except (daemon.AlreadyRunningError, sites.RuntimeDirUnavailableError) as error:
         sys.stderr.write(f"valetkeyd: {error}\n")
         return 1
+
+
+# -- systemd units -------------------------------------------------------------------------
+
+UNIT_NAMES = ("valetkeyd.socket", "valetkeyd.service")
+UNIT_MARKER = "# Written by `valetkey install-units`."
+"""The first words of every unit file valetkey writes. A file without them is not valetkey's."""
+EXECUTABLE_PLACEHOLDER = "@EXECUTABLE@"
+SOCKET_UNIT = "valetkeyd.socket"
+NEXT_COMMANDS = (
+    "systemctl --user daemon-reload",
+    f"systemctl --user enable --now {SOCKET_UNIT}",
+)
+
+
+def unit_template(name: str) -> str:
+    """Return the text of the packaged unit file ``name``, placeholders included."""
+    return resources.files("valetkey").joinpath("units", name).read_text(encoding="utf-8")
+
+
+def exec_start_word(path: str) -> str:
+    """Quote ``path`` for a systemd ``ExecStart=`` line.
+
+    systemd expands ``%`` and ``$`` and splits on spaces, so those are doubled or quoted. A
+    path with a newline cannot be written at all.
+    """
+    if "\n" in path or "\0" in path:
+        message = f"cannot write {path!r} into a unit file"
+        raise CommandError(message)
+    word = path.replace("%", "%%").replace("$", "$$")
+    if any(c in word for c in " \t\"'\\"):
+        word = '"' + word.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return word
+
+
+def render_unit(name: str, executable: str) -> str:
+    """Return the unit file ``name`` with ``executable`` filled in."""
+    return unit_template(name).replace(EXECUTABLE_PLACEHOLDER, exec_start_word(executable))
+
+
+def is_ours(path: Path) -> bool:
+    """Tell whether ``path`` is a unit file that ``install-units`` wrote."""
+    try:
+        return path.read_text(encoding="utf-8").startswith(UNIT_MARKER)
+    except OSError, UnicodeDecodeError:
+        return False
+
+
+def unit_directory(roots: sites.Roots) -> Path:
+    """Return the directory of the person's systemd user units."""
+    return roots.config / "systemd" / "user"
+
+
+def valetkey_executable(which: Callable[[str], str | None] = shutil.which) -> str:
+    """Return the absolute path of the ``valetkey`` program, as found on ``PATH``.
+
+    The path is not resolved further, so a ``uv tool`` link in ``~/.local/bin`` keeps working
+    after the tool is upgraded.
+    """
+    found = which("valetkey")
+    if found is None:
+        message = "valetkey is not on PATH; install it with `uv tool install valetkey` first"
+        raise CommandError(message)
+    return str(Path(found).absolute())
+
+
+def plan_units(directory: Path, executable: str, *, force: bool) -> dict[str, str]:
+    """Return the text of each unit file to write, or refuse to replace a file that is not ours."""
+    files = {name: render_unit(name, executable) for name in UNIT_NAMES}
+    foreign = [
+        str(directory / name)
+        for name in UNIT_NAMES
+        if (directory / name).exists() and not is_ours(directory / name) and not force
+    ]
+    if foreign:
+        message = (
+            f"{', '.join(foreign)} exist and valetkey did not write them; "
+            "use --force to replace them"
+        )
+        raise CommandError(message)
+    return files
+
+
+@app.command
+def install_units(
+    *,
+    dry_run: Annotated[
+        bool,
+        Parameter(name="--dry-run", negative="", help="Print the files instead of writing them."),
+    ] = False,
+    force: Annotated[
+        bool,
+        Parameter(name="--force", negative="", help="Replace files that valetkey did not write."),
+    ] = False,
+) -> int:
+    """Write the systemd user units that run the valetkey daemon.
+
+    The units go to the systemd user directory (``$XDG_CONFIG_HOME/systemd/user``). The command
+    refuses to replace a file it did not write, and prints the commands that start the
+    socket. It never runs them.
+    """
+    directory = unit_directory(sites.roots_from_env())
+    try:
+        files = plan_units(directory, valetkey_executable(), force=force)
+    except CommandError as error:
+        return _fail(error)
+    if dry_run:
+        for name, text in files.items():
+            _say(f"Would write {directory / name}:\n\n{text}")
+        _say("Nothing was written.")
+        return 0
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, text in files.items():
+        (directory / name).write_text(text, encoding="utf-8")
+        _say(f"Wrote {directory / name}")
+    _say("\nTo start the daemon, run:\n")
+    for command in NEXT_COMMANDS:
+        _say(f"    {command}")
+    return 0
+
+
+# -- doctor --------------------------------------------------------------------------------
+
+
+LABELS = {"ok": "ok", "fail": "FAIL", "warn": "warn", "info": "info"}
+
+
+@dataclass(frozen=True, slots=True)
+class Check:
+    """The result of one check: ``status`` is ``ok``, ``fail``, ``warn`` or ``info``."""
+
+    name: str
+    status: str
+    detail: str
+
+
+def _run(args: Sequence[str]) -> tuple[int, str]:
+    """Run ``args`` and return its exit status and its combined output (-1 if it did not run)."""
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argument lists, no shell
+            list(args), capture_output=True, text=True, check=False, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return -1, str(error)
+    return result.returncode, result.stdout + result.stderr
+
+
+@dataclass(frozen=True, slots=True)
+class System:
+    """Everything ``doctor`` asks the machine, so tests can answer instead."""
+
+    which: Callable[[str], str | None] = shutil.which
+    run: Callable[[Sequence[str]], tuple[int, str]] = _run
+    environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
+    wayland: Callable[[], Path] = login.find_wayland_socket
+    units: Path = field(default_factory=lambda: unit_directory(sites.roots_from_env()))
+
+
+def _last_line(text: str) -> str:
+    lines = text.strip().splitlines()
+    return lines[-1] if lines else "no output"
+
+
+def _tool_version(system: System, tool: str) -> tuple[str | None, str]:
+    """Return the path of ``tool`` and its ``--version`` output."""
+    path = system.which(tool)
+    if path is None:
+        return None, ""
+    return path, system.run([path, "--version"])[1]
+
+
+def check_bwrap(system: System) -> list[Check]:
+    """Check that bubblewrap is installed and that it can make the namespaces valetkey needs."""
+    path, output = _tool_version(system, "bwrap")
+    if path is None:
+        missing = "bwrap not found; install bubblewrap"
+        return [Check("bwrap", "fail", missing), Check("namespaces", "fail", "bwrap is missing")]
+    words = output.split()
+    version = words[-1] if words else "version unknown"
+    probe = [
+        path,
+        "--unshare-all",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        *sandbox.system_link_args(),
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "/usr/bin/true",
+    ]
+    status, text = system.run(probe)
+    if status == 0:
+        namespaces = Check("namespaces", "ok", "unprivileged user namespaces work")
+    else:
+        detail = f"bwrap cannot make a sandbox: {_last_line(text)}"
+        namespaces = Check("namespaces", "fail", detail)
+    return [Check("bwrap", "ok", f"bwrap {version}"), namespaces]
+
+
+def check_chromium(system: System) -> Check:
+    """Check that Chromium is installed and report its major version."""
+    path, output = _tool_version(system, "chromium")
+    if path is None:
+        return Check("chromium", "fail", "chromium not found")
+    try:
+        major = sandbox.parse_chrome_major(output)
+    except ValueError:
+        return Check("chromium", "fail", f"cannot read the version of {path}")
+    return Check("chromium", "ok", f"chromium {major}")
+
+
+def check_agent_browser(system: System) -> Check:
+    """Check that agent-browser is installed and new enough."""
+    path, output = _tool_version(system, "agent-browser")
+    if path is None:
+        return Check("agent-browser", "fail", "agent-browser not found")
+    try:
+        version = sessions.parse_version(output)
+        sessions.check_version(version)
+    except ValueError:
+        return Check("agent-browser", "fail", f"cannot read the version of {path}")
+    except sessions.VersionError as error:
+        return Check("agent-browser", "fail", str(error))
+    return Check("agent-browser", "ok", f"agent-browser {'.'.join(map(str, version))}")
+
+
+def check_runtime_dir(system: System) -> Check:
+    """Check that ``XDG_RUNTIME_DIR`` is set, which the daemon and its sockets need."""
+    value = system.environ.get("XDG_RUNTIME_DIR", "")
+    if value and Path(value).is_absolute():
+        return Check("runtime-dir", "ok", f"XDG_RUNTIME_DIR={value}")
+    return Check("runtime-dir", "fail", "XDG_RUNTIME_DIR is not set to an absolute path")
+
+
+def check_display(system: System) -> Check:
+    """Look for a Wayland display; only logging in needs one, so a miss is a warning."""
+    try:
+        socket = system.wayland()
+    except login.DisplayError as error:
+        return Check("display", "warn", f"no Wayland display ({error}); logging in needs one")
+    return Check("display", "ok", f"Wayland display {socket}")
+
+
+def check_units(system: System) -> list[Check]:
+    """Report, without judging, whether the units are installed and the socket is active."""
+    missing = [name for name in UNIT_NAMES if not (system.units / name).is_file()]
+    if missing:
+        installed = Check(
+            "units", "info", "systemd units not installed; run `valetkey install-units`"
+        )
+    else:
+        installed = Check("units", "info", f"systemd units installed in {system.units}")
+    status, output = system.run(["systemctl", "--user", "is-active", SOCKET_UNIT])
+    if status == -1 or not output.strip():
+        detail = "systemd user session not reachable"
+    else:
+        detail = f"{SOCKET_UNIT} is {_last_line(output)}"
+    return [installed, Check("socket", "info", detail)]
+
+
+def run_checks(system: System) -> list[Check]:
+    """Run every check and return the results in the order they are shown."""
+    return [
+        *check_bwrap(system),
+        check_chromium(system),
+        check_agent_browser(system),
+        check_runtime_dir(system),
+        check_display(system),
+        *check_units(system),
+    ]
+
+
+@app.command
+def doctor(
+    *,
+    as_json: Annotated[
+        bool, Parameter(name="--json", negative="", help="Print a JSON array instead of lines.")
+    ] = False,
+) -> int:
+    """Check that this machine can run valetkey.
+
+    Each check prints one line: ok, FAIL, warn or info. Required checks are bubblewrap and
+    user namespaces, Chromium, agent-browser 0.39 or newer, and XDG_RUNTIME_DIR. A missing
+    Wayland display is a warning, because only logging in needs one. The state of the systemd
+    units is shown for information. The exit status is 1 when a required check fails. With
+    --json, each check is an object with the keys check, status (ok, fail, warn or info) and
+    detail.
+    """
+    checks = run_checks(System())
+    if as_json:
+        rows = [{"check": c.name, "status": c.status, "detail": c.detail} for c in checks]
+        _say(json.dumps(rows, indent=2))
+    else:
+        for check in checks:
+            _say(f"{LABELS[check.status]:<6}{check.detail}")
+    return 1 if any(c.status == "fail" for c in checks) else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

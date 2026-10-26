@@ -12,6 +12,20 @@ anywhere else.
 Early development. The browser itself is not usable yet. The `valetkey` command can list sites and
 change which hosts each one may reach.
 
+## Install
+
+```sh
+uv tool install valetkey
+valetkey install-units
+systemctl --user daemon-reload
+systemctl --user enable --now valetkeyd.socket
+valetkey doctor
+```
+
+`valetkey install-units` writes two systemd user units and prints the two `systemctl` commands
+above without running them. The socket starts the daemon when a client connects. `valetkey doctor`
+checks the rest of the setup and says what to fix.
+
 ## Usage
 
 <!-- begin: valetkey --help -->
@@ -24,7 +38,9 @@ Commands:
   allow: Allow a host, and its subdomains, for a site.
   daemon: Run the valetkeyd daemon in the foreground.
   deny: Stop allowing a host for a site.
+  doctor: Check that this machine can run valetkey.
   forget: Delete a site's policy, login profile and downloads.
+  install-units: Write the systemd user units that run the valetkey daemon.
   sites: List the sites valetkey knows.
   --help, -h: Display this message and exit.
   --version: Display application version.
@@ -105,6 +121,47 @@ Parameters:
   --yes: Delete without asking. [default: False]
 ```
 <!-- end: valetkey forget --help -->
+
+### Setting up
+
+`valetkey install-units` replaces only unit files it wrote itself, unless you pass `--force`. Add
+`--dry-run` to see the files first. `valetkey doctor` prints one line per check and exits with
+status 1 when a required check fails. A missing Wayland display is only a warning, because only
+logging in needs one.
+
+<!-- begin: valetkey install-units --help -->
+```text
+Usage: valetkey install-units [OPTIONS]
+
+Write the systemd user units that run the valetkey daemon.
+
+The units go to the systemd user directory ($XDG_CONFIG_HOME/systemd/user). The
+command refuses to replace a file it did not write, and prints the commands that
+start the socket. It never runs them.
+
+Parameters:
+  --dry-run: Print the files instead of writing them. [default: False]
+  --force: Replace files that valetkey did not write. [default: False]
+```
+<!-- end: valetkey install-units --help -->
+
+<!-- begin: valetkey doctor --help -->
+```text
+Usage: valetkey doctor [OPTIONS]
+
+Check that this machine can run valetkey.
+
+Each check prints one line: ok, FAIL, warn or info. Required checks are
+bubblewrap and user namespaces, Chromium, agent-browser 0.39 or newer, and
+XDG_RUNTIME_DIR. A missing Wayland display is a warning, because only logging in
+needs one. The state of the systemd units is shown for information. The exit
+status is 1 when a required check fails. With --json, each check is an object
+with the keys check, status (ok, fail, warn or info) and detail.
+
+Parameters:
+  --json: Print a JSON array instead of lines. [default: False]
+```
+<!-- end: valetkey doctor --help -->
 
 ## How it will work
 

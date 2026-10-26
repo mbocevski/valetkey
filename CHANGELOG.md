@@ -12,3 +12,5 @@ Changes that affect users of valetkey. The format follows
 - The `valetkey sites` command, which lists your sites, with `--json` for scripts.
 - The `valetkey allow` and `valetkey deny` commands, which add or remove a host a site may reach.
 - The `valetkey forget` command, which deletes a site's policy, login and downloads after asking.
+- The `valetkey install-units` command, which writes the systemd user units for the daemon.
+- The `valetkey doctor` command, which checks that bubblewrap, Chromium and agent-browser are ready.

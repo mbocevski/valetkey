@@ -1,0 +1,12 @@
+# Written by `valetkey install-units`. Running it again replaces this file.
+[Unit]
+Description=valetkey daemon socket
+
+[Socket]
+ListenStream=%t/valetkey/daemon.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

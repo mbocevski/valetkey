@@ -1,0 +1,41 @@
+# Written by `valetkey install-units`. Running it again replaces this file.
+[Unit]
+Description=valetkey daemon
+Requires=valetkeyd.socket
+After=valetkeyd.socket
+
+[Service]
+Type=exec
+ExecStart=@EXECUTABLE@ daemon
+Restart=on-failure
+TimeoutStopSec=30
+
+# The daemon writes its state and configuration directories and the runtime directories below;
+# the rest of the file system is read-only to it. The first command runs without the sandbox
+# so the directories exist before it is set up.
+ExecStartPre=+/usr/bin/mkdir -p -m 0700 %S/valetkey %E/valetkey
+ReadWritePaths=%S/valetkey %E/valetkey
+RuntimeDirectory=valetkey agent-browser
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+
+# Hardening. The browsers run in bubblewrap sandboxes, which need unprivileged user
+# namespaces and a /proc mount, so the directives that would block either are left out.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectClock=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=user net pid ipc uts cgroup mnt
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@debug @obsolete @cpu-emulation @raw-io @reboot @swap @module
+CapabilityBoundingSet=
+UMask=0077
