@@ -95,15 +95,28 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 from urllib.parse import urlsplit
 
-from valetkey import clicks, client, downloads, expiry, learn, login, sandbox, sessions, sites
+from valetkey import (
+    approvals,
+    clicks,
+    client,
+    downloads,
+    expiry,
+    learn,
+    login,
+    sandbox,
+    sessions,
+    sites,
+)
 from valetkey.client import MAX_LINE_BYTES, DaemonError
-from valetkey.proxy import Mode, Proxy
+from valetkey.proxy import NOT_ALLOWED, Mode, Proxy
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
 logger = logging.getLogger(__name__)
 
+MAX_REFUSED_HOSTS = 2000
+"""How many refused hosts are remembered per site."""
 SD_LISTEN_FDS_START = 3
 """The first file descriptor systemd passes to a socket-activated service."""
 STATES = ("idle", "login", "session")
@@ -403,6 +416,32 @@ def _watching(call: Callable[[BrowserSession], Any]) -> Callable[[BrowserSession
     return run
 
 
+_ASK_OUTCOMES = {
+    "no": ("denied", "The person said no."),
+    "timeout": ("expired", "Nobody answered in time. You may ask again."),
+    "none": ("could_not_ask", "Nobody could be asked from here. Run: {manual}"),
+    "broken": ("could_not_ask", "The approval command could not run. Run: {manual}"),
+}
+"""How each way the approval command can end, other than yes, is reported."""
+
+
+def _answer(site: str, host: str, result: str, message: str) -> dict[str, Any]:
+    return {"site": site, "host": host, "result": result, "message": message}
+
+
+def _allow_answer(site: str, host: str, found: approvals.Eligibility) -> dict[str, Any]:
+    """Answer for a host that is not to be asked about: allowed already, or not eligible."""
+    result = "allowed" if found.status == "already_allowed" else "not_eligible"
+    return _answer(site, host, result, found.message)
+
+
+def _remember_refusals(state: _Site, proxy: Proxy) -> None:
+    """Note the hosts ``proxy`` refused for the policy, so they can be asked about later."""
+    for refusal in proxy.refused_since(0)[0]:
+        if refusal.reason == NOT_ALLOWED and len(state.refused_hosts) < MAX_REFUSED_HOSTS:
+            state.refused_hosts[refusal.host] = None
+
+
 def _download_entry(item: downloads.Download) -> dict[str, Any]:
     """Describe a download for a client. The page chose the name in the path, so it is untrusted."""
     return {"path": untrusted(str(item.path)), "size": item.size, "mime": item.mime}
@@ -438,6 +477,13 @@ class _Site:
     summary: str | None = None
     since: datetime | None = None
     host: str | None = None
+    refused_hosts: dict[str, None] = field(default_factory=dict)
+    """Hosts the proxy refused for this site because the policy did not allow them, in any
+    session since the daemon started. Only these can be asked about."""
+    denied_hosts: set[str] = field(default_factory=set)
+    """Hosts the approval command said no to, so the agent is not allowed to ask again."""
+    ask_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """One question at a time per site."""
 
 
 @dataclass(eq=False)
@@ -489,9 +535,13 @@ class Daemon:
         download_wait: float = downloads.FINISH_SECONDS,
         announcer: Announcer | None = None,
         poll_interval: float = POLL_INTERVAL,
+        approve_timeout: float = approvals.COMMAND_TIMEOUT,
+        user_environment: Callable[[], Mapping[str, str]] = login.systemd_user_environment,
     ) -> None:
         """Create a daemon for the directories in ``roots``. Nothing listens until :func:`run`."""
         self.roots = roots
+        self._approve_timeout = approve_timeout
+        self._user_environment = user_environment
         self._session_factory = session_factory or start_session
         self._login_starter = login_starter
         self._proxy_options = dict(proxy_options or {})
@@ -524,6 +574,9 @@ class Daemon:
             "reload_policy": self._op_reload_policy,
             "login": self._op_login,
             "downloads": self._op_downloads,
+            "allow_check": self._op_allow_check,
+            "allow_apply": self._op_allow_apply,
+            "allow_ask": self._op_allow_ask,
         }
 
     # -- serving --
@@ -838,6 +891,115 @@ class Daemon:
             "live": live,
         }
 
+    # -- operations: asking the person to widen a site's key --
+    #
+    # These are the only operations that add a host to a policy (a finished login, run by the
+    # person at a window, is the other way). See the module `approvals` for the trust boundary.
+
+    async def _eligibility(
+        self, site: str, host: object
+    ) -> tuple[sites.Policy, str, approvals.Eligibility]:
+        try:
+            name = approvals.validate_host(host)
+        except ValueError as error:
+            _fail("bad_request", str(error))
+        policy = await self._load_policy(site)
+        state = self._state(site)
+        if state.proxy is not None:
+            _remember_refusals(state, state.proxy)
+        return policy, name, approvals.eligibility(policy, name, state.refused_hosts)
+
+    async def _op_allow_check(
+        self, _connection: _Connection, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Say whether ``host`` may be asked about for a site, and whether the daemon can ask."""
+        site = _site_arg(args)
+        _policy, host, found = await self._eligibility(site, args.get("host"))
+        state = self._state(site)
+        return {
+            "site": site,
+            "host": host,
+            "status": found.status,
+            "message": found.message,
+            "seen_during_login": found.seen_during_login,
+            "denied": host in state.denied_hosts,
+            "can_ask": await self._approve_command() is not None,
+        }
+
+    async def _approve_command(self) -> tuple[str, ...] | None:
+        """Return the configured approval command; an unusable config counts as none."""
+        try:
+            return (await asyncio.to_thread(approvals.load_config, self.roots)).approve_command
+        except approvals.ConfigError:
+            logger.exception("config.json cannot be used")
+            return None
+
+    async def _op_allow_apply(
+        self, _connection: _Connection, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Grant ``host`` because the MCP client's interface returned a yes.
+
+        The daemon takes the word of the MCP server process for it (see :mod:`approvals`). The
+        host must still be eligible: refused, or excluded.
+        """
+        site = _site_arg(args)
+        if args.get("channel") != "elicitation":
+            _fail("bad_request", 'this operation is for the "elicitation" channel')
+        policy, host, found = await self._eligibility(site, args.get("host"))
+        if found.status != "eligible":
+            return _allow_answer(site, host, found)
+        return await self._grant(site, host, policy)
+
+    async def _op_allow_ask(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
+        """Ask through the approval command, and grant if it exits with status 0."""
+        site = _site_arg(args)
+        reason = approvals.sanitize_reason(args.get("reason"))
+        state = self._state(site)
+        async with state.ask_lock:
+            policy, host, found = await self._eligibility(site, args.get("host"))
+            if found.status != "eligible":
+                return _allow_answer(site, host, found)
+            if host in state.denied_hosts:
+                return _answer(site, host, "denied", "The person already said no.")
+            outcome = await self._consult(site, host, found.seen_during_login, reason)
+            if outcome == "yes":
+                return await self._grant(site, host, policy)
+            if outcome == "no":
+                state.denied_hosts.add(host)
+            result, message = _ASK_OUTCOMES[outcome]
+            return _answer(
+                site, host, result, message.format(manual=approvals.manual_command(site, host))
+            )
+
+    async def _consult(self, site: str, host: str, seen: bool, reason: str) -> str:  # noqa: FBT001
+        """Run the approval command and return ``yes``, ``no``, ``timeout``, ``none`` or ``broken``.
+
+        ``none`` means no command is configured (or its config is unusable), ``broken`` that it
+        could not be started.
+        """
+        command = await self._approve_command()
+        if command is None:
+            return "none"
+        request = {"site": site, "host": host, "seen_during_login": seen, "reason": reason}
+        env = await asyncio.to_thread(
+            approvals.command_environment, os.environ, self._user_environment
+        )
+        try:
+            return await approvals.run_command(command, request, env, self._approve_timeout)
+        except OSError as error:
+            logger.warning("the approval command could not run: %s", error)
+            return "broken"
+
+    async def _grant(self, site: str, host: str, policy: sites.Policy) -> dict[str, Any]:
+        """Add ``host`` to the site's policy, save it, and give it to the live proxy."""
+        changed, _added, _removed = sites.allow_host(policy, host)
+        await asyncio.to_thread(sites.save_policy, self.roots, changed)
+        state = self._state(site)
+        if state.proxy is not None:
+            state.proxy.update_policy(changed)
+        logger.info("allowed %s for %s", host, site)
+        return _answer(site, host, "allowed", f"{host} is now allowed for {site}.")
+
     # -- operations: login --
 
     async def _op_login(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
@@ -1009,6 +1171,7 @@ class Daemon:
                 # The browser is gone, so what is left in its folder is finished: keep it.
                 await asyncio.to_thread(downloads.sweep, paths.incoming_dir, paths.downloads_dir)
             if proxy is not None:
+                _remember_refusals(state, proxy)
                 await proxy.close()
             if session is not None or proxy is not None:
                 directory = sessions.session_paths(self.roots, state.name).directory

@@ -13,8 +13,10 @@ an error result the model can read. That is all this server needs, so the low-le
 its hand-written schemas and handlers, would add nothing.
 
 **What the tools leave out.** There is no script evaluation, no launch option, no upload, no
-cookie or storage access, and no way to change a site's policy or delete a site. Those stay with
-the person at the command line.
+cookie or storage access, and no way to delete a site. The one way the policy can change is
+``browser_allow``, which only *asks*: the person answers in the client's own interface (or
+through the approval command the daemon runs), and nothing is allowed without a yes. See
+:mod:`valetkey.approvals`.
 
 **Untrusted text.** Everything that came from a web page (titles, the page's text tree) is
 fenced and labelled as data, because a page can contain text written to look like instructions.
@@ -34,15 +36,17 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.mcpserver import Context, Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
 
-from valetkey import client, sites
+from valetkey import approvals, client, sites
 from valetkey.client import Client, DaemonError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+logger = logging.getLogger(__name__)
 
 START_TIMEOUT = 15.0
 """Seconds to wait for a daemon this process started."""
@@ -513,6 +517,16 @@ DESCRIPTIONS = {
         "Files are saved on this machine and are never opened. File names come from the website."
     ),
     "browser_screenshot": "Take a screenshot of the page and return it as an image.",
+    "browser_allow": (
+        "Ask the person to let a site's browser reach one more host. Only a host that was "
+        "refused for the site, or left out when they logged in, can be asked about; give one "
+        "exact host name per call, no wildcards or URLs. Nothing is allowed unless the person "
+        "says yes. Results: allowed (the next navigation to the host will load); denied (the "
+        "person said no: never ask again for that host); expired (no answer: you may ask "
+        "again); could_not_ask (nobody could be asked from here: tell the person to run the "
+        "command in the result); not_eligible (it cannot be asked about). Your reason is shown "
+        "to the person as your claim, not as fact."
+    ),
     "browser_close": (
         "End the site's browser. The login stays saved, so browser_open works again later."
     ),
@@ -520,11 +534,66 @@ DESCRIPTIONS = {
 """What the model reads about each tool."""
 
 
+class _Confirm(BaseModel):
+    """The one question put to the person."""
+
+    allow: bool = Field(default=True, description="Allow this host for this site.")
+
+
+ELICIT_SECONDS = 300.0
+"""How long the client's interface may take to get an answer from the person."""
+_NEXT_STEPS = {
+    "allowed": "The next navigation to it will load.",
+    "denied": "Do not ask again for this host.",
+    "expired": "You may ask again.",
+    "could_not_ask": "Tell the person to run the command above themselves.",
+    "not_eligible": "",
+}
+
+
+def allow_text(result: str, host: str, message: str, site: str) -> str:
+    """Say how a request to allow ``host`` ended, in words that keep the results apart."""
+    if result == "could_not_ask" and "valetkey allow" not in message:
+        message = f"{message} Run: {approvals.manual_command(site, host)}"
+    steps = _NEXT_STEPS.get(result, "")
+    return f"Result: {result}. {message}" + (f" {steps}" if steps else "")
+
+
+def can_elicit(ctx: Context) -> bool:
+    """Tell whether the client declared that it can show a form to the person."""
+    capabilities = ctx.request_context.session.client_capabilities
+    elicitation = capabilities.elicitation if capabilities is not None else None
+    return elicitation is not None and (elicitation.form is not None or elicitation.url is None)
+
+
+async def _elicit(ctx: Context, message: str) -> Literal["yes", "denied", "expired"] | None:
+    """Put ``message`` to the person through the client, or return ``None`` if that can't be done.
+
+    Accepting means yes (unless the one checkbox was cleared), declining means no, and
+    dismissing or not answering in time means the question expired. A client that did not
+    declare the capability, or that fails to show the form, leaves the next channel to try.
+    """
+    if not can_elicit(ctx):
+        return None
+    try:
+        async with asyncio.timeout(ELICIT_SECONDS):
+            answer = await ctx.elicit(message, _Confirm)
+    except TimeoutError:
+        return "expired"
+    except Exception:
+        logger.warning("the client could not show the question", exc_info=True)
+        return None
+    if answer.action == "accept":
+        return "yes" if answer.data.allow else "denied"
+    return "denied" if answer.action == "decline" else "expired"
+
+
 class _Tools:
     """The tool functions. Each forwards one request through the bridge."""
 
     def __init__(self, bridge: Bridge) -> None:
         self._bridge = bridge
+        self._denied: set[tuple[str, str]] = set()
 
     async def _ask(self, op: str, **args: Any) -> dict[str, Any]:  # noqa: ANN401 - JSON values
         try:
@@ -627,6 +696,40 @@ class _Tools:
             message = f"the screenshot could not be read: {error}"
             raise ToolError(message) from error
         return [envelope_text(result), Image(data=data, format="png")]
+
+    async def browser_allow(
+        self,
+        site: SITE,
+        host: Annotated[str, Field(description="One exact host name, such as cdn.example.com.")],
+        reason: Annotated[str, Field(description="Why the page needs it, for the person.")],
+        ctx: Context,
+    ) -> str:
+        try:
+            name = approvals.validate_host(host)
+        except ValueError as error:
+            raise ToolError(str(error)) from error
+        checked = await self._ask("allow_check", site=site, host=name)
+        if checked["status"] != "eligible":
+            status = "allowed" if checked["status"] == "already_allowed" else checked["status"]
+            return allow_text(status, name, checked["message"], site)
+        if checked["denied"] or (site, name) in self._denied:
+            return allow_text("denied", name, "The person already said no.", site)
+        message = approvals.prompt_text(
+            site, name, checked["seen_during_login"], approvals.sanitize_reason(reason)
+        )
+        verdict = await _elicit(ctx, message)
+        if verdict == "yes":
+            granted = await self._ask("allow_apply", site=site, host=name, channel="elicitation")
+            return allow_text(granted["result"], name, granted["message"], site)
+        if verdict == "denied":
+            self._denied.add((site, name))
+            return allow_text("denied", name, "The person said no.", site)
+        if verdict == "expired":
+            return allow_text("expired", name, "The question was dismissed.", site)
+        answered = await self._ask("allow_ask", site=site, host=name, reason=reason)
+        if answered["result"] == "denied":
+            self._denied.add((site, name))
+        return allow_text(answered["result"], name, answered["message"], site)
 
     async def browser_close(self, site: SITE) -> str:
         result = await self._ask("close", site=site)

@@ -13,13 +13,15 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 from environment import unusable_reason
+from mcp import Client as McpClient
+from mcp_types import ElicitResult
 from proxy_stub import PageServer
 
-from valetkey import clicks, client, daemon, login, procs, sessions, sites
+from valetkey import clicks, client, daemon, login, mcp_server, procs, sessions, sites
 from valetkey.client import DaemonError
 from valetkey.proxy import SeenHost
 
@@ -397,6 +399,7 @@ async def serving(roots: sites.Roots, **options: Any) -> AsyncGenerator[Rig]:  #
         "now": lambda: NOW,
         "download_settle": 0,
         "poll_interval": 3600,
+        "user_environment": dict,
     } | options
     server = daemon.Daemon(roots, **settings)
     await server.start()
@@ -2220,6 +2223,59 @@ def test_a_real_session_through_the_daemon(roots: sites.Roots) -> None:
     run(scenario())
 
 
+@pytest.mark.integration
+@needs_everything
+def test_a_refused_host_loads_after_the_person_says_yes(roots: sites.Roots) -> None:
+    sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
+    reply = Reply("accept")
+
+    async def scenario() -> None:
+        with PageServer(PAGES) as pages:
+
+            async def resolve(_host: str, _port: int) -> list[str]:
+                return ["127.0.0.1"]
+
+            async def connect(_address: str, _port: int) -> Any:  # noqa: ANN401
+                return await asyncio.open_connection(*pages.address)
+
+            options = {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
+            server = daemon.Daemon(roots, proxy_options=options)
+            await server.start()
+            bridge = mcp_server.Bridge(client.socket_path(roots))
+            try:
+                async with McpClient(
+                    mcp_server.build_server(bridge), elicitation_callback=reply, mode="legacy"
+                ) as mcp:
+                    await mcp.call_tool("browser_open", {"site": "demo"})
+                    target = {"site": "demo", "url": "http://other.test/two"}
+                    first = await mcp.call_tool("browser_navigate", target)
+                    assert "other.test" in "".join(
+                        p.text for p in first.content if p.type == "text"
+                    )
+                    assert "second page" not in "".join(
+                        p.text for p in first.content if p.type == "text"
+                    )
+                    asked = await mcp.call_tool(
+                        "browser_allow",
+                        {"site": "demo", "host": "other.test", "reason": "the page is there"},
+                    )
+                    assert "Result: allowed." in "".join(
+                        p.text for p in asked.content if p.type == "text"
+                    )
+                    assert reply.asked == 1
+                    second = await mcp.call_tool("browser_navigate", target)
+                    text = "".join(p.text for p in second.content if p.type == "text")
+                    assert "Two" in text
+                    assert "did not load" not in text
+                    await mcp.call_tool("browser_close", {"site": "demo"})
+            finally:
+                await bridge.close()
+                await server.shutdown()
+
+    run(scenario())
+    assert "other.test" in sites.load_policy(roots, "demo").allow
+
+
 # -- what is running: status, watch, liveness, announcements --------------------------------
 
 
@@ -2714,3 +2770,515 @@ def test_an_agent_browser_below_the_minimum_refuses_the_session_with_a_clear_err
             assert (await c.call("status"))["sessions"] == []
 
     run(scenario())
+
+
+# -- asking the person to widen a site's key -----------------------------------------------
+
+
+def refuse_port(proxy_socket: Path, host: str) -> None:
+    """Make the proxy refuse ``host`` for its port, not for the policy."""
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.connect(str(proxy_socket))
+        connection.sendall(f"CONNECT {host}:8443 HTTP/1.1\r\nHost: {host}:8443\r\n\r\n".encode())
+        assert connection.recv(100).startswith(b"HTTP/1.1 403")
+
+
+def write_approver(roots: sites.Roots, body: str) -> Path:
+    """Install an approval command: a script running ``body``, named in config.json."""
+    folder = roots.config / "valetkey"
+    folder.mkdir(parents=True, exist_ok=True)
+    script = folder / "approve.sh"
+    script.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    script.chmod(0o755)
+    (folder / "config.json").write_text(
+        json.dumps({"approve_command": [str(script)]}), encoding="utf-8"
+    )
+    return script
+
+
+def policy_text(roots: sites.Roots) -> str:
+    return sites.policy_path(roots, "sitex").read_text(encoding="utf-8")
+
+
+def test_only_refused_or_excluded_hosts_can_be_asked_about(roots: sites.Roots) -> None:
+    add_site(roots, excluded=("seen.test",))
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            proxy = session_socket(roots, "sitex")
+            await asyncio.to_thread(refuse_via_proxy, proxy, "cdn.assets.test")
+            await asyncio.to_thread(refuse_port, proxy, "ports.test")
+            await asyncio.to_thread(refuse_via_proxy, proxy, "update.googleapis.com")
+            checks = {
+                host: await c.call("allow_check", site="sitex", host=host)
+                for host in (
+                    "cdn.assets.test",
+                    "CDN.assets.test.",
+                    "seen.test",
+                    "never.test",
+                    "assets.test",
+                    "sub.cdn.assets.test",
+                    "ports.test",
+                    "update.googleapis.com",
+                    "app.sitex.test",
+                )
+            }
+            statuses = {host: check["status"] for host, check in checks.items()}
+            assert statuses == {
+                "cdn.assets.test": "eligible",
+                "CDN.assets.test.": "eligible",
+                "seen.test": "eligible",
+                "never.test": "not_eligible",
+                "assets.test": "not_eligible",
+                "sub.cdn.assets.test": "not_eligible",
+                "ports.test": "not_eligible",
+                "update.googleapis.com": "not_eligible",
+                "app.sitex.test": "already_allowed",
+            }
+            assert checks["seen.test"]["seen_during_login"] is True
+            assert checks["cdn.assets.test"]["seen_during_login"] is False
+            assert checks["cdn.assets.test"]["host"] == "cdn.assets.test"
+            assert checks["cdn.assets.test"]["can_ask"] is False
+            assert "was not refused" in checks["never.test"]["message"]
+            # Refusals are remembered after the session that made them is gone.
+            await c.call("close", site="sitex")
+            again = await c.call("allow_check", site="sitex", host="cdn.assets.test")
+            assert again["status"] == "eligible"
+
+    run(scenario())
+
+
+def test_bad_hosts_and_unknown_sites_are_errors(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            for op in ("allow_check", "allow_apply", "allow_ask"):
+                for bad in (
+                    "*.assets.test",
+                    "https://assets.test/",
+                    "evil.test#@good.test",
+                    "1.2.3.4",
+                    5,
+                    None,
+                ):
+                    with pytest.raises(DaemonError) as info:
+                        await c.call(op, site="sitex", host=bad, channel="elicitation")
+                    assert info.value.code == "bad_request"
+                with pytest.raises(DaemonError) as info:
+                    await c.call(op, site="nosuch", host="a.assets.test", channel="elicitation")
+                assert info.value.code == "unknown_site"
+            assert policy_text(roots).count("assets.test") == 0
+
+    run(scenario())
+
+
+def test_an_accepted_question_widens_the_key_and_the_live_session_sees_it(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots, excluded=("assets.test", "other.test", "cdn.assets.test"))
+
+    async def scenario() -> None:
+        async def resolve(_host: str, _port: int) -> list[str]:
+            return ["127.0.0.1"]
+
+        async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            writer.write(await reader.read(1))
+            writer.close()
+
+        upstream = await asyncio.start_server(echo, "127.0.0.1", 0)
+        port = upstream.sockets[0].getsockname()[1]
+
+        async def connect(_address: str, _port: int) -> Any:  # noqa: ANN401
+            return await asyncio.open_connection("127.0.0.1", port)
+
+        options = {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
+        async with serving(roots, proxy_options=options) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            proxy = session_socket(roots, "sitex")
+            await asyncio.to_thread(refuse_via_proxy, proxy, "cdn.assets.test")
+            granted = await c.call(
+                "allow_apply", site="sitex", host="cdn.assets.test", channel="elicitation"
+            )
+            assert granted["result"] == "allowed"
+            saved = sites.load_policy(roots, "sitex")
+            assert "cdn.assets.test" in saved.allow
+            # The excluded entries that would block it are gone: itself and the one above it.
+            assert saved.excluded == ("other.test",)
+            reader, writer = await asyncio.open_unix_connection(proxy)
+            writer.write(
+                b"CONNECT cdn.assets.test:443 HTTP/1.1\r\nHost: cdn.assets.test:443\r\n\r\n"
+            )
+            assert (await reader.readline()).startswith(b"HTTP/1.1 200")
+            writer.close()
+            await writer.wait_closed()
+            # Asking again for what is allowed changes nothing and says so.
+            before = policy_text(roots)
+            again = await c.call(
+                "allow_apply", site="sitex", host="cdn.assets.test", channel="elicitation"
+            )
+            assert (again["result"], "already allowed" in again["message"]) == ("allowed", True)
+            assert policy_text(roots) == before
+        upstream.close()
+        await upstream.wait_closed()
+
+    run(scenario())
+
+
+def test_a_grant_keeps_everything_else_in_the_policy(roots: sites.Roots) -> None:
+    sites.save_policy(
+        roots,
+        sites.Policy(
+            "sitex",
+            "https://sitex.test/",
+            ("sitex.test",),
+            ("cdn.assets.test",),
+            NOW,
+            ("sitex.test/login",),
+        ),
+    )
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("allow_apply", site="sitex", host="cdn.assets.test", channel="elicitation")
+            saved = sites.load_policy(roots, "sitex")
+            assert (saved.start, saved.learned, saved.login_pages) == (
+                "https://sitex.test/",
+                NOW,
+                ("sitex.test/login",),
+            )
+            assert saved.allow == ("sitex.test", "cdn.assets.test")
+
+    run(scenario())
+
+
+def test_the_grant_operation_needs_the_elicitation_channel_and_an_eligible_host(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    before = policy_text(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            for channel in (None, "command", "", 5):
+                with pytest.raises(DaemonError) as info:
+                    await c.call(
+                        "allow_apply", site="sitex", host="cdn.assets.test", channel=channel
+                    )
+                assert info.value.code == "bad_request"
+            with pytest.raises(DaemonError):
+                await c.call("allow_apply", site="sitex", host="cdn.assets.test")
+            refused = await c.call(
+                "allow_apply", site="sitex", host="never.test", channel="elicitation"
+            )
+            assert refused["result"] == "not_eligible"
+            assert "never.test" not in policy_text(roots)
+
+    run(scenario())
+    assert policy_text(roots) == before
+
+
+def test_the_approval_command_is_run_without_a_shell_and_gets_the_request(
+    roots: sites.Roots, tmp_path: Path
+) -> None:
+    add_site(roots, excluded=("cdn.assets.test",))
+    seen = tmp_path / "stdin.json"
+    env_seen = tmp_path / "env.txt"
+    write_approver(roots, f"cat > {seen}\nenv > {env_seen}\nexit 0")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            granted = await c.call(
+                "allow_ask",
+                site="sitex",
+                host="cdn.assets.test",
+                reason="It loads the [logo](http://evil.test/) \nfor the page",
+            )
+            assert granted["result"] == "allowed"
+            assert "cdn.assets.test" in sites.load_policy(roots, "sitex").allow
+
+    run(scenario())
+    request = json.loads(seen.read_text(encoding="utf-8"))
+    assert request == {
+        "site": "sitex",
+        "host": "cdn.assets.test",
+        "seen_during_login": True,
+        "reason": "It loads the logo http://evil.test/ for the page".replace("http://", ""),
+    }
+    names = {line.split("=", 1)[0] for line in env_seen.read_text(encoding="utf-8").splitlines()}
+    assert names <= {
+        "PATH",
+        "HOME",
+        "XDG_RUNTIME_DIR",
+        "LANG",
+        "PWD",
+        "SHLVL",
+        "_",
+        "OLDPWD",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "WAYLAND_DISPLAY",
+        "DISPLAY",
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "result", "granted"),
+    [
+        ("exit 0", "allowed", True),
+        ("echo yes; echo '{\"allow\": true}' >&2; exit 1", "denied", False),
+        ("head -c 3000 /dev/urandom; exit 3", "denied", False),
+        ("head -c 3000 /dev/urandom; exit 0", "allowed", True),
+        ("kill -9 $$", "denied", False),
+        ("sleep 30", "expired", False),
+    ],
+)
+def test_each_way_the_command_can_end(
+    roots: sites.Roots,
+    body: str,
+    result: str,
+    granted: bool,  # noqa: FBT001
+) -> None:
+    add_site(roots)
+    write_approver(roots, body)
+
+    async def scenario() -> None:
+        async with serving(roots, approve_timeout=0.5) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            await asyncio.to_thread(
+                refuse_via_proxy, session_socket(roots, "sitex"), "cdn.assets.test"
+            )
+            answer = await c.call("allow_ask", site="sitex", host="cdn.assets.test", reason="x")
+            assert answer["result"] == result
+            assert ("cdn.assets.test" in sites.load_policy(roots, "sitex").allow) is granted
+            for text in (answer["message"], json.dumps(answer)):
+                assert "urandom" not in text
+                assert '"allow"' not in text
+
+    run(scenario())
+
+
+def test_a_no_is_remembered_and_not_asked_again(roots: sites.Roots, tmp_path: Path) -> None:
+    add_site(roots, excluded=("cdn.assets.test",))
+    runs = tmp_path / "runs"
+    write_approver(roots, f"echo x >> {runs}\nexit 1")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            first = await c.call("allow_ask", site="sitex", host="cdn.assets.test", reason="")
+            second = await c.call("allow_ask", site="sitex", host="cdn.assets.test", reason="")
+            checked = await c.call("allow_check", site="sitex", host="cdn.assets.test")
+            assert (first["result"], second["result"]) == ("denied", "denied")
+            assert checked["denied"] is True
+            assert runs.read_text(encoding="utf-8").count("x") == 1
+
+    run(scenario())
+
+
+def test_an_expired_question_may_be_asked_again(roots: sites.Roots, tmp_path: Path) -> None:
+    add_site(roots, excluded=("cdn.assets.test",))
+    runs = tmp_path / "runs"
+    write_approver(roots, f"echo x >> {runs}\nsleep 30")
+
+    async def scenario() -> None:
+        async with serving(roots, approve_timeout=0.3) as rig, await rig.connect() as c:
+            for _ in range(2):
+                answer = await c.call("allow_ask", site="sitex", host="cdn.assets.test", reason="")
+                assert answer["result"] == "expired"
+            assert runs.read_text(encoding="utf-8").count("x") == 2
+
+    run(scenario())
+
+
+def test_nothing_is_run_for_a_host_that_may_not_be_asked_about(
+    roots: sites.Roots, tmp_path: Path
+) -> None:
+    add_site(roots)
+    marker = tmp_path / "ran"
+    write_approver(roots, f"touch {marker}\nexit 0")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            answer = await c.call("allow_ask", site="sitex", host="never.test", reason="please")
+            assert answer["result"] == "not_eligible"
+            inside = await c.call("allow_ask", site="sitex", host="app.sitex.test", reason="")
+            assert inside["result"] == "allowed"
+            assert not marker.exists()
+
+    run(scenario())
+
+
+def test_without_an_approval_command_the_person_is_told_what_to_run(roots: sites.Roots) -> None:
+    add_site(roots, excluded=("cdn.assets.test",))
+    before = policy_text(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            answer = await c.call("allow_ask", site="sitex", host="cdn.assets.test", reason="x")
+            assert answer["result"] == "could_not_ask"
+            assert "valetkey allow sitex cdn.assets.test" in answer["message"]
+
+    run(scenario())
+    assert policy_text(roots) == before
+
+
+def test_a_broken_config_or_command_means_could_not_ask(
+    roots: sites.Roots, caplog: pytest.LogCaptureFixture
+) -> None:
+    add_site(roots, excluded=("cdn.assets.test",))
+    folder = roots.config / "valetkey"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            (folder / "config.json").write_text("{", encoding="utf-8")
+            checked = await c.call("allow_check", site="sitex", host="cdn.assets.test")
+            assert checked["can_ask"] is False
+            answer = await c.call("allow_ask", site="sitex", host="cdn.assets.test", reason="")
+            assert answer["result"] == "could_not_ask"
+            (folder / "config.json").write_text(
+                json.dumps({"approve_command": ["/nonexistent/approver"]}), encoding="utf-8"
+            )
+            answer = await c.call("allow_ask", site="sitex", host="cdn.assets.test", reason="")
+            assert answer["result"] == "could_not_ask"
+            assert "could not run" in answer["message"]
+            assert "valetkey allow sitex cdn.assets.test" in answer["message"]
+
+    run(scenario())
+    assert "config.json cannot be used" in caplog.text
+
+
+def test_one_question_at_a_time_for_a_site(roots: sites.Roots, tmp_path: Path) -> None:
+    add_site(roots, excluded=("one.assets.test", "two.assets.test"))
+    log = tmp_path / "log"
+    write_approver(roots, f"echo start >> {log}\nsleep 0.4\necho end >> {log}\nexit 1")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c, await rig.connect() as d:
+            await asyncio.gather(
+                c.call("allow_ask", site="sitex", host="one.assets.test", reason=""),
+                d.call("allow_ask", site="sitex", host="two.assets.test", reason=""),
+            )
+
+    run(scenario())
+    assert log.read_text(encoding="utf-8").split() == ["start", "end", "start", "end"]
+
+
+def test_no_operation_widens_a_policy_except_the_ones_that_ask(roots: sites.Roots) -> None:
+    add_site(roots, excluded=("cdn.assets.test",))
+    write_approver(roots, "exit 1")
+    ops = [
+        "sites", "open", "snapshot", "click", "type", "navigate", "screenshot", "status",
+        "close", "reload_policy", "downloads", "allow_check", "allow_apply", "allow_ask",
+    ]  # fmt: skip
+    arguments = {
+        "site": "sitex",
+        "host": "cdn.assets.test",
+        "ref": "e1",
+        "text": "cdn.assets.test",
+        "url": "https://cdn.assets.test/",
+        "reason": "let me",
+        "target": "sitex",
+        "allow": ["cdn.assets.test"],
+        "allow_host": "cdn.assets.test",
+        "approved": True,
+        "channel": "command",
+    }
+    before = policy_text(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            assert set(rig.daemon._ops) - set(ops) == {"login"}  # noqa: SLF001 - every other op is listed
+            for op in ops:
+                with contextlib.suppress(DaemonError):
+                    await c.call(op, **arguments)
+                assert policy_text(roots) == before, op
+
+    run(scenario())
+
+
+def test_the_hosts_a_site_was_refused_are_bounded(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_site(roots)
+    monkeypatch.setattr(daemon, "MAX_REFUSED_HOSTS", 2)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            for host in ("a.assets.test", "b.assets.test", "c.assets.test"):
+                await asyncio.to_thread(refuse_via_proxy, session_socket(roots, "sitex"), host)
+            found = [
+                (await c.call("allow_check", site="sitex", host=h))["status"]
+                for h in ("a.assets.test", "b.assets.test", "c.assets.test")
+            ]
+            assert found == ["eligible", "eligible", "not_eligible"]
+
+    run(scenario())
+
+
+# -- asking through MCP, against a real daemon -----------------------------------------------------
+
+
+class Reply:
+    """An elicitation stand-in that answers as told."""
+
+    def __init__(
+        self, action: Literal["accept", "decline", "cancel"], content: dict[str, Any] | None = None
+    ) -> None:
+        self.action = action
+        self.content = {"allow": True} if content is None else content
+        self.asked = 0
+
+    async def __call__(self, context: Any, params: Any) -> Any:  # noqa: ANN401, ARG002 - SDK types
+        self.asked += 1
+        return ElicitResult(action=self.action, content=self.content)
+
+
+async def allow_through_mcp(roots: sites.Roots, reply: Reply | None, host: str) -> str:
+    """Call ``browser_allow`` through an in-process MCP client talking to a real daemon."""
+    async with serving(roots) as rig:
+        bridge = mcp_server.Bridge(rig.path)
+        try:
+            async with McpClient(
+                mcp_server.build_server(bridge), elicitation_callback=reply, mode="legacy"
+            ) as mcp:
+                result = await mcp.call_tool(
+                    "browser_allow", {"site": "sitex", "host": host, "reason": "the page needs it"}
+                )
+                return "\n".join(p.text for p in result.content if p.type == "text")
+        finally:
+            await bridge.close()
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected", "granted"),
+    [
+        (Reply("accept"), "Result: allowed.", True),
+        (Reply("accept", {"allow": False}), "Result: denied.", False),
+        (Reply("decline"), "Result: denied.", False),
+        (Reply("cancel"), "Result: expired.", False),
+        (None, "Result: could_not_ask.", False),
+    ],
+)
+def test_a_real_daemon_changes_the_policy_only_after_a_yes(
+    roots: sites.Roots,
+    reply: Reply | None,
+    expected: str,
+    granted: bool,  # noqa: FBT001
+) -> None:
+    add_site(roots, excluded=("assets.test", "cdn.assets.test"))
+    text = run(allow_through_mcp(roots, reply, "cdn.assets.test"))
+    saved = sites.load_policy(roots, "sitex")
+    assert text.startswith(expected)
+    assert ("cdn.assets.test" in saved.allow) is granted
+    assert saved.excluded == (() if granted else ("assets.test", "cdn.assets.test"))
+
+
+def test_a_real_daemon_will_not_have_a_never_refused_host_asked_about(roots: sites.Roots) -> None:
+    add_site(roots)
+    reply = Reply("accept")
+    text = run(allow_through_mcp(roots, reply, "never.test"))
+    assert text.startswith("Result: not_eligible.")
+    assert reply.asked == 0
+    assert "never.test" not in policy_text(roots)

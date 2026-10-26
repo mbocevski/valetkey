@@ -680,3 +680,25 @@ def test_login_pages_must_be_a_list_of_strings(roots: Roots) -> None:
     write_policy_file(roots, "sitex", good(login_pages="sitex.com/login"))
     with pytest.raises(PolicyError, match="login_pages must be a list of strings"):
         load_policy(roots, "sitex")
+
+
+def test_allow_host_adds_it_and_drops_every_exclusion_that_covers_it() -> None:
+    policy = sites.Policy(
+        "s", "https://s.test/", ("s.test",), ("sitexassets.net", "cdn.sitexassets.net", "o.test"),
+        datetime(2026, 1, 1, tzinfo=UTC), ("s.test/login",),
+    )  # fmt: skip
+    changed, added, removed = sites.allow_host(policy, "cdn.sitexassets.net")
+    assert (added, removed) == (True, ["sitexassets.net", "cdn.sitexassets.net"])
+    assert changed.allow == ("s.test", "cdn.sitexassets.net")
+    assert changed.excluded == ("o.test",)
+    assert (changed.start, changed.learned, changed.login_pages) == (
+        policy.start,
+        policy.learned,
+        policy.login_pages,
+    )
+    assert sites.allows(changed, "cdn.sitexassets.net")
+
+
+def test_allow_host_for_an_allowed_host_changes_nothing() -> None:
+    policy = sites.Policy("s", "https://s.test/", ("s.test",), (), datetime(2026, 1, 1, tzinfo=UTC))
+    assert sites.allow_host(policy, "s.test") == (policy, False, [])

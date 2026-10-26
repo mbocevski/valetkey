@@ -1329,3 +1329,24 @@ def test_watch_stops_quietly_when_interrupted(
     connect_to(monkeypatch, FakeConnection(events=EVENTS[:1], end=KeyboardInterrupt()))
     status, out, _ = run(capsys, "watch")
     assert (status, len(out.splitlines())) == (0, 1)
+
+
+def test_allow_and_deny_keep_the_login_pages(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    sites.save_policy(
+        roots,
+        sites.Policy(
+            "sitex",
+            "https://sitex.com/",
+            ("sitex.com",),
+            (),
+            datetime(2026, 1, 1, tzinfo=UTC),
+            ("sitex.com/login",),
+        ),
+    )
+    run(capsys, "allow", "sitex", "login.okta.com")
+    assert sites.load_policy(roots, "sitex").login_pages == ("sitex.com/login",)
+    run(capsys, "deny", "sitex", "login.okta.com")
+    assert sites.load_policy(roots, "sitex").login_pages == ("sitex.com/login",)

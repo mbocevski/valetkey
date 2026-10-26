@@ -9,7 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path  # the command-line framework reads the annotation at runtime
 from typing import TYPE_CHECKING, Annotated, Any
@@ -251,15 +251,9 @@ def allow(site: str, host: str) -> int:
     try:
         policy = _load(roots, site)
         name = _host(host)
-        added = name not in policy.allow
-        allowed = (*policy.allow, name) if added else policy.allow
-        kept = tuple(e for e in policy.excluded if not sites.excluded_conflicts(e, [name]))
-        removed = [e for e in policy.excluded if e not in kept]
-        changed = (
-            sites.Policy(policy.site, policy.start, allowed, kept, policy.learned)
-            if added or removed
-            else None
-        )
+        changed, added, removed = sites.allow_host(policy, name)
+        if not (added or removed):
+            changed = None
     except CommandError as error:
         return _fail(error)
     applied = save_and_reload(roots, site, changed)
@@ -296,7 +290,7 @@ def deny(site: str, host: str) -> int:
         if covered and name not in excluded:
             excluded = (*excluded, name)
         changed = (
-            sites.Policy(policy.site, policy.start, allowed, excluded, policy.learned)
+            replace(policy, allow=allowed, excluded=excluded)
             if allowed != policy.allow or excluded != policy.excluded
             else None
         )

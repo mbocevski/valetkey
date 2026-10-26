@@ -26,7 +26,7 @@ import os
 import re
 import stat
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -468,6 +468,21 @@ def excluded_conflicts(excluded: str, allow: Iterable[str]) -> bool:
     one host out of a wider allowed domain.
     """
     return any(host_matches(entry, [excluded]) for entry in allow)
+
+
+def allow_host(policy: Policy, host: str) -> tuple[Policy, bool, list[str]]:
+    """Return ``policy`` with ``host`` allowed, whether that was a change, and what was un-excluded.
+
+    The host is added to ``allow`` (it then covers its subdomains). Every ``excluded`` entry that
+    would block it is removed in the same step, because an excluded entry overrides ``allow``
+    and covers its subdomains: that is the host itself or a wider entry above it. Nothing else
+    in the policy changes. ``host`` must already be normalized (see :func:`host_of`).
+    """
+    added = host not in policy.allow
+    allow = (*policy.allow, host) if added else policy.allow
+    kept = tuple(entry for entry in policy.excluded if not excluded_conflicts(entry, [host]))
+    removed = [entry for entry in policy.excluded if entry not in kept]
+    return replace(policy, allow=allow, excluded=kept), added, removed
 
 
 def allows(policy: Policy, host: str) -> bool:

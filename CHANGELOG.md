@@ -20,6 +20,7 @@ Changes that affect users of valetkey. The format follows
 - `browser_open` notices when a saved login has expired, ends the session and tells the client to log in again.
 - `browser_sites` shows when you last logged in, and which hosts each site may reach and which were left out.
 - Files a site downloads are saved in its downloads folder, never replacing an older file, and `browser_click` and `browser_navigate` list the new ones; `browser_downloads` lists the folder.
+- The `browser_allow` tool, which asks you, in the client or through the `approve_command` in your config, before a refused host is allowed; nothing is allowed without a yes.
 - The `valetkey daemon` command, which runs the background process that owns your sessions and logins.
 - Chrome no longer contacts `www.google.com` on its own, so a page that needs it shows as a refused host on any load.
 - The browser tools now say when a page's background requests were refused, such as Chrome's own update requests, in a separate quiet line.
@@ -30,3 +31,7 @@ Changes that affect users of valetkey. The format follows
 ### Changed
 
 - `valetkey allow` and `valetkey deny` now apply to a running session at once, and `valetkey forget` closes a running session before it deletes.
+
+### Fixed
+
+- `valetkey allow` and `valetkey deny` no longer forget a site's login pages.

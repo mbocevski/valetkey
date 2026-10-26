@@ -64,6 +64,8 @@ _CHUNK = 64 * 1024
 _PLAIN_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"})
 _DROPPED_HEADERS = frozenset({b"host", b"connection", b"proxy-connection", b"keep-alive"})
 _REFUSED_ADDRESS = "resolves to a private address"
+NOT_ALLOWED = "not in the allow list"
+"""The reason a host is refused when the policy does not allow it."""
 
 type Streams = tuple[asyncio.StreamReader, asyncio.StreamWriter]
 type Resolver = Callable[[str, int], Awaitable[list[str]]]
@@ -230,7 +232,7 @@ def policy_refusal(policy: sites.Policy, mode: Mode, host: str) -> str | None:
     """Return why ``host`` is refused, or ``None``. Record mode refuses nothing."""
     if mode is Mode.RECORD or sites.allows(policy, host):
         return None
-    return "not in the allow list"
+    return NOT_ALLOWED
 
 
 def address_refusal(address: str) -> str | None:

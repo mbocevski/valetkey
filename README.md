@@ -9,8 +9,7 @@ anywhere else.
 
 ## Status
 
-Early development. An MCP client can already open a logged-in site and use it. The `valetkey`
-command can list sites and change which hosts each one may reach.
+Early development. An MCP client can already use a logged-in site.
 
 ## Install
 
@@ -27,8 +26,7 @@ above without running them. The socket starts the daemon when a client connects.
 checks the rest of the setup.
 
 On Arch Linux, `cd packaging/arch && makepkg -si` builds a package that installs the units for
-you, so skip `valetkey install-units`. It downloads the locked Python dependencies into
-`/usr/lib/valetkey` and needs `agent-browser` from the CachyOS repositories or the AUR package
+you, so skip `valetkey install-units`. It needs `agent-browser` from the CachyOS repositories or the AUR package
 `agent-browser-bin`.
 
 ## Usage
@@ -221,17 +219,21 @@ Add `valetkey mcp` to the client as a stdio server. In clients that read a JSON 
 {"mcpServers": {"valetkey": {"command": "valetkey", "args": ["mcp"]}}}
 ```
 
-Clients with a command line can add it the same way, with `valetkey mcp` as the command. With the
-systemd socket from Install enabled, the daemon starts on the first connection and `valetkey mcp`
-never has to start it. Without the socket, `valetkey mcp` starts `valetkey daemon` itself, and the
-daemon keeps running so several clients can share it.
+With the systemd socket from Install enabled, the daemon starts on the first connection. Without
+it, `valetkey mcp` starts `valetkey daemon` itself, and the daemon keeps running so several
+clients can share it.
 
 The tools are `browser_sites`, `browser_login`, `browser_open`, `browser_snapshot`,
-`browser_click`, `browser_type`, `browser_navigate`, `browser_downloads`, `browser_screenshot` and
-`browser_close`. `browser_click` finds its element again when it clicks and can check an `expect`ed
-outcome. `browser_open` says when a saved login has expired. Nothing runs scripts, changes launch
-options or edits a site's hosts. A host that is not allowed is for you to decide, with
-`valetkey allow SITE HOST`.
+`browser_click`, `browser_type`, `browser_navigate`, `browser_downloads`, `browser_screenshot`,
+`browser_allow` and `browser_close`. `browser_click` finds its element again when it clicks and can
+check an `expect`ed outcome. `browser_open` says when a saved login has expired. Nothing runs
+scripts or changes launch options.
+
+`browser_allow` only asks you, and only about a host that was refused or that you left out at
+login. A client that can show a question puts it to you. Otherwise set `approve_command` in
+`$XDG_CONFIG_HOME/valetkey/config.json` to a program and its arguments. The daemon runs it with the
+request as JSON on standard input, and exit status 0 means yes. With neither, the agent asks you to
+run `valetkey allow SITE HOST`.
 
 <!-- begin: valetkey mcp --help -->
 ```text
