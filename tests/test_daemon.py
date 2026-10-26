@@ -1773,7 +1773,9 @@ def test_the_daemon_command_uses_a_socket_from_systemd(short_dir: Path) -> None:
         number = listener.fileno()
         script = f"LISTEN_PID=$$ LISTEN_FDS=1 exec {sys.executable} -m valetkey daemon 3<&{number}"
         process = subprocess.Popen(  # noqa: S603  # fixed argument list
-            ["/bin/sh", "-c", script],
+            # bash, not sh: dash takes a file descriptor of one digit only, and under pytest's
+            # capture the socket's is often higher.
+            ["/usr/bin/bash", "-c", script],
             env=env,
             pass_fds=[number],
             stderr=subprocess.PIPE,
