@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
 import pytest
+from conftest import REAL_USER_SESSION
 
 from valetkey import __version__, cli, daemon, mcp_server, sandbox, sessions, sites
 from valetkey.cli import main
@@ -1267,7 +1268,12 @@ def test_bubblewrap_still_works_under_the_service_hardening() -> None:
         *sandbox.system_link_args(),
         "--dev", "/dev", "--proc", "/proc", "/usr/bin/true",
     ]  # fmt: skip
-    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=60)  # noqa: S603
+    # systemd-run asks the person's own user manager to start the unit, which the tests'
+    # private runtime directory and session bus cannot reach. The unit only runs `true`.
+    environment = os.environ | REAL_USER_SESSION
+    result = subprocess.run(  # noqa: S603
+        command, capture_output=True, text=True, check=False, timeout=60, env=environment
+    )
     assert result.returncode == 0, result.stderr
 
 

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,6 +18,15 @@ if TYPE_CHECKING:
     from typing import Any
 
 _REAL_ANNOUNCE = daemon.announce_session
+REAL_USER_SESSION = {
+    name: os.environ[name]
+    for name in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+    if name in os.environ
+}
+"""The person's own runtime directory and session bus, as they were before the tests replaced them.
+
+Only a test that must talk to the systemd user manager, which is where ``systemd-run --user``
+goes, takes them back, for that one command."""
 REAL_NOTIFY_ASK = notify.ask
 
 
@@ -84,6 +95,69 @@ def no_notifications(monkeypatch: pytest.MonkeyPatch) -> None:
         return "none"
 
     monkeypatch.setattr(notify, "ask", nobody)
+
+
+_GUARD = """#!/bin/sh
+# Stands in for notify-send in the tests: it runs the real one only on a private session bus
+# (a socket under the tests' own temporary directories), never on the person's.
+case "$DBUS_SESSION_BUS_ADDRESS" in
+  "unix:path=PRIVATE"*)
+    path=${DBUS_SESSION_BUS_ADDRESS#unix:path=}
+    if [ -S "$path" ]; then exec "REAL" "$@"; fi ;;
+esac
+printf '%s\\n' "notify-send on ${DBUS_SESSION_BUS_ADDRESS:-no session bus}: $*" >> "CALLS"
+echo "notify-send is not allowed on a session bus the tests do not own" >&2
+exit 1
+"""
+
+
+@pytest.fixture(scope="session")
+def notify_guard(runtime_base: str) -> Path | None:
+    """A directory with a ``notify-send`` that refuses any bus but a private one, or ``None``.
+
+    The tests start daemons and sessions in other processes, which inherit the environment, so
+    the guard has to be on ``PATH``, not a replaced function. It keeps its calls in ``calls``.
+    """
+    real = shutil.which("notify-send")
+    if real is None:
+        return None
+    directory = Path(runtime_base) / "guard-bin"
+    directory.mkdir()
+    (directory / "calls").touch()
+    script = (
+        _GUARD.replace("PRIVATE", tempfile.gettempdir() + "/vk-")
+        .replace("REAL", real)
+        .replace("CALLS", str(directory / "calls"))
+    )
+    program = directory / "notify-send"
+    program.write_text(script, encoding="utf-8")
+    program.chmod(program.stat().st_mode | stat.S_IXUSR)
+    return directory
+
+
+@pytest.fixture(autouse=True)
+def no_real_session_bus(
+    monkeypatch: pytest.MonkeyPatch, runtime_base: str, notify_guard: Path | None
+) -> Iterator[None]:
+    """Keep every test process off the person's session bus, and fail a test that goes near it.
+
+    A test that starts a daemon or a session in another process would otherwise inherit
+    ``$DBUS_SESSION_BUS_ADDRESS`` and put a notification on the developer's desktop. The address
+    points at nothing, so a daemon never fills it in from the systemd user manager either. The
+    tests of a real notification daemon give their own, private one. A ``notify-send`` that would
+    reach any other bus is stopped (see :func:`notify_guard`), and its call fails the test.
+    """
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_base}/no-session-bus")
+    monkeypatch.setenv("DBUS_SYSTEM_BUS_ADDRESS", f"unix:path={runtime_base}/no-system-bus")
+    before = ""
+    if notify_guard is not None:
+        monkeypatch.setenv("PATH", f"{notify_guard}{os.pathsep}{os.environ.get('PATH', '')}")
+        before = (notify_guard / "calls").read_text(encoding="utf-8")
+    yield
+    if notify_guard is not None:
+        calls = (notify_guard / "calls").read_text(encoding="utf-8")
+        if calls != before:
+            pytest.fail(f"a test notified on a session bus it does not own: {calls[len(before) :]}")
 
 
 @pytest.fixture
