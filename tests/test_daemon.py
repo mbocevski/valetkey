@@ -1143,6 +1143,8 @@ def test_a_login_that_is_cancelled_while_its_window_opens_leaves_the_site_idle(
                 await rig.daemon._op_login(daemon._Connection(), {"target": "sitex"})  # noqa: SLF001
             assert (await c.call("status", site="sitex"))["state"] == "idle"
 
+    run(scenario())
+
 
 def test_cut_tree_keeps_whole_lines_and_counts_what_is_left() -> None:
     tree = "\n".join(f"- line {n}" for n in range(10))
@@ -1316,6 +1318,8 @@ def test_a_login_allows_what_it_used_except_trackers_and_names_it(roots: sites.R
             )
             assert "valetkey deny newsite HOST" in entry["summary"]
             assert "Left out 1 ads and tracking host." in entry["summary"]
+
+    run(scenario())
 
 
 def test_a_login_allows_the_cdn_hosts_of_the_site_and_counts_the_trackers(
@@ -5452,6 +5456,8 @@ def test_a_navigation_skips_the_refusals_of_a_client_with_no_session_yet(
             with pytest.raises(DaemonError) as info:
                 await c.call("navigate", site="sitex", url="https://sitex.test/")
             assert info.value.code == "no_session"
+
+    run(scenario())
 
 
 # -- the cookies of a login, and a login that is gone from the profile ----------------------------
