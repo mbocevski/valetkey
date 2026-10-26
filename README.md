@@ -24,11 +24,11 @@ valetkey doctor
 
 `valetkey install-units` writes two systemd user units and prints the two `systemctl` commands
 above without running them. The socket starts the daemon when a client connects. `valetkey doctor`
-checks the rest of the setup and says what to fix.
+checks the rest of the setup.
 
 On Arch Linux, `cd packaging/arch && makepkg -si` builds a package that installs the units for
-you, so skip `valetkey install-units`. It downloads the locked Python dependencies, which it keeps
-in `/usr/lib/valetkey`, and needs `agent-browser` from the CachyOS repositories or the AUR package
+you, so skip `valetkey install-units`. It downloads the locked Python dependencies into
+`/usr/lib/valetkey` and needs `agent-browser` from the CachyOS repositories or the AUR package
 `agent-browser-bin`.
 
 ## Usage
@@ -165,9 +165,10 @@ Check that this machine can run valetkey.
 Each check prints one line: ok, FAIL, warn or info. Required checks are
 bubblewrap and user namespaces, Chromium, agent-browser 0.39 or newer, and
 XDG_RUNTIME_DIR. A missing Wayland display is a warning, because only logging in
-needs one. The state of the systemd units is shown for information. The exit
-status is 1 when a required check fails. With --json, each check is an object
-with the keys check, status (ok, fail, warn or info) and detail.
+needs one, and so is an agent-browser newer than 0.39.2, the version valetkey
+was tested with. The state of the systemd units is shown for information. The
+exit status is 1 when a required check fails. With --json, each check is an
+object with the keys check, status (ok, fail, warn or info) and detail.
 
 Parameters:
   --json: Print a JSON array instead of lines. [default: False]
@@ -263,7 +264,7 @@ can ask for it, and only you can say yes.
 - Python 3.14 or newer, and [uv](https://docs.astral.sh/uv/)
 - [bubblewrap](https://github.com/containers/bubblewrap)
 - Chromium
-- [agent-browser](https://github.com/vercel-labs/agent-browser) 0.39 or newer
+- [agent-browser](https://github.com/vercel-labs/agent-browser) 0.39 or newer, tested with 0.39.2
 - A Wayland desktop, to log in
 
 ## Development

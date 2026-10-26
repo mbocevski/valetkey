@@ -697,18 +697,25 @@ def check_chromium(system: System) -> Check:
 
 
 def check_agent_browser(system: System) -> Check:
-    """Check that agent-browser is installed and new enough."""
+    """Check that agent-browser is installed and new enough; warn when it is newer than tested."""
     path, output = _tool_version(system, "agent-browser")
     if path is None:
         return Check("agent-browser", "fail", "agent-browser not found")
     try:
         version = sessions.parse_version(output)
-        sessions.check_version(version)
+        sessions.check_version(version, warn=False)
     except ValueError:
         return Check("agent-browser", "fail", f"cannot read the version of {path}")
     except sessions.VersionError as error:
         return Check("agent-browser", "fail", str(error))
-    return Check("agent-browser", "ok", f"agent-browser {'.'.join(map(str, version))}")
+    text = sessions.version_text(version)
+    if sessions.is_untested(version):
+        tested = sessions.version_text(sessions.TESTED_VERSION)
+        detail = (
+            f"agent-browser {text} is newer than {tested}, the version valetkey was tested with"
+        )
+        return Check("agent-browser", "warn", detail)
+    return Check("agent-browser", "ok", f"agent-browser {text}")
 
 
 def check_runtime_dir(system: System) -> Check:
@@ -774,8 +781,9 @@ def doctor(
 
     Each check prints one line: ok, FAIL, warn or info. Required checks are bubblewrap and
     user namespaces, Chromium, agent-browser 0.39 or newer, and XDG_RUNTIME_DIR. A missing
-    Wayland display is a warning, because only logging in needs one. The state of the systemd
-    units is shown for information. The exit status is 1 when a required check fails. With
+    Wayland display is a warning, because only logging in needs one, and so is an agent-browser
+    newer than 0.39.2, the version valetkey was tested with. The state of the systemd units is
+    shown for information. The exit status is 1 when a required check fails. With
     --json, each check is an object with the keys check, status (ok, fail, warn or info) and
     detail.
     """

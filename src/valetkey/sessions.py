@@ -48,9 +48,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MIN_VERSION = (0, 39, 0)
-"""The oldest agent-browser this module drives."""
+"""The oldest agent-browser this module drives. The README, the PKGBUILD and ``doctor`` repeat
+it, and ``tools/version_check.py`` and ``tools/readme_check.py`` keep them in step."""
 TESTED_VERSION = (0, 39, 2)
-"""The agent-browser version the behavior here was checked against."""
+"""The agent-browser version the behavior here was checked against. The CI workflow installs this
+version, and ``tools/version_check.py`` checks that it does."""
 
 SESSION_NAME = "s"
 """agent-browser's session name. Short on purpose: its socket path may not pass 103 bytes."""
@@ -125,20 +127,44 @@ def parse_version(text: str) -> tuple[int, int, int]:
     return int(major), int(minor), int(patch)
 
 
-def check_version(version: tuple[int, int, int]) -> None:
-    """Fail for a version below :data:`MIN_VERSION`; log a warning for one above the tested one.
+def version_text(version: tuple[int, int, int]) -> str:
+    """Return ``version`` as ``MAJOR.MINOR.PATCH``."""
+    return ".".join(map(str, version))
+
+
+def short_version_text(version: tuple[int, int, int]) -> str:
+    """Return ``version`` as ``MAJOR.MINOR`` when its patch number is 0, as people say a minimum."""
+    major, minor, patch = version
+    return f"{major}.{minor}" if patch == 0 else version_text(version)
+
+
+def is_untested(version: tuple[int, int, int]) -> bool:
+    """Tell whether ``version`` is newer than the one valetkey was tested with."""
+    return version > TESTED_VERSION
+
+
+_warned: set[tuple[int, int, int]] = set()
+"""The untested versions this process has already warned about."""
+
+
+def check_version(version: tuple[int, int, int], *, warn: bool = True) -> None:
+    """Fail for a version below :data:`MIN_VERSION`; warn once for one above the tested one.
+
+    The warning is logged once per process and version, so a daemon that starts many sessions
+    does not repeat it. ``warn=False`` leaves it to the caller, as ``doctor`` does.
 
     Raises:
         VersionError: when ``version`` is older than the minimum.
 
     """
-    text = ".".join(map(str, version))
+    text = version_text(version)
     if version < MIN_VERSION:
-        minimum = ".".join(map(str, MIN_VERSION))
+        minimum = version_text(MIN_VERSION)
         message = f"agent-browser {text} is too old; valetkey needs {minimum} or newer"
         raise VersionError(message)
-    if version > TESTED_VERSION:
-        tested = ".".join(map(str, TESTED_VERSION))
+    if warn and is_untested(version) and version not in _warned:
+        _warned.add(version)
+        tested = version_text(TESTED_VERSION)
         logger.warning("agent-browser %s is newer than %s, the version tested", text, tested)
 
 

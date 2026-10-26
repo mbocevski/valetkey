@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Self
 
 import pytest
 
-from valetkey import __version__, cli, daemon, mcp_server, sandbox, sites
+from valetkey import __version__, cli, daemon, mcp_server, sandbox, sessions, sites
 from valetkey.cli import main
 
 if TYPE_CHECKING:
@@ -945,6 +945,26 @@ def test_doctor_agent_browser_problems(tmp_path: Path) -> None:
         "fail",
         "cannot read the version of /usr/bin/agent-browser",
     )
+
+
+def test_doctor_warns_about_a_newer_agent_browser_and_does_not_fail(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path)
+    fake.outputs["/usr/bin/agent-browser --version"] = (0, "agent-browser 0.40.1\n")
+    assert results(fake)["agent-browser"] == (
+        "warn",
+        "agent-browser 0.40.1 is newer than 0.39.2, the version valetkey was tested with",
+    )
+    for version in ("0.39.0", "0.39.2"):
+        fake.outputs["/usr/bin/agent-browser --version"] = (0, f"agent-browser {version}\n")
+        assert results(fake)["agent-browser"] == ("ok", f"agent-browser {version}")
+
+
+def test_doctor_names_the_versions_the_code_holds() -> None:
+    text = " ".join((cli.doctor.__doc__ or "").split())
+    minimum = sessions.short_version_text(sessions.MIN_VERSION)
+    tested = sessions.version_text(sessions.TESTED_VERSION)
+    assert f"agent-browser {minimum} or newer" in text
+    assert f"newer than {tested}, the version valetkey was tested with" in text
 
 
 @pytest.mark.parametrize("environ", [{}, {"XDG_RUNTIME_DIR": ""}, {"XDG_RUNTIME_DIR": "run"}])

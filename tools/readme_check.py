@@ -34,6 +34,8 @@ from typing import TYPE_CHECKING
 
 import conventional
 
+from valetkey import sessions
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -128,11 +130,24 @@ def check_python(readme: str, pyproject: str) -> list[Problem]:
     return [Problem(f"the requirements must say 'Python {version} or newer'")]
 
 
+def check_agent_browser(readme: str) -> list[Problem]:
+    """Return a problem unless the requirements give agent-browser's minimum and tested versions."""
+    wanted = (
+        f"{sessions.short_version_text(sessions.MIN_VERSION)} or newer, "
+        f"tested with {sessions.version_text(sessions.TESTED_VERSION)}"
+    )
+    lines = [line for line in readme.splitlines() if line.startswith("- [agent-browser]")]
+    if lines and wanted in lines[0]:
+        return []
+    return [Problem(f"the requirements must say that agent-browser is '{wanted}'")]
+
+
 def facts(*, fix: bool) -> int:
     """Check the README's statements about the code, rewriting stale blocks if ``fix``."""
     readme = README.read_text()
     refreshed, problems = check_blocks(readme)
     problems += check_python(refreshed, PYPROJECT.read_text())
+    problems += check_agent_browser(refreshed)
     if fix and refreshed != readme:
         README.write_text(refreshed)
     for problem in problems:

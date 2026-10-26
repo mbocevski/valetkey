@@ -24,6 +24,7 @@ Changes that affect users of valetkey. The format follows
 - Chrome no longer contacts `www.google.com` on its own, so a page that needs it shows as a refused host on any load.
 - The browser tools now say when a page's background requests were refused, such as Chrome's own update requests, in a separate quiet line.
 - The `valetkey status` and `valetkey watch` commands, which show the open browser sessions and login windows, and a desktop notification when a session starts.
+- `valetkey doctor` warns when the installed agent-browser is newer than the version valetkey was tested with, and the README names that version.
 - A `PKGBUILD` in `packaging/arch` that builds an Arch Linux package with the daemon's systemd units.
 
 ### Changed

@@ -27,6 +27,12 @@ containers privileged, which bubblewrap needs.
 `just test-integration` runs only the tests that need bubblewrap, a browser and a desktop, and
 fails when one of them skips.
 
+To bump the tested agent-browser, change `TESTED_VERSION` in `src/valetkey/sessions.py` (and
+`MIN_VERSION` if the old release is no longer supported), then run `just test-integration` and
+`just ci -j integration`. The drift probe in `tests/test_agent_browser_drift.py` says which
+assumption broke. Update `AGENT_BROWSER_VERSION` and its SHA-256 in the CI workflow, and the
+requirements in the README and `packaging/arch/PKGBUILD`; `just check` fails until they agree.
+
 ## Code
 
 - Python 3.14. Every function is typed, and `ty check` passes with no warnings.

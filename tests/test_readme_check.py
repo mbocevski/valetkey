@@ -7,9 +7,15 @@ import conventional
 import pytest
 import readme_check
 
+from valetkey import sessions
+
 if TYPE_CHECKING:
     from pathlib import Path
 
+REQUIREMENT = (
+    f"{sessions.short_version_text(sessions.MIN_VERSION)} or newer, "
+    f"tested with {sessions.version_text(sessions.TESTED_VERSION)}"
+)
 PYPROJECT = '[project]\nname = "x"\nrequires-python = ">=3.14"\n'
 
 
@@ -106,7 +112,11 @@ def test_facts_fix_rewrites_a_stale_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     readme = tmp_path / "README.md"
-    readme.write_text("Python 3.14 or newer\n" + block("--version", "```text\nold\n```\n"))
+    readme.write_text(
+        "Python 3.14 or newer\n"
+        f"- [agent-browser](https://example.org) {REQUIREMENT}\n"
+        + block("--version", "```text\nold\n```\n")
+    )
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(PYPROJECT)
     monkeypatch.setattr(readme_check, "README", readme)
@@ -240,3 +250,16 @@ def test_style_reports_problems(
     monkeypatch.setattr(readme_check, "README", readme)
     assert readme_check.style() == 1
     assert "README.md: line 1: boilerplate section" in capsys.readouterr().err
+
+
+def test_agent_browser_requirement_states_the_minimum_and_the_tested_version() -> None:
+    wanted = REQUIREMENT
+    good = f"- [agent-browser](https://example.org) {wanted}\n"
+    assert readme_check.check_agent_browser(good) == []
+    for bad in (
+        "- [agent-browser](https://example.org) 0.1 or newer\n",
+        "- [agent-browser](https://example.org) 0.1 or newer, tested with 0.1.0\n",
+        "no such line\n",
+    ):
+        (problem,) = readme_check.check_agent_browser(bad)
+        assert wanted in problem.message

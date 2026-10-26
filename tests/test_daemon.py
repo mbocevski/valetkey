@@ -2694,3 +2694,23 @@ def test_the_liveness_check_does_not_end_a_session_opened_since(roots: sites.Roo
             assert (current.closed, state.kind) == (1, "idle")
 
     run(scenario())
+
+
+def test_an_agent_browser_below_the_minimum_refuses_the_session_with_a_clear_error(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    minimum = sessions.version_text(sessions.MIN_VERSION)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            rig.factory.fail = sessions.VersionError(
+                f"agent-browser 0.1.0 is too old; valetkey needs {minimum} or newer"
+            )
+            with pytest.raises(DaemonError) as info:
+                await c.call("open", site="sitex")
+            assert info.value.code == "session_failed"
+            assert f"valetkey needs {minimum} or newer" in info.value.message
+            assert (await c.call("status"))["sessions"] == []
+
+    run(scenario())

@@ -91,6 +91,14 @@ entry = "uv run --frozen python tools/readme_check.py commit-msg"
 stages = ["commit-msg"]
 
 [[repos.hooks]]
+id = "agent-browser-version"
+name = "agent-browser versions agree"
+language = "system"
+entry = "uv run --frozen python tools/version_check.py"
+files = '^(\.github/workflows/ci\.yml|packaging/arch/PKGBUILD|src/valetkey/sessions\.py|tools/version_check\.py)$'
+pass_filenames = false
+
+[[repos.hooks]]
 id = "changelog-lint"
 name = "CHANGELOG records user-facing changes"
 language = "system"
