@@ -219,7 +219,7 @@ Each check prints one line: ok, FAIL, warn or info. Required checks are
 bubblewrap and user namespaces, Chromium, agent-browser 0.39 or newer, and
 XDG_RUNTIME_DIR. A missing Wayland display is a warning, because only logging in
 needs one, and so is a compositor without security-context support, where the
-login window is not restricted, and an agent-browser newer than 0.39.2, the
+login window is not restricted, and an agent-browser newer than 0.39.4, the
 version valetkey was tested with, and so is a CPU other than x86_64, where the
 sandbox has no syscall filter. The state of the systemd units is shown for
 information. A config.json that others can write to is ignored and fails. The

@@ -42,7 +42,7 @@ valetkey doctor
 - Python 3.14 or newer, and [uv](https://docs.astral.sh/uv/)
 - [bubblewrap](https://github.com/containers/bubblewrap)
 - Chromium
-- [agent-browser](https://github.com/vercel-labs/agent-browser) 0.39 or newer, tested with 0.39.2
+- [agent-browser](https://github.com/vercel-labs/agent-browser) 0.39 or newer, tested with 0.39.4
 - A Wayland desktop, to log in
 
 The [install page](docs/install.md) says what each route installs and how to remove it.

@@ -855,7 +855,7 @@ class FakeSystem:
         self.outputs: dict[str, tuple[int, str]] = {
             "/usr/bin/bwrap --version": (0, "bubblewrap 0.13.1\n"),
             "/usr/bin/chromium --version": (0, "Chromium 156.0.8078.47 Arch Linux\n"),
-            "/usr/bin/agent-browser --version": (0, "agent-browser 0.39.2\n"),
+            "/usr/bin/agent-browser --version": (0, "agent-browser 0.39.4\n"),
             "systemctl --user is-active valetkeyd.socket": (3, "inactive\n"),
         }
         self.probe: tuple[int, str] = (0, "")
@@ -921,7 +921,7 @@ def test_doctor_all_good(tmp_path: Path) -> None:
         "bwrap": ("ok", "bwrap 0.13.1"),
         "namespaces": ("ok", "unprivileged user namespaces work"),
         "chromium": ("ok", "chromium 156"),
-        "agent-browser": ("ok", "agent-browser 0.39.2"),
+        "agent-browser": ("ok", "agent-browser 0.39.4"),
         "runtime-dir": ("ok", "XDG_RUNTIME_DIR=/run/user/1000"),
         "display": ("ok", "Wayland display /run/user/1000/wayland-1"),
         "security-context": ("ok", "the Wayland compositor restricts the login window"),
@@ -1028,9 +1028,9 @@ def test_doctor_warns_about_a_newer_agent_browser_and_does_not_fail(tmp_path: Pa
     fake.outputs["/usr/bin/agent-browser --version"] = (0, "agent-browser 0.40.1\n")
     assert results(fake)["agent-browser"] == (
         "warn",
-        "agent-browser 0.40.1 is newer than 0.39.2, the version valetkey was tested with",
+        "agent-browser 0.40.1 is newer than 0.39.4, the version valetkey was tested with",
     )
-    for version in ("0.39.0", "0.39.2"):
+    for version in ("0.39.0", "0.39.4"):
         fake.outputs["/usr/bin/agent-browser --version"] = (0, f"agent-browser {version}\n")
         assert results(fake)["agent-browser"] == ("ok", f"agent-browser {version}")
 

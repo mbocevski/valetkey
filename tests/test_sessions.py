@@ -145,7 +145,7 @@ def test_check_version_warns_once_about_a_newer_version(
         sessions.check_version((0, 40, 0))
         sessions.check_version((0, 40, 0))
         sessions.check_version((0, 41, 0))
-    assert "0.40.0 is newer than 0.39.2" in caplog.text
+    assert "0.40.0 is newer than 0.39.4" in caplog.text
     assert [r.getMessage().split()[1] for r in caplog.records] == ["0.40.0", "0.41.0"]
 
 
@@ -166,7 +166,7 @@ def test_version_texts_and_the_untested_test() -> None:
     assert sessions.short_version_text((0, 39, 2)) == "0.39.2"
     assert not sessions.is_untested(sessions.TESTED_VERSION)
     assert not sessions.is_untested(sessions.MIN_VERSION)
-    assert sessions.is_untested((0, 39, 3))
+    assert sessions.is_untested((0, 39, 5))
 
 
 def test_the_minimum_does_not_exceed_the_tested_version() -> None:
