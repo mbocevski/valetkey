@@ -26,12 +26,27 @@ headless to a local page that redirects with HTTP 302 and reading ``<profile>/De
   still shows up.
 * That headless run recorded no visit for a frame inside the page. Subframe visits are the core
   types 3 and 4 in Chromium's page transition list, so they are skipped by type.
+
+**The history is hostile.** The login window is a browser a website controls, and it writes the
+``History`` database this module reads. A page can leave a file that is not a database at all, a
+symlink or a sparse file as big as the disk, a view that never ends in place of a table, a
+trigger, a schema whose names are text written to steer an agent, or millions of rows. So the
+file is opened without following links, must be a regular file under :data:`MAX_BYTES`, and is
+copied within that cap. The copy is opened read-only with a defensive configuration and an
+authorizer that allows nothing but reading the ``urls`` and ``visits`` tables, which must be plain
+tables: any view, trigger or virtual table makes the file unreadable. A time budget ends a query
+that runs too long, and every query has a row limit. Whatever goes wrong becomes a
+:class:`HistoryError` with a fixed message. The details, which may hold text the page chose, go to
+the log and nowhere else.
 """
 
 import contextlib
-import shutil
+import logging
+import os
 import sqlite3
+import stat
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,14 +58,29 @@ from valetkey import sites
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+logger = logging.getLogger(__name__)
+
 _SIDE_FILES = ("-wal", "-journal")
 _MAX_NAMED = 4
 _SHOWN_WHEN_TRIMMED = 3
+MAX_BYTES = 64 * 1024 * 1024
+"""The most a history file (or one of its side files) may hold: 64 MiB. Chromium's grows with
+use, but a login's profile is new and small."""
+QUERY_SECONDS = 2.0
+"""The time all the queries of one read share, before they are stopped."""
+MAX_ROWS = 100_000
+"""The most rows one query returns. A history that has more is read as far as this. The queries
+below spell the number out, and a test keeps the two equal."""
+MAX_URL = 4096
+"""Longer addresses are cut. They are still read for their host, which comes first."""
+_COPY_CHUNK = 1 << 20
+_PROGRESS_STEP = 10_000
+_TABLES = frozenset({"urls", "visits"})
 
 # Core types 3 and 4 are the subframe loads.
 _QUERY = (
     "SELECT u.url FROM visits AS v JOIN urls AS u ON u.id = v.url "
-    "WHERE (v.transition & 255) NOT IN (3, 4)"
+    "WHERE (v.transition & 255) NOT IN (3, 4) LIMIT 100000"
 )
 
 
@@ -58,7 +88,7 @@ _QUERY = (
 _FORM_ORIGINS = (
     "SELECT p.url FROM visits AS v JOIN visits AS f ON f.id = v.from_visit "
     "JOIN urls AS p ON p.id = f.url "
-    "WHERE (v.transition & 255) = 7 AND (f.transition & 255) NOT IN (3, 4)"
+    "WHERE (v.transition & 255) = 7 AND (f.transition & 255) NOT IN (3, 4) LIMIT 100000"
 )
 _LAST_PAGE = (
     "SELECT u.url FROM visits AS v JOIN urls AS u ON u.id = v.url "
@@ -79,21 +109,138 @@ class Classification:
     excluded: tuple[str, ...]
 
 
+class HistoryError(sqlite3.DatabaseError):
+    """The login's history cannot be read, or is not to be trusted.
+
+    The message is always the same fixed phrase. What the file said about itself is in the log.
+    """
+
+
+_UNREADABLE = "the login's history could not be read"
+
+
+def _copy_capped(source: Path, target: Path, *, required: bool) -> bool:
+    """Copy ``source`` to ``target`` without following a link and without passing the cap.
+
+    The file is opened with ``O_NOFOLLOW`` and checked with ``fstat`` on the open file, so what
+    is checked is what is read: it must be a regular file no larger than :data:`MAX_BYTES`. Bytes
+    are counted as they are copied too, in case the file grows. Returns whether it was copied;
+    a missing file is not copied, and is an error only when ``required``.
+    """
+    try:
+        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        if required:
+            raise
+        return False
+    with os.fdopen(descriptor, "rb") as origin:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            message = f"{source} is not a regular file"
+            raise HistoryError(message)
+        if info.st_size > MAX_BYTES:
+            message = f"{source} is {info.st_size} bytes, over the cap of {MAX_BYTES}"
+            raise HistoryError(message)
+        copied = 0
+        with target.open("wb") as destination:
+            while chunk := origin.read(_COPY_CHUNK):
+                copied += len(chunk)
+                if copied > MAX_BYTES:
+                    message = f"{source} grew past the cap of {MAX_BYTES} while it was copied"
+                    raise HistoryError(message)
+                destination.write(chunk)
+    return True
+
+
+def _authorize(action: int, name: str | None, *_: object) -> int:
+    """Allow a SELECT that reads the ``urls`` and ``visits`` tables, and nothing else.
+
+    No function, no write, no setting, no attach, no other table: the queries here need none.
+    """
+    if action == sqlite3.SQLITE_SELECT:
+        return sqlite3.SQLITE_OK
+    if action == sqlite3.SQLITE_READ and name in _TABLES:
+        return sqlite3.SQLITE_OK
+    return sqlite3.SQLITE_DENY
+
+
+def _authorize_schema(action: int, name: str | None, *_: object) -> int:
+    """Allow a SELECT that reads ``sqlite_master``, for the check of the schema, and no more."""
+    if action == sqlite3.SQLITE_SELECT or (
+        action == sqlite3.SQLITE_READ and name == "sqlite_master"
+    ):
+        return sqlite3.SQLITE_OK
+    return sqlite3.SQLITE_DENY
+
+
+def _check_schema(database: sqlite3.Connection) -> None:
+    """Refuse a database whose ``urls`` or ``visits`` is not a plain table, or that has extras.
+
+    A view or trigger could run code of the page's choosing in place of a table, and a virtual
+    table could be a module that does more than store rows. Chromium's history has tables and
+    indexes, and the two tables are all that is read.
+    """
+    database.set_authorizer(_authorize_schema)
+    entries = database.execute("SELECT type, name, sql FROM sqlite_master LIMIT ?", (MAX_ROWS,))
+    found = set()
+    for kind, name, definition in entries:
+        if kind not in {"table", "index"}:
+            message = f"the schema holds a {kind}"
+            raise HistoryError(message)
+        if kind == "table":
+            found.add(name)
+            if (definition or "").lstrip().upper().startswith("CREATE VIRTUAL"):
+                message = f"{name} is a virtual table"
+                raise HistoryError(message)
+    if not found >= _TABLES:
+        message = "the schema lacks the tables of a history"
+        raise HistoryError(message)
+
+
 def _query_history(history_path: Path, *queries: str) -> list[list[tuple[Any, ...]]]:
     """Run ``queries`` on a copy of the history database and return their rows.
 
     The database is copied, with its ``-wal`` and ``-journal`` files, to a temporary directory
     and opened read-only there, so a browser that still holds the live file is never disturbed.
+    See the module docstring for what is done about a hostile file.
+
+    Raises:
+        HistoryError: when the file or the database cannot be trusted or read. Its message is a
+            fixed phrase; the cause is logged.
+
     """
-    with tempfile.TemporaryDirectory(prefix="valetkey-history-") as scratch:
-        copy = Path(scratch) / "History"
-        shutil.copyfile(history_path, copy)
-        for side in _SIDE_FILES:
-            source = history_path.with_name(history_path.name + side)
-            if source.is_file():
-                shutil.copyfile(source, copy.with_name(copy.name + side))
-        with contextlib.closing(sqlite3.connect(f"{copy.as_uri()}?mode=ro", uri=True)) as database:
-            return [list(database.execute(query)) for query in queries]
+    try:
+        with tempfile.TemporaryDirectory(prefix="valetkey-history-") as scratch:
+            copy = Path(scratch) / "History"
+            _copy_capped(history_path, copy, required=True)
+            for side in _SIDE_FILES:
+                _copy_capped(
+                    history_path.with_name(history_path.name + side),
+                    copy.with_name(copy.name + side),
+                    required=False,
+                )
+            return _read(copy, queries)
+    except (OSError, sqlite3.Error) as error:
+        logger.warning("the history at %s could not be read: %r", history_path, error)
+        raise HistoryError(_UNREADABLE) from None
+
+
+def _read(copy: Path, queries: tuple[str, ...]) -> list[list[tuple[Any, ...]]]:
+    deadline = time.monotonic() + QUERY_SECONDS
+    with contextlib.closing(sqlite3.connect(f"{copy.as_uri()}?mode=ro", uri=True)) as database:
+        database.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)  # noqa: FBT003
+        database.setconfig(sqlite3.SQLITE_DBCONFIG_TRUSTED_SCHEMA, False)  # noqa: FBT003
+        database.set_progress_handler(lambda: time.monotonic() > deadline, _PROGRESS_STEP)
+        database.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_BYTES)
+        _check_schema(database)
+        database.set_authorizer(_authorize)
+        return [
+            [
+                (row[0][:MAX_URL] if isinstance(row[0], str) else row[0],)
+                for row in database.execute(query)
+            ]
+            for query in queries
+        ]
 
 
 def navigation_hosts(history_path: Path) -> set[str]:
@@ -104,7 +251,7 @@ def navigation_hosts(history_path: Path) -> set[str]:
     history yet.
 
     Raises:
-        sqlite3.DatabaseError: when the file is not a Chromium history database.
+        HistoryError: when the file is not a history database, or cannot be trusted or read.
 
     """
     if not history_path.is_file():
@@ -130,7 +277,7 @@ def login_pages(history_path: Path, start_url: str) -> tuple[str, ...]:
     top-level visit), which is where a signed-in person lands. A missing file gives ``()``.
 
     Raises:
-        sqlite3.DatabaseError: when the file is not a Chromium history database.
+        HistoryError: when the file is not a history database, or cannot be trusted or read.
 
     """
     if not history_path.is_file():

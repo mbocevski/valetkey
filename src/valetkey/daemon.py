@@ -1313,9 +1313,17 @@ class Daemon:
                     existing, classification, start, self._now(), site=state.name, pages=pages
                 )
                 await asyncio.to_thread(sites.save_policy, self.roots, policy)
-            except Exception as error:
+            except learn.HistoryError as error:
+                # The message is a fixed phrase. What the history said is in the log, never here:
+                # the login browser wrote it, so it may be text meant for the agent.
+                logger.warning("could not save the login for %s: %s", state.name, error)
+                state.summary = f"The {state.name} login could not be saved: {error}."
+                return
+            except Exception:
                 logger.exception("could not save the login for %s", state.name)
-                state.summary = f"The {state.name} login could not be saved: {error}"
+                state.summary = (
+                    f"The {state.name} login could not be saved. The daemon's log says why."
+                )
                 return
             state.summary = learn.summary(policy, classification)
 
