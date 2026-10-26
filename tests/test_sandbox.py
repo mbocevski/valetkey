@@ -28,11 +28,12 @@ def make_sandbox(  # noqa: PLR0913  # one keyword per field a test varies
     etc_entries: tuple[str, ...] = ("passwd", "ssl"),
     die_with_parent: bool = True,
     wayland_socket: Path | None = None,
+    writable_dirs: tuple[Path, ...] = (),
 ) -> sandbox.Sandbox:
     """A sandbox whose paths all lie under ``base``."""
     return sandbox.Sandbox(
         profile_dir=base / "profile",
-        downloads_dir=base / "downloads",
+        writable_dirs=writable_dirs,
         proxy_socket=base / "proxy" / "p.sock",
         log_file=base / "logs" / "box.log",
         runtime_dir=runtime_dir,
@@ -43,17 +44,19 @@ def make_sandbox(  # noqa: PLR0913  # one keyword per field a test varies
     )
 
 
-def build(
+def build(  # noqa: PLR0913  # one keyword per field a test varies
     base: Path,
     command: list[str] | None = None,
     *,
     shared_dir: Path | None = None,
     die_with_parent: bool = True,
     wayland_socket: Path | None = None,
+    writable_dirs: tuple[Path, ...] = (),
 ) -> list[str]:
     return sandbox.bwrap_argv(
         make_sandbox(
             base,
+            writable_dirs=writable_dirs,
             shared_dir=shared_dir,
             die_with_parent=die_with_parent,
             wayland_socket=wayland_socket,
@@ -207,11 +210,16 @@ def test_argv_system_directories_are_read_only(tmp_path: Path) -> None:
 
 
 def test_argv_writes_only_where_it_was_told(tmp_path: Path) -> None:
-    argv = build(tmp_path, shared_dir=tmp_path / "shared")
+    argv = build(
+        tmp_path,
+        shared_dir=tmp_path / "shared",
+        writable_dirs=(tmp_path / "downloads" / ".incoming", tmp_path / "downloads" / ".shots"),
+    )
     writable = {src for src, _ in pairs(argv, "--bind")}
     assert writable == {
         str(tmp_path / "profile"),
-        str(tmp_path / "downloads"),
+        str(tmp_path / "downloads" / ".incoming"),
+        str(tmp_path / "downloads" / ".shots"),
         str(tmp_path / "proxy" / "p.sock"),
         str(tmp_path / "shared"),
     }
@@ -820,3 +828,41 @@ print("still a socket:", path.is_socket())
     assert "'replace': 'EBUSY'" in log
     assert "worked" not in log
     assert "still a socket: True" in log
+
+
+@integration
+@needs_namespaces
+def test_the_browser_sees_and_writes_only_its_download_folders(box: sandbox.Sandbox) -> None:
+    """The folder the person reads is not bound: nothing inside reaches what is delivered there."""
+    delivered = box.profile_dir.parent / "downloads"
+    (delivered / ".incoming").mkdir()
+    (delivered / ".shots").mkdir()
+    (delivered / "invoice.txt").write_text("delivered")
+    box = replace(box, writable_dirs=(delivered / ".incoming", delivered / ".shots"))
+    code = """
+import os, sys
+from pathlib import Path
+delivered = Path(sys.argv[1])
+print("sees", sorted(entry.name for entry in delivered.iterdir()))
+for action in (
+    lambda: (delivered / "new.txt").write_text("x"),
+    lambda: os.symlink("/etc/passwd", delivered / "link"),
+    lambda: (delivered / "invoice.txt").write_text("changed"),
+    lambda: (delivered / "dir").mkdir(),
+):
+    action()  # these land in the namespace's own temporary file system, not on the host
+(delivered / ".incoming" / "a.bin").write_text("x")
+(delivered / ".shots" / "s.png").write_text("x")
+"""
+    status, log = run_python(box, code, str(delivered))
+    assert status == 0, log
+    assert "sees ['.incoming', '.shots']" in log  # the delivered file is not even visible
+    # On the host, the delivered folder is as it was, and only the two bound folders took files.
+    assert sorted(entry.name for entry in delivered.iterdir()) == [
+        ".incoming",
+        ".shots",
+        "invoice.txt",
+    ]
+    assert (delivered / "invoice.txt").read_text() == "delivered"
+    assert (delivered / ".incoming" / "a.bin").is_file()
+    assert (delivered / ".shots" / "s.png").is_file()

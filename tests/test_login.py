@@ -474,7 +474,6 @@ def test_the_browser_is_started_in_a_private_sandbox_with_the_display(roots: sit
         def __call__(self, box: sandbox.Sandbox, command: list[str]) -> subprocess.Popen[bytes]:
             for name, path in {
                 "profile": box.profile_dir,
-                "downloads": box.downloads_dir,
                 "login": box.proxy_socket.parent,
             }.items():
                 modes[name] = stat.S_IMODE(path.stat().st_mode)
@@ -491,10 +490,10 @@ def test_the_browser_is_started_in_a_private_sandbox_with_the_display(roots: sit
 
     run(scenario())
     (box,) = fake.boxes
-    assert modes == {"profile": 0o700, "downloads": 0o700, "login": 0o700}
+    assert modes == {"profile": 0o700, "login": 0o700}
+    assert box.writable_dirs == ()  # a login window gets no folder to save downloads in
     assert box.wayland_socket == Path("/run/user/1000/wayland-0")
     assert box.profile_dir == sites.profile_path(roots, "sitex")
-    assert box.downloads_dir == sites.downloads_path(roots, "sitex")
     assert box.proxy_socket == login_dir(roots) / "proxy.sock"
     assert box.runtime_dir == roots.runtime
     assert box.log_file == roots.runtime / "valetkey" / "logins" / "sitex.log"

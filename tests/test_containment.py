@@ -253,8 +253,10 @@ def world() -> Iterator[World]:
         roots = sites.Roots(base / "cfg", base / "state", base / "rt")
         paths = sessions.session_paths(roots, "demo")
         paths.proxy_socket.parent.mkdir(parents=True)
-        downloads = sites.ensure_downloads(roots, "demo")
-        trace, wrapper = downloads / "trace.txt", downloads / "chromium"
+        # The browser may write into a site's hidden screenshots folder, which a session leaves be.
+        shared = paths.screenshots_dir
+        shared.mkdir(parents=True, mode=0o700)
+        trace, wrapper = shared / "trace.txt", shared / "chromium"
         wrapper.write_text(
             "#!/bin/sh\n"
             f"exec /usr/bin/strace -f -s 0 -e trace={TRACED_CALLS} -o {trace} "

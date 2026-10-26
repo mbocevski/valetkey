@@ -43,6 +43,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- The browser can now write only into its two hidden folders in a site's downloads folder, not into the folder where finished downloads are kept.
 - `config.json` is ignored, and `valetkey doctor` fails, when it belongs to another user or others can write to it, because it names a program the daemon runs.
 - A browser can no longer remove or replace the proxy's socket, and closing a proxy whose socket was swapped no longer fails.
 - The proxy forwards only the body a plain HTTP request announces, so a pipelined second request no longer reaches the first one's server. It refuses a request with an unclear length.

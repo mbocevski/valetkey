@@ -488,7 +488,7 @@ class Session:
         session = cls(paths, runtime, binary_path, timeout, Page(start_url, ""))
         box = sandbox.Sandbox(
             profile_dir=paths.profile_dir,
-            downloads_dir=paths.downloads_dir,
+            writable_dirs=(paths.incoming_dir, paths.screenshots_dir),
             proxy_socket=paths.proxy_socket,
             log_file=paths.log_file,
             runtime_dir=runtime,

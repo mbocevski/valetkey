@@ -162,8 +162,6 @@ class Sandbox:
 
     profile_dir: Path
     """Chrome's user data directory. Read-write."""
-    downloads_dir: Path
-    """Where downloads land. Read-write."""
     proxy_socket: Path
     """The proxy's unix socket, which must exist when the sandbox starts. The file itself is
     bound, not its directory, so nothing inside can unlink it, rename it or put another file in
@@ -173,6 +171,10 @@ class Sandbox:
     runtime_dir: Path
     """``$XDG_RUNTIME_DIR`` inside. Starts empty; nothing of the host's runtime directory
     (agent sockets, the session bus) is visible."""
+    writable_dirs: tuple[Path, ...] = ()
+    """Directories the browser writes into, such as the one it saves downloads to. Read-write,
+    and the only part of the downloads folder the browser can see: the folder the person reads
+    is not bound, so nothing inside can add, change or remove what is delivered there."""
     shared_dir: Path | None = None
     """A directory both sides use, such as the socket directory of the browser driver. Bound
     read-write. When it lies under ``runtime_dir`` it appears at the same path inside."""
@@ -322,7 +324,7 @@ def bwrap_argv(
     )
     writable = [
         sandbox.profile_dir,
-        sandbox.downloads_dir,
+        *sandbox.writable_dirs,
         sandbox.proxy_socket,
         *([sandbox.shared_dir] if sandbox.shared_dir else []),
     ]

@@ -452,7 +452,7 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     socket_path = wayland_socket or await asyncio.to_thread(find_wayland_socket)
     major = chrome_major or await asyncio.to_thread(sandbox.installed_chrome_major)
     runtime = sites.runtime_path(roots)
-    profile_dir, downloads_dir, login_dir = await asyncio.to_thread(_prepare, roots, site, runtime)
+    profile_dir, login_dir = await asyncio.to_thread(_prepare, roots, site, runtime)
     options: dict[str, Any] = {"quiet_hosts": sandbox.BACKGROUND_HOSTS} | dict(proxy_options or {})
     proxy = Proxy(placeholder, Mode.RECORD, **options)
     proxy_socket = login_dir / "proxy.sock"
@@ -465,7 +465,6 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
         )
         box = sandbox.Sandbox(
             profile_dir=profile_dir,
-            downloads_dir=downloads_dir,
             proxy_socket=proxy_socket,
             log_file=runtime / "logins" / f"{site}.log",
             runtime_dir=cast("Path", roots.runtime),
@@ -500,17 +499,16 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     return LoginHandle(process, exited, proxy, (login_dir, profile_dir), finish, context)
 
 
-def _prepare(roots: sites.Roots, site: str, runtime: Path) -> tuple[Path, Path, Path]:
-    """Create the profile, downloads and per-login socket directories (all ``0700``)."""
+def _prepare(roots: sites.Roots, site: str, runtime: Path) -> tuple[Path, Path]:
+    """Create the profile and per-login socket directories (all ``0700``)."""
     profile = sites.ensure_profile(roots, site)
-    downloads = sites.ensure_downloads(roots, site)
     sites.ensure_runtime(roots)
     login_dir = runtime
     for part in ("logins", site):
         login_dir /= part
         login_dir.mkdir(mode=0o700, exist_ok=True)
         login_dir.chmod(0o700)
-    return profile, downloads, login_dir
+    return profile, login_dir
 
 
 async def run_login(
