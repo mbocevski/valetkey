@@ -18,12 +18,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import asyncio
+    from collections.abc import Callable
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 """The constant of RFC 6455 section 1.3, mixed into the handshake."""
 MAX_PAYLOAD = 8 * 1024 * 1024
 """The largest message accepted. A VNC client sends small messages; a clipboard is the largest."""
 MAX_CONTROL = 125
+MAX_FRAGMENTS = 1000
+"""Most frames one message may be sent in. Every frame costs a little, empty ones included."""
 _SHORT = 125
 _MEDIUM = 126
 _LONG = 127
@@ -170,6 +173,7 @@ class _Message:
         self._limit = limit
         self._first: Opcode | None = None
         self._parts: list[bytes] = []
+        self._size = 0
 
     def add(self, frame: Frame) -> tuple[Opcode, bytes] | None:
         """Add a data frame; return the whole message when this one was the last."""
@@ -182,8 +186,12 @@ class _Message:
             message = "a new message began before the last one ended"
             raise ProtocolError(message)
         self._parts.append(frame.payload)
-        if sum(map(len, self._parts)) > self._limit:
+        self._size += len(frame.payload)
+        if self._size > self._limit:
             message = f"a message over the limit of {self._limit} bytes"
+            raise ProtocolError(message, Status.TOO_BIG)
+        if len(self._parts) > MAX_FRAGMENTS:
+            message = f"a message in more than {MAX_FRAGMENTS} fragments"
             raise ProtocolError(message, Status.TOO_BIG)
         if not frame.final:
             return None
@@ -198,13 +206,18 @@ class _Message:
 
 
 async def read_message(
-    reader: asyncio.StreamReader, send: asyncio.StreamWriter, *, limit: int = MAX_PAYLOAD
+    reader: asyncio.StreamReader,
+    send: asyncio.StreamWriter,
+    *,
+    limit: int = MAX_PAYLOAD,
+    on_frame: Callable[[], None] | None = None,
 ) -> tuple[Opcode, bytes] | None:
     """Read the next whole data message, answering pings on the way.
 
     A message sent in fragments is put together. Returns ``(opcode, payload)`` with the opcode
     of its first frame, or ``None`` when the peer closed (its close frame is answered here).
-    A pong is ignored.
+    A pong is ignored. ``on_frame`` is called for every frame that arrives, a pong included, so
+    a caller can tell that the peer is still there.
 
     Raises:
         ProtocolError: for a protocol violation, including a text message that is not UTF-8
@@ -214,6 +227,8 @@ async def read_message(
     message = _Message(limit)
     while True:
         frame = await read_frame(reader, limit=limit)
+        if on_frame is not None:
+            on_frame()
         if frame.opcode is Opcode.PING:
             send.write(encode_frame(Opcode.PONG, frame.payload))
             await send.drain()

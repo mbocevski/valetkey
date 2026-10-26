@@ -19,7 +19,10 @@ person has opened it is worth nothing. Rules:
   someone else controls, which is how DNS rebinding reaches a local service.
 * A WebSocket whose ``Origin`` is not the page that was served is ``403``. A page on another
   site cannot drive the viewer, even in a browser that holds the link.
-* One viewer at a time. A second WebSocket is ``409`` until the first has gone.
+* One viewer at a time. A new viewer that has the cookie takes over: the old one is closed, so a
+  laptop that went to sleep does not lock its owner out.
+* The gateway sends a ping every 30 seconds and drops a viewer that has sent nothing for 90.
+* At most 8 connections at once. One more is closed without an answer.
 * No new connection after ``lifetime`` seconds (ten minutes): everything is ``404`` from then on.
   A viewer that is already connected keeps its connection.
 * Every response says ``Cache-Control: no-store`` and refuses to be framed.
@@ -45,6 +48,12 @@ if TYPE_CHECKING:
 
 LIFETIME = 600.0
 """Seconds after the gateway starts during which a new connection is accepted."""
+PING_INTERVAL = 30.0
+"""Seconds between the pings sent to a viewer."""
+IDLE_LIMIT = 90.0
+"""Seconds of silence from a viewer, pongs included, after which it is dropped."""
+MAX_CONNECTIONS = 8
+"""Connections served at once, a viewer's WebSocket included."""
 HEAD_TIMEOUT = 10.0
 """Seconds a client has to send its request line and headers."""
 MAX_HEAD = 16 * 1024
@@ -78,7 +87,6 @@ _REASONS = {
     403: "Forbidden",
     404: "Not Found",
     405: "Method Not Allowed",
-    409: "Conflict",
     431: "Request Header Fields Too Large",
     502: "Bad Gateway",
 }
@@ -198,6 +206,8 @@ class Gateway:
         *,
         token: str | None = None,
         lifetime: float = LIFETIME,
+        ping_interval: float = PING_INTERVAL,
+        idle_limit: float = IDLE_LIMIT,
         clock: Callable[[], float] = time.monotonic,
         connector: Callable[
             [Path], asyncio.Future[tuple[asyncio.StreamReader, asyncio.StreamWriter]]
@@ -213,11 +223,13 @@ class Gateway:
         self._vnc_socket = vnc_socket
         self._root = root
         self._lifetime = lifetime
+        self._ping_interval = ping_interval
+        self._idle_limit = idle_limit
         self._clock = clock
         self._connect = connector or _unix_connect
         self._server: asyncio.Server | None = None
         self._deadline = 0.0
-        self._viewer = False
+        self._viewer: asyncio.Task[None] | None = None
         self._used = False
         self._cookie = secrets.token_urlsafe(24)
         self._tasks: set[asyncio.Task[None]] = set()
@@ -257,6 +269,11 @@ class Gateway:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         task = asyncio.current_task()
         assert task is not None  # noqa: S101 - a handler always runs in a task
+        if len(self._tasks) >= MAX_CONNECTIONS:
+            writer.close()  # no answer: whoever is holding the other connections open gets none
+            with contextlib.suppress(OSError):
+                await writer.wait_closed()
+            return
         self._tasks.add(task)
         try:
             await self._serve(reader, writer)
@@ -349,13 +366,22 @@ class Gateway:
         )
         if not ok:
             raise _BadRequestError(400, "not a WebSocket handshake")
-        if self._viewer:
-            raise _BadRequestError(409, "someone is already viewing this login")
-        self._viewer = True
+        await self._replace_viewer()
+        self._viewer = asyncio.current_task()
         try:
             await self._splice(headers, key, reader, writer)
         finally:
-            self._viewer = False
+            self._viewer = None  # a newer viewer waits for this one to end before it registers
+
+    async def _replace_viewer(self) -> None:
+        """End the viewer that is connected, if any, before a new one takes its place.
+
+        Whoever has the cookie is the person the link was for. A viewer that is still listed
+        after the person's laptop slept is not someone else, and must not keep them out.
+        """
+        if (old := self._viewer) is not None:
+            old.cancel()
+            await asyncio.wait({old})
 
     async def _splice(
         self,
@@ -378,31 +404,51 @@ class Gateway:
             reply["Sec-WebSocket-Protocol"] = "binary"
         await _respond(writer, 101, b"", reply, status_only=True)
         try:
-            await _pump(reader, writer, vnc_reader, vnc_writer)
+            await _pump(
+                reader, writer, vnc_reader, vnc_writer, (self._ping_interval, self._idle_limit)
+            )
         finally:
             vnc_writer.close()
             with contextlib.suppress(OSError):
                 await vnc_writer.wait_closed()
 
 
-async def _pump(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-    vnc_reader: asyncio.StreamReader,
-    vnc_writer: asyncio.StreamWriter,
-) -> None:
-    """Copy between the WebSocket and the VNC socket until either side ends."""
+class _Pipe:
+    """The two ends of one viewer's connection, and the three jobs that keep them in step."""
 
-    async def to_viewer() -> Status:
-        while data := await vnc_reader.read(CHUNK):
-            writer.write(websocket.encode_frame(Opcode.BINARY, data))
-            await writer.drain()
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        vnc_reader: asyncio.StreamReader,
+        vnc_writer: asyncio.StreamWriter,
+        keepalive: tuple[float, float],
+    ) -> None:
+        self._reader = reader
+        self._writer = writer
+        self._vnc_reader = vnc_reader
+        self._vnc_writer = vnc_writer
+        self._interval, self._limit = keepalive
+        self._loop = asyncio.get_running_loop()
+        self._heard = self._loop.time()
+
+    def _note(self) -> None:
+        self._heard = self._loop.time()
+
+    async def to_viewer(self) -> Status:
+        """Send what the display says to the viewer, in binary frames."""
+        while data := await self._vnc_reader.read(CHUNK):
+            self._writer.write(websocket.encode_frame(Opcode.BINARY, data))
+            await self._writer.drain()
         return Status.GOING_AWAY
 
-    async def to_display() -> Status:
+    async def to_display(self) -> Status:
+        """Give the display what the viewer sends."""
         while True:
             try:
-                message = await websocket.read_message(reader, writer)
+                message = await websocket.read_message(
+                    self._reader, self._writer, on_frame=self._note
+                )
             except ProtocolError as error:
                 return error.status
             if message is None:
@@ -410,10 +456,39 @@ async def _pump(
             opcode, payload = message
             if opcode is not Opcode.BINARY:
                 return Status.UNSUPPORTED
-            vnc_writer.write(payload)
-            await vnc_writer.drain()
+            self._vnc_writer.write(payload)
+            await self._vnc_writer.drain()
 
-    tasks = [asyncio.ensure_future(to_viewer()), asyncio.ensure_future(to_display())]
+    def _silence(self) -> float:
+        return self._loop.time() - self._heard
+
+    async def watch(self) -> Status:
+        """Ping the viewer, and give up on it once it has sent nothing for the limit."""
+        while self._silence() < self._limit:
+            await asyncio.sleep(min(self._interval, self._limit - self._silence()))
+            if self._silence() < self._limit:
+                self._writer.write(websocket.encode_frame(Opcode.PING, b""))
+                await self._writer.drain()
+        return Status.GOING_AWAY
+
+
+async def _pump(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    vnc_reader: asyncio.StreamReader,
+    vnc_writer: asyncio.StreamWriter,
+    keepalive: tuple[float, float],
+) -> None:
+    """Copy between the WebSocket and the VNC socket until either side ends or the viewer is gone.
+
+    ``keepalive`` is the ping interval and the silence after which the viewer is dropped.
+    """
+    pipe = _Pipe(reader, writer, vnc_reader, vnc_writer, keepalive)
+    tasks = [
+        asyncio.ensure_future(pipe.to_viewer()),
+        asyncio.ensure_future(pipe.to_display()),
+        asyncio.ensure_future(pipe.watch()),
+    ]
     status = Status.NORMAL
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

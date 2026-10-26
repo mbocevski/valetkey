@@ -110,7 +110,10 @@ The address is on the daemon's loopback, so the link only works through the tunn
 - The link works once. The first load of the page uses it up and sets a cookie that no script can
   read (`HttpOnly`, `SameSite=Strict`). Everything else, the WebSocket included, needs that cookie,
   so a link copied from a log later opens nothing.
-- Only one viewer at a time. A second one is refused while the first is connected.
+- Only one viewer at a time. A new viewer with the cookie takes over and the old one is closed, so
+  a laptop that slept does not lock you out of your own login.
+- The server pings the viewer every 30 seconds and drops it after 90 seconds of silence.
+- At most 8 connections at once, and a message sent in more than 1000 pieces is refused.
 - It stops accepting new connections ten minutes after the login starts.
 - A page on another site cannot use it: a request whose `Origin` is not the viewer page gets a 403.
 - The server answers only to a loopback host name.

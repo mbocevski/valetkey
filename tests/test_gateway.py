@@ -548,27 +548,36 @@ def test_a_websocket_needs_get(root: Path, short_dir: Path) -> None:
     run(scenario())
 
 
-def test_only_one_viewer_at_a_time(root: Path, short_dir: Path) -> None:
+def test_a_new_viewer_takes_over_from_the_one_that_is_there(root: Path, short_dir: Path) -> None:
     async def scenario() -> None:
         async with serving(root, short_dir) as rig:
             status, _, first_reader, first = await rig.connect()
             assert status == 101
-            await read_server_frame(first_reader)
-            second_status, _, _, second = await rig.connect()
-            assert second_status == 409
-            second.close()
-            # The page itself can still be fetched while someone views.
-            assert (await rig.request(f"/{TOKEN}/vnc.html"))[0] == 200
-            first.write(masked(Opcode.CLOSE, websocket.close_payload(1000)))
-            await read_server_frame(first_reader)
+            assert (await read_server_frame(first_reader))[1] == BANNER
+            # The first viewer is still listed (a laptop that went to sleep looks like this).
+            second_status, _, second_reader, second = await rig.connect()
+            assert second_status == 101
+            assert (await read_server_frame(second_reader))[1] == BANNER
+            assert await first_reader.read() == b""  # the old viewer's connection was ended
+            second.write(masked(Opcode.BINARY, b"hello"))
+            assert await read_server_frame(second_reader) == (Opcode.BINARY, b"hello")
+            assert rig.display.connections == 2
             first.close()
-            for _ in range(100):
-                third_status, _, _, third = await rig.connect()
-                third.close()
-                if third_status == 101:
-                    break
-                await asyncio.sleep(0.02)
-            assert third_status == 101
+            second.close()
+
+    run(scenario())
+
+
+def test_a_viewer_without_the_cookie_cannot_take_over(root: Path, short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with serving(root, short_dir) as rig:
+            _, _, reader, writer = await rig.connect()
+            await read_server_frame(reader)
+            status, *_ = await rig.connect(headers={"Cookie": None})
+            assert status == 404
+            writer.write(masked(Opcode.BINARY, b"still here"))
+            assert await read_server_frame(reader) == (Opcode.BINARY, b"still here")
+            writer.close()
 
     run(scenario())
 
@@ -783,5 +792,77 @@ def test_a_wrong_token_with_the_right_cookie_is_still_a_404(root: Path, short_di
         async with serving(root, short_dir) as rig:
             assert (await rig.request("/x" * 16 + "/vnc.html"))[0] == 404
             assert (await rig.request(f"/{'x' * 32}/app/ui.js"))[0] == 404
+
+    run(scenario())
+
+
+# -- connections, silence and pings ----------------------------------------------------------
+
+
+def test_more_connections_than_the_cap_are_closed_without_an_answer(
+    root: Path, short_dir: Path
+) -> None:
+    async def scenario() -> None:
+        async with serving(root, short_dir) as rig:
+            held = [await rig.open() for _ in range(gateway.MAX_CONNECTIONS)]
+            await asyncio.sleep(0.05)
+            refused = 0
+            for _ in range(1100):
+                reader, writer = await rig.open()
+                if await asyncio.wait_for(reader.read(), 5) == b"":
+                    refused += 1
+                writer.close()
+            assert refused == 1100
+            # The event loop and the listener are fine: free the held ones and ask normally.
+            for _, writer in held:
+                writer.close()
+            for _ in range(100):
+                status, *_ = await rig.request(f"/{TOKEN}/vnc.html")
+                if status == 200:
+                    break
+                await asyncio.sleep(0.02)
+            assert status == 200
+
+    run(scenario())
+
+
+def test_a_silent_viewer_is_pinged_and_then_dropped(root: Path, short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with serving(root, short_dir, ping_interval=0.05, idle_limit=0.3) as rig:
+            _, _, reader, writer = await rig.connect()
+            frames = [await read_server_frame(reader)]
+            while frames[-1][0] != Opcode.CLOSE:
+                frames.append(await asyncio.wait_for(read_server_frame(reader), 5))
+            opcodes = [opcode for opcode, _ in frames]
+            assert opcodes[0] == Opcode.BINARY  # the display's banner
+            assert opcodes.count(Opcode.PING) >= 3
+            assert int.from_bytes(frames[-1][1][:2], "big") == Status.GOING_AWAY
+            assert await asyncio.wait_for(reader.read(), 5) == b""
+            writer.close()
+            # The slot is free for the next viewer.
+            status, *_ = await rig.connect()
+            assert status == 101
+
+    run(scenario())
+
+
+def test_a_viewer_that_answers_the_pings_is_kept(root: Path, short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with serving(root, short_dir, ping_interval=0.05, idle_limit=0.3) as rig:
+            _, _, reader, writer = await rig.connect()
+            pongs = 0
+            deadline = asyncio.get_running_loop().time() + 1.0  # more than three times the limit
+            while asyncio.get_running_loop().time() < deadline:
+                opcode, payload = await asyncio.wait_for(read_server_frame(reader), 5)
+                assert opcode != Opcode.CLOSE
+                if opcode == Opcode.PING:
+                    writer.write(masked(Opcode.PONG, payload))
+                    pongs += 1
+            assert pongs >= 10
+            writer.write(masked(Opcode.BINARY, b"alive"))
+            while (frame := await read_server_frame(reader))[0] == Opcode.PING:
+                pass
+            assert frame == (Opcode.BINARY, b"alive")
+            writer.close()
 
     run(scenario())

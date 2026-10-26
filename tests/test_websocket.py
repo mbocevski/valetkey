@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import os
+import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -228,3 +229,48 @@ def test_text_must_be_utf8() -> None:
     assert info.value.status is Status.INVALID_DATA
     result, _ = message_of(client_frame(Opcode.TEXT, "héllo".encode()))
     assert result == (Opcode.TEXT, "héllo".encode())
+
+
+def test_a_flood_of_empty_fragments_is_refused_quickly() -> None:
+    frames = [client_frame(Opcode.BINARY, b"", final=False)]
+    frames += [client_frame(Opcode.CONTINUATION, b"", final=False)] * 40_000
+    started = time.perf_counter()
+    with pytest.raises(ProtocolError, match="more than 1000 fragments") as info:
+        message_of(*frames, limit=websocket.MAX_PAYLOAD)
+    assert info.value.status is Status.TOO_BIG
+    assert time.perf_counter() - started < 1.0
+
+
+def test_a_message_of_the_most_fragments_allowed_comes_through() -> None:
+    frames = [client_frame(Opcode.BINARY, b"a", final=False)]
+    frames += [client_frame(Opcode.CONTINUATION, b"b", final=False)] * (websocket.MAX_FRAGMENTS - 2)
+    frames.append(client_frame(Opcode.CONTINUATION, b"c"))
+    result, _ = message_of(*frames)
+    assert result == (Opcode.BINARY, b"a" + b"b" * (websocket.MAX_FRAGMENTS - 2) + b"c")
+
+
+def test_the_running_size_still_stops_a_message_over_the_limit_across_many_fragments() -> None:
+    frames = [client_frame(Opcode.BINARY, b"xx", final=False)]
+    frames += [client_frame(Opcode.CONTINUATION, b"xx", final=False)] * 10
+    with pytest.raises(ProtocolError, match="over the limit of 10 bytes") as info:
+        message_of(*frames, limit=10)
+    assert info.value.status is Status.TOO_BIG
+
+
+def test_every_frame_is_reported_as_a_sign_of_life() -> None:
+    seen: list[int] = []
+
+    async def scenario() -> None:
+        reader = reader_of(
+            client_frame(Opcode.PONG, b"x"),
+            client_frame(Opcode.PING, b""),
+            client_frame(Opcode.TEXT, b"hi"),
+        )
+        await websocket.read_message(
+            reader,
+            Sink(),  # ty: ignore[invalid-argument-type]
+            on_frame=lambda: seen.append(1),
+        )
+
+    run(scenario())
+    assert seen == [1, 1, 1]

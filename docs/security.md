@@ -126,10 +126,11 @@ refuses it screen capture, virtual input and clipboard managers. See the
 Off unless `remote_logins.novnc` is true. The login window then runs on a private headless
 display instead of yours, and a web server on `127.0.0.1` shows it. The link carries a random
 token and works once: the first page load sets an `HttpOnly`, `SameSite=Strict` cookie that the
-WebSocket needs. It takes one viewer at a time, refuses a foreign `Origin`, stops accepting
-connections after ten minutes, and is gone when the window closes. Anyone who opens the link first
-and can reach the loopback port, through your `ssh -L`, can type into the login window, so treat
-it like the password. It is never given to the agent: the client shows it to you, or
+WebSocket needs. It takes one viewer at a time, and a new one replaces the old. It drops a viewer
+that has been silent for 90 seconds, allows 8 connections, and refuses a foreign `Origin`. It
+stops accepting connections after ten minutes, and it is gone when the window closes. Anyone who
+opens the link first and can reach the loopback port, through your `ssh -L`, can type into the
+login window, so treat it like the password. It is never given to the agent: the client shows it to you, or
 `valetkey status` does. The [remote logins page](remote.md) has the details.
 
 ## Page content is untrusted
