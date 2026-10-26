@@ -3149,7 +3149,7 @@ def test_announce_kills_a_notification_that_hangs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level("INFO", logger="valetkey.daemon")
-    monkeypatch.setattr(daemon, "NOTIFY_TIMEOUT", 0.05)
+    monkeypatch.setattr(daemon, "NOTIFY_TIMEOUT", 0.25)
     notifier = FakeNotifier(hang=True)
 
     async def spawn(*_args: Any, **_kwargs: Any) -> FakeNotifier:  # noqa: ANN401
@@ -3157,7 +3157,7 @@ def test_announce_kills_a_notification_that_hangs(
 
     run(real_announce("sitex", which=lambda _name: "/x", spawn=spawn))
     assert notifier.killed
-    assert "notify-send did not finish in 0.05 seconds and was stopped" in caplog.text
+    assert "notify-send did not finish in 0.25 seconds and was stopped" in caplog.text
 
 
 def test_the_daemon_keeps_nothing_running_after_shutdown(roots: sites.Roots) -> None:

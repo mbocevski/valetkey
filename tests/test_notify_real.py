@@ -38,6 +38,30 @@ def desktop(short_dir: Path) -> Iterator[Sway]:
         sway.stop()
 
 
+def owns_notification_name(env: dict[str, str]) -> bool:
+    """Tell whether anything owns the notification name on the private bus, without starting it."""
+    done = subprocess.run(  # fixed argument list
+        [  # noqa: S607
+            "busctl",
+            "--user",
+            "--json=short",
+            "call",
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "NameHasOwner",
+            "s",
+            "org.freedesktop.Notifications",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    return done.returncode == 0 and '"data":[true]' in done.stdout.replace(" ", "")
+
+
 @pytest.fixture
 def session_env(short_dir: Path, desktop: Sway) -> Iterator[dict[str, str]]:
     """A session bus with mako on it, on the private sway; yields the environment to use."""
@@ -68,7 +92,14 @@ def session_env(short_dir: Path, desktop: Sway) -> Iterator[dict[str, str]]:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        deadline = time.monotonic() + 15
+        # Asking the bus for the daemon before it owns its name would start a second one, from
+        # the service file the bus finds, and one of the two would exit. Wait without asking it.
+        deadline = time.monotonic() + 30
+        while not owns_notification_name(env):
+            assert time.monotonic() < deadline, "mako did not take its name on the bus"
+            assert notifier.poll() is None, "mako exited"
+            time.sleep(0.05)
+        deadline = time.monotonic() + 30
         while not asyncio.run(notify.has_actions(env)):
             assert time.monotonic() < deadline, "mako did not offer actions"
             assert notifier.poll() is None, "mako exited"
@@ -100,7 +131,7 @@ async def answered(env: dict[str, str], act: tuple[str, ...], limit: float = 30)
             notify.Question("sitex", "cdn.example.com", seen=True, reason="it loads"), env, limit
         )
     )
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + 30
     while TITLE not in await asyncio.to_thread(makoctl, env, "list"):
         assert time.monotonic() < deadline, "the notification never appeared"
         assert not question.done(), "the question ended before it was shown"
@@ -110,7 +141,7 @@ async def answered(env: dict[str, str], act: tuple[str, ...], limit: float = 30)
     assert "allow: Allow" in shown
     assert "deny: Deny" in shown
     await asyncio.to_thread(makoctl, env, *act)
-    return await asyncio.wait_for(question, 15)
+    return await asyncio.wait_for(question, 30)
 
 
 @pytest.mark.integration
