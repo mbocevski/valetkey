@@ -405,6 +405,30 @@ def test_start_sends_output_to_the_log_file_and_not_to_a_pipe(
     assert box.log_file.exists()
 
 
+def test_start_runs_bwrap_as_the_program_of_a_wrapper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[list[str]] = []
+    monkeypatch.setattr(
+        sandbox.subprocess, "Popen", lambda argv, **_: seen.append(argv) or "process"
+    )
+    box = replace(make_sandbox(tmp_path), wrapper=("setpriv", "--pdeathsig", "SIGTERM", "waypipe"))
+    sandbox.start(box, ["true"])
+    sandbox.start(replace(box, wrapper=()), ["true"])
+    assert seen[0] == [
+        "setpriv",
+        "--pdeathsig",
+        "SIGTERM",
+        "waypipe",
+        *sandbox.bwrap_argv(box, ["true"]),
+    ]
+    assert seen[1][0] == "bwrap"
+    # The wrapper is not part of the namespace's own command line.
+    assert sandbox.bwrap_argv(box, ["true"]) == sandbox.bwrap_argv(
+        replace(box, wrapper=()), ["true"]
+    )
+
+
 # --- integration: a real namespace --------------------------------------------------------
 
 

@@ -3850,3 +3850,137 @@ def test_closing_a_site_or_stopping_the_daemon_closes_its_display(roots: sites.R
         assert second.closed == 1  # the daemon stopped: the context manager shut it down
 
     run(scenario())
+
+
+# -- a login on a laptop, through a bridge -------------------------------------------------
+
+
+class BridgedLogins(ScreenlessLogins):
+    """A login that finds no screen, but opens when it is handed a bridge's socket."""
+
+    async def __call__(
+        self,
+        site: str,
+        start: str,
+        _roots: sites.Roots,
+        finish: Finish,
+        **options: Any,  # noqa: ANN401
+    ) -> FakeWindow:
+        if "bridge" in options:
+            return await Logins.__call__(self, site, start, _roots, finish, **options)
+        return await super().__call__(site, start, _roots, finish, **options)
+
+
+@contextlib.contextmanager
+def forwarded_socket(roots: sites.Roots, rand: str) -> Any:  # noqa: ANN401 - a generator
+    path = sites.ensure_runtime(roots) / f"bridge-{rand}.sock"
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(path))
+    listener.listen()
+    try:
+        yield path
+    finally:
+        listener.close()
+        path.unlink(missing_ok=True)
+
+
+async def bridged_login(
+    roots: sites.Roots,
+    *rands: str,
+    **settings: Any,  # noqa: ANN401
+) -> tuple[dict[str, Any], BridgedLogins, FakeDisplays]:
+    """Connect bridges named ``rands`` (oldest first), log in, and return what happened."""
+    logins, displays = BridgedLogins(), FakeDisplays()
+    async with (
+        serving(roots, login_starter=logins, display_starter=displays, **settings) as rig,
+        await rig.connect() as c,
+    ):
+        with contextlib.ExitStack() as stack:
+            for rand in rands:
+                stack.enter_context(forwarded_socket(roots, rand))
+                await c.call("bridge_register", rand=rand)
+            return await c.call("login", target="sitex"), logins, displays
+
+
+def test_a_login_with_no_screen_opens_on_the_newest_bridge_when_the_switch_is_on(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    allow_novnc(roots, '{"remote_logins": {"waypipe": true, "novnc": true}}')
+    answer, logins, displays = run(bridged_login(roots, "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"))
+    assert answer == {"site": "sitex", "window": "open", "route": "bridge"}
+    assert (
+        logins.options[-1]["bridge"] == sites.runtime_path(roots) / "bridge-bbbbbbbbbbbbbbbb.sock"
+    )
+    assert displays.made == []  # a bridge comes before the browser view
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        None,
+        "{}",
+        '{"remote_logins": {"waypipe": false}}',
+        '{"remote_logins": {"waypipe": "yes"}}',  # not usable: counts as off
+        "{",
+    ],
+)
+def test_a_bridge_is_not_used_unless_the_config_turns_it_on(
+    roots: sites.Roots, config: str | None
+) -> None:
+    add_site(roots)
+    if config is not None:
+        allow_novnc(roots, config)
+
+    async def scenario() -> BridgedLogins:
+        logins = BridgedLogins()
+        async with serving(roots, login_starter=logins) as rig, await rig.connect() as c:
+            with forwarded_socket(roots, "aaaaaaaaaaaaaaaa"):
+                await c.call("bridge_register", rand="aaaaaaaaaaaaaaaa")
+                with pytest.raises(DaemonError) as info:
+                    await c.call("login", target="sitex")
+                assert info.value.code == "no_display"
+        return logins
+
+    assert all("bridge" not in options for options in run(scenario()).options)
+
+
+def test_a_connected_bridge_is_not_used_for_the_browser_view(roots: sites.Roots) -> None:
+    add_site(roots)
+    allow_novnc(roots)  # only the browser switch
+    answer, logins, displays = run(bridged_login(roots, "aaaaaaaaaaaaaaaa"))
+    assert "route" not in answer
+    assert len(displays.made) == 1
+    assert all("bridge" not in options for options in logins.options)
+
+
+def test_with_the_switch_on_but_no_bridge_the_login_is_left_to_say_why(roots: sites.Roots) -> None:
+    add_site(roots)
+    allow_novnc(roots, '{"remote_logins": {"waypipe": true}}')
+
+    async def scenario() -> None:
+        async with serving(roots, login_starter=BridgedLogins()) as rig, await rig.connect() as c:
+            with pytest.raises(DaemonError) as info:
+                await c.call("login", target="sitex")
+            assert info.value.code == "no_display"
+            assert (await c.call("status"))["logins"] == []
+
+    run(scenario())
+
+
+def test_a_config_others_can_write_to_does_not_turn_on_a_bridge(roots: sites.Roots) -> None:
+    add_site(roots)
+    allow_novnc(roots, '{"remote_logins": {"waypipe": true}}')
+    (roots.config / "valetkey" / "config.json").chmod(0o666)  # anyone could have written it
+
+    async def scenario() -> BridgedLogins:
+        logins = BridgedLogins()
+        async with serving(roots, login_starter=logins) as rig, await rig.connect() as c:
+            with forwarded_socket(roots, "aaaaaaaaaaaaaaaa"):
+                await c.call("bridge_register", rand="aaaaaaaaaaaaaaaa")
+                with pytest.raises(DaemonError) as info:
+                    await c.call("login", target="sitex")
+                assert info.value.code == "no_display"
+        return logins
+
+    assert all("bridge" not in options for options in run(scenario()).options)

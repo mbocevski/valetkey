@@ -110,6 +110,17 @@ Not every compositor can do this. When yours cannot, the login still opens on th
 socket, the daemon logs a warning, and `valetkey doctor` shows `warn` on the security-context line:
 the window is then not restricted.
 
+## The login window on your laptop
+
+Off unless `remote_logins.waypipe` is true and a bridge is connected. The window still runs in
+the same sandbox on the server. The daemon does not ask for a restricted socket for it, because
+the server has no compositor to ask.
+
+The restriction that applies is the one on your laptop. The bridge's `waypipe client` always runs
+with `--secctx`, so your compositor treats everything the server draws as a sandboxed client and
+refuses it screen capture, virtual input and clipboard managers. See the
+[remote logins page](remote.md).
+
 ## The remote login display
 
 Off unless `remote_logins.novnc` is true. The login window then runs on a private headless

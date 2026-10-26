@@ -207,6 +207,34 @@ def restrict_display(
     return None
 
 
+def waypipe_wrapper(
+    bridge: Path, display: Path, waypipe: Sequence[str] = ("waypipe",)
+) -> tuple[str, ...]:
+    """Return the command that runs a login sandbox as a program of ``waypipe server``.
+
+    waypipe makes a Wayland display at ``display`` and runs its program with that display, and
+    everything drawn on it is sent through the bridge's socket to the laptop's ``waypipe client``.
+    The options come before ``server``, because what follows it is the program, and there is no
+    ``--unlink-socket``: the socket belongs to the bridge, and removing it would leave sshd
+    listening on a name nobody can reach. ``setpriv`` has the kernel end waypipe, and with it the
+    sandbox, if valetkeyd dies. The window is not given a security context here: there is no
+    compositor on this machine to ask, and the laptop's ``waypipe client`` already runs under
+    one.
+    """
+    return (
+        "setpriv",
+        "--pdeathsig",
+        "SIGTERM",
+        *waypipe,
+        "-s",
+        str(bridge),
+        "--display",
+        str(display),
+        "server",
+        "--",
+    )
+
+
 # -- the browser command -------------------------------------------------------------------
 
 
@@ -415,6 +443,8 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     proxy_options: Mapping[str, Any] | None = None,
     private_networks: Sequence[str] = (),
     restrict: Restrict = restrict_display,
+    bridge: Path | None = None,
+    waypipe: Sequence[str] = ("waypipe",),
 ) -> LoginHandle:
     """Open a login window for ``site`` and return once it has been started.
 
@@ -434,7 +464,10 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     ranges (see :func:`valetkey.sites.private_network`); the proxy lets a host resolve into them,
     and into nothing else that is private. ``restrict`` makes the window's restricted display
     (default: :func:`restrict_display`); when it returns ``None`` the window gets
-    ``wayland_socket``.
+    ``wayland_socket``. With ``bridge``, the socket of a connected bridge (see
+    :mod:`valetkey.bridge`), the window opens on the laptop at its other end: the sandbox runs
+    under ``waypipe server`` (``waypipe`` names the program), the display it binds in is
+    waypipe's, and ``wayland_socket`` and ``restrict`` are not used.
 
     The proxy runs in record mode, which lets every host through, so its policy only has to be
     valid: it allows the start host and lists the ranges. The hosts the browser used are in the
@@ -449,7 +482,9 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     placeholder = sites.Policy(
         site, url, (sites.host_of(url),), private_networks=tuple(private_networks)
     )
-    socket_path = wayland_socket or await asyncio.to_thread(find_wayland_socket)
+    socket_path = None
+    if bridge is None:
+        socket_path = wayland_socket or await asyncio.to_thread(find_wayland_socket)
     major = chrome_major or await asyncio.to_thread(sandbox.installed_chrome_major)
     runtime = sites.runtime_path(roots)
     profile_dir, login_dir = await asyncio.to_thread(_prepare, roots, site, runtime)
@@ -459,7 +494,8 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     context: wayland.SecurityContext | None = None
     try:
         await proxy.start(proxy_socket)
-        context = await asyncio.to_thread(restrict, socket_path, login_dir, site)
+        if socket_path is not None:
+            context = await asyncio.to_thread(restrict, socket_path, login_dir, site)
         policy_dir = await asyncio.to_thread(
             sandbox.write_chrome_policy, login_dir / "chrome-policy"
         )
@@ -468,8 +504,9 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
             proxy_socket=proxy_socket,
             log_file=runtime / "logins" / f"{site}.log",
             runtime_dir=cast("Path", roots.runtime),
-            wayland_socket=context.path if context is not None else socket_path,
+            wayland_socket=_window_display(context, socket_path, login_dir, bridge),
             policy_dir=policy_dir,
+            wrapper=waypipe_wrapper(bridge, login_dir / DISPLAY_NAME, waypipe) if bridge else (),
         )
         await asyncio.to_thread(box.log_file.unlink, missing_ok=True)
         command = holder_command(
@@ -497,6 +534,18 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
         await asyncio.to_thread(shutil.rmtree, login_dir, ignore_errors=True)
         raise
     return LoginHandle(process, exited, proxy, (login_dir, profile_dir), finish, context)
+
+
+def _window_display(
+    context: wayland.SecurityContext | None,
+    compositor: Path | None,
+    login_dir: Path,
+    bridge: Path | None,
+) -> Path | None:
+    """Return the display socket the window gets: restricted, plain, or waypipe's."""
+    if bridge is not None:
+        return login_dir / DISPLAY_NAME
+    return context.path if context is not None else compositor
 
 
 def _prepare(roots: sites.Roots, site: str, runtime: Path) -> tuple[Path, Path]:

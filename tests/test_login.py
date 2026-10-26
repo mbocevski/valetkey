@@ -1006,3 +1006,103 @@ def test_cancelling_a_login_closes_the_window_and_cleans_up(sway: Sway, roots: s
     assert finished == []
     assert not login_dir(roots).exists()
     assert leftover_sandboxes(sites.profile_path(roots, "sitex")) == []
+
+
+# -- a window on a laptop, over a bridge ---------------------------------------------------
+
+
+def test_the_waypipe_wrapper_names_the_bridge_and_the_display_before_the_program() -> None:
+    wrapper = login.waypipe_wrapper(Path("/run/u/valetkey/bridge-x.sock"), Path("/run/u/l/d"))
+    assert wrapper == (
+        "setpriv",
+        "--pdeathsig",
+        "SIGTERM",
+        "waypipe",
+        "-s",
+        "/run/u/valetkey/bridge-x.sock",
+        "--display",
+        "/run/u/l/d",
+        "server",
+        "--",
+    )
+    assert "--unlink-socket" not in wrapper  # the bridge owns that socket
+    # Everything after `server` is taken as the program, so no option may follow it.
+    assert wrapper[-2:] == ("server", "--")
+    other = login.waypipe_wrapper(Path("/b"), Path("/d"), ["/opt/waypipe", "--no-gpu"])
+    assert other[3:5] == ("/opt/waypipe", "--no-gpu")
+
+
+def test_a_login_over_a_bridge_runs_the_sandbox_under_waypipe_with_its_display(
+    roots: sites.Roots,
+) -> None:
+    fake = FakeSandbox(["true"])
+    restricted: list[object] = []
+    bridge = Path("/run/u/valetkey/bridge-abcdef0123456789.sock")
+
+    async def scenario() -> None:
+        async with Upstream().serving() as upstream:
+            handle = await start(
+                roots,
+                fake,
+                lambda *_: None,
+                upstream,
+                bridge=bridge,
+                waypipe=["/opt/waypipe"],
+                wayland_socket=None,
+                restrict=lambda *args: restricted.append(args),
+            )
+            await handle.wait()
+
+    run(scenario())
+    (box,) = fake.boxes
+    display = login_dir(roots) / "wayland-login"
+    assert box.wayland_socket == display
+    assert box.wrapper == (
+        "setpriv",
+        "--pdeathsig",
+        "SIGTERM",
+        "/opt/waypipe",
+        "-s",
+        str(bridge),
+        "--display",
+        str(display),
+        "server",
+        "--",
+    )
+    assert restricted == []  # no compositor here to ask, and the laptop's client has a context
+
+
+def test_a_login_over_a_bridge_needs_no_screen_on_this_machine(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse() -> Path:
+        raise login.NoDisplayError(NO_SESSION)
+
+    monkeypatch.setattr(login, "find_wayland_socket", lambda *_: refuse())
+    fake = FakeSandbox(["true"])
+
+    async def scenario() -> None:
+        async with Upstream().serving() as upstream:
+            handle = await start(
+                roots,
+                fake,
+                lambda *_: None,
+                upstream,
+                bridge=Path("/b/bridge-x.sock"),
+                wayland_socket=None,
+            )
+            await handle.wait()
+
+    run(scenario())
+    assert len(fake.boxes) == 1
+
+
+def test_a_local_login_has_no_wrapper(roots: sites.Roots) -> None:
+    fake = FakeSandbox(["true"])
+
+    async def scenario() -> None:
+        async with Upstream().serving() as upstream:
+            await (await start(roots, fake, lambda *_: None, upstream)).wait()
+
+    run(scenario())
+    assert fake.boxes[0].wrapper == ()

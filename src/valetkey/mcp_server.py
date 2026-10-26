@@ -691,8 +691,9 @@ class _Tools:
                 "and close the browser window when they are done. Then call browser_sites to see "
                 "what was learned, and browser_open to start."
             )
+        where = "laptop" if result.get("route") == "bridge" else "screen"
         return (
-            f"A login window for {result['site']} is open on the person's screen. Ask them to "
+            f"A login window for {result['site']} is open on the person's {where}. Ask them to "
             "sign in there and close the window when they are done. Then call browser_sites to "
             "see what was learned, and browser_open to start."
         )

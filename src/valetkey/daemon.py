@@ -46,8 +46,11 @@ profile.
 * ``close`` ``{site}``: end the site's session or login. ``{site, closed}``.
 * ``reload_policy`` ``{site}``: read the policy file again and give it to the live proxy.
 * ``login`` ``{target}``: ``target`` is a known site name or a host or URL. Opens a login
-  window and returns at once with ``{site, window: "open"}``. When the window closes the hosts
-  it reached are classified and merged into the site's policy.
+  window and returns at once with ``{site, window: "open"}``. The window is on this machine's
+  screen. With none to use it is on a laptop through a connected bridge when the config turns on
+  ``remote_logins.waypipe`` (the answer then has ``route: "bridge"``), and otherwise in a web
+  browser when it turns on ``novnc``. When the window closes the hosts it reached are
+  classified and merged into the site's policy.
 
 Every response about a session carries an envelope: ``site``, ``contained: true``, the page's
 ``url``, ``refused``, the hosts the proxy refused since this client last asked about the
@@ -514,6 +517,8 @@ class _Site:
     proxy: Proxy | None = None
     window: LoginWindow | None = None
     shown: display.Display | None = None
+    route: str = "local"
+    """Where the login window opened: ``local``, ``bridge`` or ``novnc``."""
     watcher: asyncio.Task[None] | None = None
     generation: int = 0
     quiet_floor: int | None = None
@@ -1162,6 +1167,8 @@ class Daemon:
             state.watcher = asyncio.ensure_future(self._watch_login(state, state.window))
             self._emit("login_opened", site)
         result: dict[str, Any] = {"site": site, "window": "open"}
+        if state.route == "bridge":
+            result["route"] = "bridge"
         if state.shown is not None:
             result["remote"] = display.describe(state.shown)
         return result
@@ -1169,20 +1176,30 @@ class Daemon:
     async def _open_window(
         self, state: _Site, site: str, start: str, networks: Sequence[str]
     ) -> tuple[LoginWindow, display.Display | None]:
-        """Open the login window on the person's screen, or else on a private display.
+        """Open the login window on the person's screen, or else somewhere they can reach.
 
-        When there is no screen to use and the ``remote_logins`` switch is on in the config, the
-        window opens on a display of its own that a web browser can view (see
-        :mod:`valetkey.display`). The display is returned with the window, and it ends with it.
+        The order is this machine's own screen, then the laptop at the other end of a connected
+        bridge (the ``remote_logins.waypipe`` switch in the config), then a private display that
+        a web browser can view (the noVNC switch, see :mod:`valetkey.display`). With none of
+        them the login's own refusal is raised. A display is returned with the window, and it
+        ends with it; ``state.route`` says which of the three was used.
         """
         options: dict[str, Any] = {
             "proxy_options": self._proxy_options,
             "private_networks": networks,
         }
         finisher = self._finisher(state, start)
+        state.route = "local"
         try:
             return await self._login_starter(site, start, self.roots, finisher, **options), None
         except login.DisplayError:
+            bridge = await self._bridge_for_login()
+            if bridge is not None:
+                window = await self._login_starter(
+                    site, start, self.roots, finisher, bridge=bridge, **options
+                )
+                state.route = "bridge"
+                return window, None
             if not await self._novnc_enabled():
                 raise
         shown = await self._display_starter(self.roots, site)
@@ -1193,7 +1210,18 @@ class Daemon:
         except BaseException:
             await shown.close()
             raise
+        state.route = "novnc"
         return window, shown
+
+    async def _bridge_for_login(self) -> Path | None:
+        """Return the socket of the newest connected bridge, if the config allows using one."""
+        try:
+            enabled = (await asyncio.to_thread(approvals.load_config, self.roots)).waypipe
+        except approvals.ConfigError:
+            logger.warning("the config is not usable, so a login is not offered on a laptop")
+            return None
+        sockets = self.bridge_sockets() if enabled else []
+        return sockets[-1] if sockets else None
 
     async def _novnc_enabled(self) -> bool:
         """Tell whether the config lets a login with no screen be shown in a web browser."""

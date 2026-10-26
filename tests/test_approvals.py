@@ -221,6 +221,25 @@ def test_remote_logins_are_off_unless_the_config_says_true(roots: sites.Roots) -
     assert approvals.load_config(roots) == approvals.Config(None, novnc=True)
 
 
+@pytest.mark.parametrize(
+    ("text", "waypipe", "novnc"),
+    [
+        ('{"remote_logins": {"waypipe": true}}', True, False),
+        ('{"remote_logins": {"waypipe": false}}', False, False),
+        ('{"remote_logins": {"waypipe": true, "novnc": true}}', True, True),
+        ('{"remote_logins": {"waypipe": false, "novnc": true}}', False, True),
+        ('{"approve_command": ["a"], "remote_logins": {"waypipe": true}}', True, False),
+    ],
+)
+def test_each_remote_login_switch_is_read_by_itself(
+    roots: sites.Roots, text: str, *, waypipe: bool, novnc: bool
+) -> None:
+    write_config(roots, text)
+    config = approvals.load_config(roots)
+    assert (config.waypipe, config.novnc) == (waypipe, novnc)
+    assert approvals.Config().waypipe is False
+
+
 def test_the_command_and_remote_logins_are_read_together(roots: sites.Roots) -> None:
     write_config(roots, '{"approve_command": ["ask"], "remote_logins": {"novnc": true}}')
     assert approvals.load_config(roots) == approvals.Config(("ask",), novnc=True)
@@ -248,7 +267,9 @@ def test_the_command_is_an_argument_list(roots: sites.Roots) -> None:
         '{"remote_logins": []}',
         '{"remote_logins": {"novnc": "yes"}}',
         '{"remote_logins": {"novnc": 1}}',
-        '{"remote_logins": {"waypipe": true}}',
+        '{"remote_logins": {"waypipe": "yes"}}',
+        '{"remote_logins": {"waypipe": null}}',
+        '{"remote_logins": {"waypipe": true, "vnc": true}}',
     ],
 )
 def test_a_config_that_cannot_be_used_says_why(roots: sites.Roots, text: str) -> None:

@@ -31,6 +31,7 @@ Changes that affect users of valetkey. The format follows
 - `valetkey allow SITE --private-network RANGE` and `valetkey deny` let a site's allowed hosts resolve to addresses in a private range you list, for that site only; `valetkey sites` shows the ranges.
 - The `valetkey add` command, which creates a site with its private address ranges before the first login, so a site on a private network can be logged in to.
 - The `valetkey bridge` command and `valetkey install-units --bridge`, which connect a laptop to a daemon on a server so login windows can open on the laptop; `valetkey status` and `watch` show connected bridges.
+- With `remote_logins.waypipe` on in `config.json`, `browser_login` opens the login window on your laptop through a connected bridge when the server has no screen of its own.
 
 ### Changed
 

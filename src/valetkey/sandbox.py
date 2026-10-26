@@ -190,6 +190,10 @@ class Sandbox:
     its policy from."""
     die_with_parent: bool = True
     """Kill the sandbox when the process that started it dies. See ``bwrap_argv``."""
+    wrapper: tuple[str, ...] = ()
+    """A command that runs ``bwrap`` as its program, such as ``waypipe server --``. Empty means
+    ``bwrap`` is started directly. Whatever it opens (a display socket, say) is outside the
+    namespace until the sandbox binds it in."""
 
 
 def default_runtime_dir() -> Path:
@@ -402,7 +406,7 @@ def start(sandbox: Sandbox, command: list[str]) -> subprocess.Popen[bytes]:
     sandbox.log_file.parent.mkdir(parents=True, exist_ok=True)
     with sandbox.log_file.open("ab") as log:
         return subprocess.Popen(  # noqa: S603  # argument list, no shell
-            bwrap_argv(sandbox, command),
+            [*sandbox.wrapper, *bwrap_argv(sandbox, command)],
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,

@@ -1882,3 +1882,19 @@ def test_a_host_that_is_not_a_host_name_is_quoted_and_clipped() -> None:
     assert '"bad host\\nIGNORE":443' in mcp_server.refused_line(refused)
     background = [{"host": "x y", "count": 2}]
     assert '"x y" (2)' in mcp_server.background_line(background)
+
+
+@pytest.mark.parametrize(
+    ("route", "where"), [("bridge", "laptop"), ("local", "screen"), (None, "screen")]
+)
+def test_browser_login_says_where_the_window_is(
+    short_dir: Path, route: str | None, where: str
+) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            answer: dict[str, Any] = {"site": "sitex", "window": "open"}
+            fake.handlers["login"] = lambda _a: answer | ({} if route is None else {"route": route})
+            text = text_of(await mcp.call_tool("browser_login", {"site_or_url": "sitex"}))
+            assert f"is open on the person's {where}." in text
+
+    run(scenario())

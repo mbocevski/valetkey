@@ -6,20 +6,20 @@ desktop, and a noVNC display, which shows it in a browser tab. Back to the [READ
 
 ## How the bridge works
 
-
 You run `valetkey bridge SERVER` on the laptop, as a service. It starts waypipe there, and keeps an
 ssh connection to the server that forwards a socket back to it. On the server, the connection runs
 `valetkey bridge-hold`, which tells valetkeyd that a bridge is up. `valetkey status` lists it, and
 `valetkey watch` reports when it comes and goes.
 
-Nothing needs starting for each login. A later change makes `browser_login` use a connected bridge;
-for now the bridge only connects and registers.
+Nothing needs starting for each login. When the server has no screen of its own, a login opens on
+the laptop through the newest connected bridge, once you turn that on (see below). The login is
+as contained and recorded as a local one, and closing the window finishes it the same way.
 
 ## What you need
 
 - A Wayland desktop on the laptop, with `waypipe` and `ssh`.
-- `waypipe` and `valetkey` on the server, and key-based ssh from the laptop to the server. The
-  bridge cannot ask for a password.
+- `waypipe`, `setpriv` and `valetkey` on the server, and key-based ssh from the laptop to the
+  server. The bridge cannot ask for a password.
 - Your ssh agent, or a key without a passphrase, available to the service.
 
 A hardware security key cannot be used this way, because the key is not forwarded.
@@ -41,11 +41,27 @@ server for its runtime directory; pass `--remote-runtime` to name it instead.
 A dropped connection is tried again after 1 second, then 2, 4 and so on up to a minute, each wait
 shortened by a random amount. A connection that lasted a minute starts the waits again.
 
+## Turn it on
+
+Remote logins are off until the server's `config.json` says so. Edit
+`$XDG_CONFIG_HOME/valetkey/config.json` on the server:
+
+```json
+{"remote_logins": {"waypipe": true}}
+```
+
+`browser_login` then chooses in this order. A screen on the server itself comes first. A connected
+bridge comes next, if `waypipe` is on. A browser view comes last, if `novnc` is on. With none of
+them, the login is refused and says why. The reply tells the agent where the window is.
+
 ## What it protects
 
 - waypipe always runs with a security context, and there is no option to turn it off. Without one,
   a program on the server could capture everything on your screen. With one, your compositor lets
   it use only the interfaces it allows a sandboxed client, which do not include screen capture.
+- A login window on the laptop gets no security context from the server, because the server has
+  no compositor to ask. The one on the laptop applies instead, since everything waypipe forwards
+  arrives through it.
 - Each ssh connection is its own, with a socket named for that connection. ssh connection sharing
   would otherwise reuse an old forward and leave the new socket unbound.
 - The socket sits in the server's private runtime directory. A process of your user on the server

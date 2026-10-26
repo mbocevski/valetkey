@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from environment import unusable_reason
+from environment import processes_with, unusable_reason
 from sway import Sway
 
 from valetkey import bridge, client, daemon, sites
@@ -46,22 +46,6 @@ async def until(check: Callable[[], object], limit: float = 40) -> None:
     while not check():
         assert time.monotonic() < deadline, "timed out"
         await asyncio.sleep(0.1)
-
-
-def processes_with(*words: str) -> list[int]:
-    """Return the processes of this user whose command line holds all of ``words``."""
-    found = []
-    for entry in Path("/proc").iterdir():
-        if entry.name.isdigit() and int(entry.name) != os.getpid():
-            try:
-                line = (
-                    (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
-                )
-            except OSError:
-                continue
-            if all(word in line for word in words):
-                found.append(int(entry.name))
-    return found
 
 
 async def windows(desktop: Sway, app_id: str) -> list[dict[str, Any]]:
