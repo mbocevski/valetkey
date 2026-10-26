@@ -103,6 +103,12 @@ def test_a_site_on_a_private_network_from_add_to_a_loaded_page(
                     # 3. A real login window opens, and loads the page through the range.
                     assert (await c.call("login", target="intra"))["window"] == "open"
                     await until(lambda: pages.hits)
+                    # The page can load before the compositor has the window, when many browsers
+                    # start at once, and closing a window that is not there closes nothing.
+                    deadline = time.monotonic() + 40
+                    while not any(w["app_id"] == "chromium" for w in await sway.windows()):
+                        assert time.monotonic() < deadline, "the login window never appeared"
+                        await asyncio.sleep(0.1)
                     await sway.msg("[app_id=chromium]", "kill")
                     await until(lambda: sites.load_policy(roots, "intra").learned is not None)
                     learned = sites.load_policy(roots, "intra")

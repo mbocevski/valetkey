@@ -49,6 +49,12 @@ requirements in the README and `packaging/arch/PKGBUILD`; `just check` fails unt
 - Tests that need bubblewrap, Chromium or agent-browser are marked `integration` and skip when
   any of them is missing.
 - Test behavior through public functions, not private details.
+- `just test` and `just test-integration` run the tests on every core (`-n auto --dist loadfile`),
+  one file at a time on each core, so a module-scoped fixture is built once per file. A test must
+  use its own directories, sockets and ports. It must look for its own processes by a path or a
+  number it drew itself, never by a program name. `just test -n 0` runs them one at a time.
+- A test of the real browser must not assume it is quick. With many started at once, a window can
+  appear after the page has loaded. Wait for what the test needs, not for the clock.
 
 ## Writing
 

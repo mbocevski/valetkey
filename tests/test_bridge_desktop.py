@@ -153,7 +153,11 @@ def test_a_bridge_gives_windows_on_the_laptop_and_cleans_up_when_the_link_drops(
     asyncio.run(asyncio.wait_for(scenario(), 240))
     assert list(sites.runtime_path(server).glob("bridge-*.sock")) == []
     assert not (sites.runtime_path(laptop) / "wp.sock").exists()
-    assert processes_with(str(FAKE_SSH)) == []
+    # Only this test's own stand-in ssh: other tests run theirs at the same time, and the name of
+    # each bridge was drawn at random for this one.
+    assert names
+    for name in names:
+        assert processes_with(str(FAKE_SSH), f"bridge-hold {name}") == []
     assert processes_with("waypipe", str(sites.runtime_path(laptop))) == []
 
 
