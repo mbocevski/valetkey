@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """What a site is, where its files live, and which hosts it may reach.
 
-A site has a short name such as ``sitex``. The name picks a policy file, a browser profile and a
+A site has a short name such as ``sitex``. A site can have several accounts, each a name of its
+own: ``sitex`` is the account valetkey always had, and ``sitex:work`` is another, with its own
+policy, login profile and downloads. The name picks a policy file, a browser profile and a
 downloads directory, so it is validated strictly: it can never point outside its own directory.
+On disk the colon becomes a dot, the *storage key* (``sitex.work``), which cannot be mistaken for
+another name because neither part may hold a dot. The files of an account-less name are exactly
+what valetkey 1 wrote, so nothing moves.
 
 Files follow the XDG base directory layout:
 
-* policy: ``$XDG_CONFIG_HOME/valetkey/sites/<site>.json``
-* profile: ``$XDG_STATE_HOME/valetkey/profiles/<site>/``
-* downloads: ``$XDG_STATE_HOME/valetkey/downloads/<site>/``
+* policy: ``$XDG_CONFIG_HOME/valetkey/sites/<key>.json``
+* profile: ``$XDG_STATE_HOME/valetkey/profiles/<key>/``
+* downloads: ``$XDG_STATE_HOME/valetkey/downloads/<key>/``
 * runtime files: ``$XDG_RUNTIME_DIR/valetkey/``
 
 Directories valetkey creates are mode ``0700``. A directory that already exists and is open to
@@ -38,8 +43,20 @@ if TYPE_CHECKING:
 
 APP_DIR = "valetkey"
 MAX_NAME_LENGTH = 48
-_DERIVED_LABEL_LENGTH = 40
-_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+"""The longest name, account included. agent-browser's socket path caps at 103 bytes, and the
+path of a session already uses 99 of them for a name this long."""
+_DERIVED_LABEL_LENGTH = 31
+"""A name made from a host is cut here, which leaves 16 characters for ``.account``."""
+ACCOUNT_SEPARATOR = ":"
+FIRST_ACCOUNT = "main"
+"""What the account-less ``sitex`` is called once its site has more accounts: ``sitex:main``.
+
+It is a way to write the name, not a name: nothing is stored under it, and no account may be
+given this label."""
+_PART = r"[a-z0-9][a-z0-9-]*"
+_ACCOUNT_PART = r"[a-z][a-z0-9-]*"
+"""An account starts with a letter, so that ``intranet:8080`` is a host and a port."""
+_NAME_RE = re.compile(rf"{_PART}(?:{ACCOUNT_SEPARATOR}{_ACCOUNT_PART})?")
 _HOST_RE = re.compile(
     r"(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
 )
@@ -284,22 +301,117 @@ def registrable_domain(host: str, suffixes: frozenset[str] = TWO_LEVEL_SUFFIXES)
 def validate_site_name(name: str) -> str:
     """Return ``name`` if it is a safe site name, and raise ``ValueError`` if not.
 
-    A name is 1 to :data:`MAX_NAME_LENGTH` characters of lowercase ASCII letters, digits and
-    hyphens, and it does not start with a hyphen. That rules out ``.``, ``..``, separators and
-    anything non-ASCII, so a name cannot leave its directory.
+    A name is a site, or a site and an account joined by a colon. Each part is lowercase ASCII
+    letters, digits and hyphens, and does not start with a hyphen; an account starts with a
+    letter. The whole name is 1 to :data:`MAX_NAME_LENGTH` characters, and no account is called
+    :data:`FIRST_ACCOUNT`. That rules out ``.``, ``..``, separators and anything non-ASCII, so a
+    name cannot leave its directory.
     """
     if not (
         isinstance(name, str)
         and len(name) <= MAX_NAME_LENGTH
         and _NAME_RE.fullmatch(name)
         and name.isascii()
+        and not name.endswith(f"{ACCOUNT_SEPARATOR}{FIRST_ACCOUNT}")
     ):
         msg = (
             f"invalid site name {name!r}: use 1 to {MAX_NAME_LENGTH} lowercase letters, digits "
-            "or hyphens, starting with a letter or digit"
+            "or hyphens, starting with a letter or digit, with an account after a colon "
+            f"that starts with a letter (sitex:work; the account {FIRST_ACCOUNT} is taken)"
         )
         raise ValueError(msg)
     return name
+
+
+def split_site_name(name: str) -> tuple[str, str | None]:
+    """Return the site and the account of ``name``; the account is ``None`` for ``sitex``."""
+    site, _, account = validate_site_name(name).partition(ACCOUNT_SEPARATOR)
+    return site, account or None
+
+
+def listed_name(name: str, known: list[str]) -> str:
+    """Return how to write the name of an account in a list of the ``known`` ones.
+
+    That is ``name``, except that the account-less ``sitex`` is written ``sitex:main`` once the
+    site has another account, because a bare ``sitex`` is then refused.
+    """
+    site, account = split_site_name(name)
+    if account is None and any(split_site_name(n)[0] == site and n != site for n in known):
+        return f"{site}{ACCOUNT_SEPARATOR}{FIRST_ACCOUNT}"
+    return name
+
+
+def account_name(site: str, account: str | None) -> str:
+    """Return the name of ``account`` of ``site``, or of the account-less name when ``None``.
+
+    The account :data:`FIRST_ACCOUNT` is the account-less name too.
+    """
+    if account in (None, FIRST_ACCOUNT):
+        return validate_site_name(site)
+    return validate_site_name(f"{site}{ACCOUNT_SEPARATOR}{account}")
+
+
+def storage_key(site: str) -> str:
+    """Return what the files of ``site`` are named: the name with its colon as a dot."""
+    return validate_site_name(site).replace(ACCOUNT_SEPARATOR, ".")
+
+
+def site_from_key(key: str) -> str:
+    """Return the site name whose files are named ``key``.
+
+    Raises:
+        ValueError: when ``key`` is not the storage key of any site name.
+
+    """
+    if "." in key.replace(".", "", 1):
+        msg = f"not the storage key of a site: {key!r}"
+        raise ValueError(msg)
+    return validate_site_name(key.replace(".", ACCOUNT_SEPARATOR))
+
+
+def known_sites(roots: Roots) -> list[str]:
+    """Return the names of the sites and accounts that have a policy file, sorted."""
+    directory = policy_path(roots, "x").parent
+    names = []
+    for path in directory.glob("*.json") if directory.is_dir() else ():
+        if path.is_file():
+            with contextlib.suppress(ValueError):
+                names.append(site_from_key(path.stem))
+    return sorted(names)
+
+
+class AmbiguousAccountError(ValueError):
+    """A site has several accounts and the name given did not say which."""
+
+
+def resolve_account(roots: Roots, name: str) -> str:
+    """Return the account ``name`` means.
+
+    A name with an account is that account. A name without one is the account-less name valetkey
+    1 had, and it still works for a site with a single account, whatever that account is called.
+    Once a site has more than one account it must be said which, because acting as the wrong
+    person is worse than one refused call.
+
+    Raises:
+        AmbiguousAccountError: when ``name`` has no account and its site has several.
+        ValueError: when ``name`` is not a valid site name.
+
+    """
+    site, _, account = name.partition(ACCOUNT_SEPARATOR)
+    if account == FIRST_ACCOUNT:
+        return validate_site_name(site)
+    site, account = split_site_name(name)
+    if account is not None:
+        return name
+    accounts = sorted(
+        (n for n in known_sites(roots) if split_site_name(n)[0] == site),
+        key=lambda n: (split_site_name(n)[1] is not None, n),
+    )
+    if len(accounts) > 1:
+        written = ", ".join(listed_name(n, accounts) for n in accounts)
+        msg = f"{site} has accounts {written}. Say which."
+        raise AmbiguousAccountError(msg)
+    return accounts[0] if accounts else name
 
 
 def site_name_for(value: str, suffixes: frozenset[str] = TWO_LEVEL_SUFFIXES) -> str:
@@ -324,29 +436,46 @@ def choose_site_name(
 ) -> str:
     """Pick the site name for the host or URL in ``value``, avoiding other sites on disk.
 
-    Start from :func:`site_name_for`. A name is free when it has no policy file and no profile
-    directory. A name already used for the same registrable domain is returned as is, so naming
-    a site twice finds the same site. Otherwise try ``name-2``, ``name-3`` and so on.
+    Start from :func:`site_name_for`. A name is free when no account of it has a policy file or a
+    profile directory. A name already used for the same registrable domain is returned as is, so
+    naming a site twice finds the same site. Otherwise try ``name-2``, ``name-3`` and so on. The
+    name has no account; the caller adds one or picks among the accounts the site has.
     """
     domain = registrable_domain(host_of(value), suffixes)
     base = site_name_for(value, suffixes)
     candidate = base
     number = 1
     while True:
-        if not (policy_path(roots, candidate).exists() or profile_path(roots, candidate).exists()):
+        accounts = _accounts_on_disk(roots, candidate)
+        if not accounts:
             return candidate
-        if _site_domain(roots, candidate, suffixes) == domain:
+        if _site_domain(roots, accounts, suffixes) == domain:
             return candidate
         number += 1
         candidate = f"{base}-{number}"
 
 
-def _site_domain(roots: Roots, site: str, suffixes: frozenset[str]) -> str | None:
-    try:
-        policy = load_policy(roots, site)
-    except OSError, PolicyError:
-        return None
-    return registrable_domain(host_of(policy.start), suffixes)
+def _accounts_on_disk(roots: Roots, site: str) -> list[str]:
+    """Return the accounts of ``site`` that have a policy file or a profile directory."""
+    names = {name for name in known_sites(roots) if split_site_name(name)[0] == site}
+    profiles = profile_path(roots, site).parent
+    for path in profiles.iterdir() if profiles.is_dir() else ():
+        with contextlib.suppress(ValueError):
+            name = site_from_key(path.name)
+            if split_site_name(name)[0] == site:
+                names.add(name)
+    return sorted(names)
+
+
+def _site_domain(roots: Roots, accounts: list[str], suffixes: frozenset[str]) -> str | None:
+    """Return the registrable domain of the first of ``accounts`` whose policy can be read."""
+    for name in accounts:
+        try:
+            policy = load_policy(roots, name)
+        except OSError, PolicyError:
+            continue
+        return registrable_domain(host_of(policy.start), suffixes)
+    return None
 
 
 # -- paths ---------------------------------------------------------------------------------
@@ -354,17 +483,17 @@ def _site_domain(roots: Roots, site: str, suffixes: frozenset[str]) -> str | Non
 
 def policy_path(roots: Roots, site: str) -> Path:
     """Return the path of ``site``'s policy file. Nothing is created."""
-    return roots.config / APP_DIR / "sites" / f"{validate_site_name(site)}.json"
+    return roots.config / APP_DIR / "sites" / f"{storage_key(site)}.json"
 
 
 def profile_path(roots: Roots, site: str) -> Path:
     """Return the path of ``site``'s browser profile directory. Nothing is created."""
-    return roots.state / APP_DIR / "profiles" / validate_site_name(site)
+    return roots.state / APP_DIR / "profiles" / storage_key(site)
 
 
 def downloads_path(roots: Roots, site: str) -> Path:
     """Return the path of ``site``'s downloads directory. Nothing is created."""
-    return roots.state / APP_DIR / "downloads" / validate_site_name(site)
+    return roots.state / APP_DIR / "downloads" / storage_key(site)
 
 
 def runtime_path(roots: Roots) -> Path:
@@ -717,7 +846,9 @@ def save_policy(roots: Roots, policy: Policy) -> Path:
     """
     path = policy_path(roots, policy.site)
     directory = _private_tree(roots.config, path.parent)
-    descriptor, name = tempfile.mkstemp(dir=directory, prefix=f".{policy.site}.", suffix=".tmp")
+    descriptor, name = tempfile.mkstemp(
+        dir=directory, prefix=f".{storage_key(policy.site)}.", suffix=".tmp"
+    )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(policy_json(policy))

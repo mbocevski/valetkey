@@ -131,18 +131,8 @@ def _say_applied(site: str, *, applied: bool) -> None:
 
 
 def _known_sites(roots: sites.Roots) -> list[str]:
-    """Return the names of the sites that have a policy file, sorted."""
-    directory = sites.policy_path(roots, "x").parent
-    names = [path.stem for path in directory.glob("*.json") if path.is_file()]
-    return sorted(name for name in names if _valid_name(name))
-
-
-def _valid_name(name: str) -> bool:
-    try:
-        sites.validate_site_name(name)
-    except ValueError:
-        return False
-    return True
+    """Return the names of the sites and accounts that have a policy file, sorted."""
+    return sites.known_sites(roots)
 
 
 def _unknown_site(roots: sites.Roots, site: str) -> CommandError:
@@ -151,16 +141,28 @@ def _unknown_site(roots: sites.Roots, site: str) -> CommandError:
     return CommandError(f"no site named {site!r}. Known sites: {listing}")
 
 
-def _load(roots: sites.Roots, site: str) -> sites.Policy:
-    """Read the policy of ``site``, or raise a :class:`CommandError` that says what is wrong."""
+def _resolve(roots: sites.Roots, site: str) -> str:
+    """Return the account ``site`` names, or raise a :class:`CommandError` that says why not.
+
+    A name without an account is the account of a site that has just one, and is refused for a
+    site that has several (see :func:`valetkey.sites.resolve_account`).
+    """
     try:
-        sites.validate_site_name(site)
+        return sites.resolve_account(roots, site)
     except ValueError as error:
         raise CommandError(str(error)) from error
+
+
+def _load(roots: sites.Roots, site: str) -> sites.Policy:
+    """Read the policy of ``site``, or raise a :class:`CommandError` that says what is wrong.
+
+    The policy's own ``site`` is the account that was meant, which is what to save and print.
+    """
+    name = _resolve(roots, site)
     try:
-        return sites.load_policy(roots, site)
+        return sites.load_policy(roots, name)
     except FileNotFoundError as error:
-        raise _unknown_site(roots, site) from error
+        raise _unknown_site(roots, name) from error
     except sites.PolicyError as error:
         raise CommandError(str(error)) from error
 
@@ -188,20 +190,24 @@ def list_sites(
     Each line shows the site name, the host it starts at, how many hosts are allowed and
     excluded, when the hosts were last learned, the private address ranges it may reach (a
     dash for none), and whether a login profile exists. With --json, each site is an object with
-    the keys site, host, allowed, excluded, learned (a UTC time, or null), ``private_networks`` (a
-    list) and profile (true or false).
+    the keys site, account (the part after the colon of ``sitex:work``, or null), host, allowed,
+    excluded, learned (a UTC time, or null), ``private_networks`` (a list) and profile (true or
+    false). A site with several accounts has a line for each.
     """
     roots = sites.roots_from_env()
     rows: list[dict[str, object]] = []
-    for name in _known_sites(roots):
+    found = _known_sites(roots)
+    for name in found:
         try:
             policy = sites.load_policy(roots, name)
         except sites.PolicyError as error:
             sys.stderr.write(f"valetkey: skipping {name}: {error}\n")
             continue
+        shown = sites.listed_name(name, found)
         rows.append(
             {
-                "site": name,
+                "site": shown,
+                "account": shown.partition(sites.ACCOUNT_SEPARATOR)[2] or None,
                 "host": sites.host_of(policy.start),
                 "allowed": len(policy.allow),
                 "excluded": len(policy.excluded),
@@ -265,9 +271,25 @@ PrivateNetworks = Annotated[
 Force = Annotated[bool, Parameter(negative="", help="Replace the policy of an existing site.")]
 
 
+CopyHosts = Annotated[
+    str | None,
+    Parameter(
+        name="--copy-hosts-from",
+        help="Start with the allowed and excluded hosts of this other account of the site.",
+    ),
+]
+
+
 @app.command
-def add(site: str, start: str, *, network: PrivateNetworks = None, force: Force = False) -> int:
-    """Create a site before its first login, for one on a private network.
+def add(
+    site: str,
+    start: str,
+    *,
+    network: PrivateNetworks = None,
+    copy_hosts_from: CopyHosts = None,
+    force: Force = False,
+) -> int:
+    """Create a site or another account of one before its first login.
 
     A site is normally created by logging in. A site whose host resolves to a private address
     cannot be logged in to that way, because the login proxy refuses private addresses unless
@@ -276,25 +298,38 @@ def add(site: str, start: str, *, network: PrivateNetworks = None, force: Force 
     cannot create a site or list a range. It refuses a site that already exists, unless
     ``--force``, which replaces the policy and keeps the login profile.
 
+    A site can have more than one account, each with its own login, policy and downloads. Name
+    one ``sitex:work``. With ``--copy-hosts-from`` the new account starts with the allowed and
+    excluded hosts of another account of the site, and with nothing else of it: not its private
+    ranges, which are a permission of their own, and not what its login learned.
+
     Parameters
     ----------
     site
-        The new site's name: lowercase letters, digits and hyphens.
+        The new site's name, with an account after a colon for another account of a site
+        (``sitex:work``): lowercase letters, digits and hyphens. An account starts with a letter.
     start
         The URL the login starts at.
     network
         A private address range such as ``10.20.0.0/24``. Repeat it for more.
+    copy_hosts_from
+        An existing account of the site whose allowed and excluded hosts to start with.
     force
         Replace the policy of an existing site.
 
     """
     roots = sites.roots_from_env()
     try:
-        policy = _new_site(roots, site, start, network or [], force=force)
+        policy = _new_site(roots, site, start, network or [], copy_hosts_from, force=force)
     except CommandError as error:
         return _fail(error)
     applied = save_and_reload(roots, site, policy)
     _say(f"{site}: added, starting at {policy.start}.")
+    if copy_hosts_from:
+        _say(
+            f"{site}: copied {len(policy.allow) - 1} allowed and {len(policy.excluded)} excluded "
+            f"hosts from {copy_hosts_from}."
+        )
     for entry in policy.private_networks:
         _say(f"{site}: hosts it allows may resolve inside {entry}.")
     _say(f"{site}: now ask your client to log in to {site}.")
@@ -302,17 +337,29 @@ def add(site: str, start: str, *, network: PrivateNetworks = None, force: Force 
     return 0
 
 
-def _new_site(
-    roots: sites.Roots, site: str, start_url: str, networks: list[str], *, force: bool
+def _new_site(  # noqa: PLR0913 - one thing each: the name, the start, the ranges, the copy
+    roots: sites.Roots,
+    site: str,
+    start_url: str,
+    networks: list[str],
+    copy_from: str | None,
+    *,
+    force: bool,
 ) -> sites.Policy:
     """Build the policy ``valetkey add`` writes, or raise ``CommandError``."""
     try:
         sites.validate_site_name(site)
         start = login.normalize_start_url(start_url)
         listed = tuple(dict.fromkeys(sites.private_network(entry) for entry in networks))
-        policy = sites.Policy(site, start, (sites.host_of(start),), private_networks=listed)
+        host = sites.host_of(start)
     except ValueError as error:
         raise CommandError(str(error)) from error
+    allow, excluded = (host,), ()
+    if copy_from is not None:
+        source = _load(roots, copy_from)
+        allow = tuple(dict.fromkeys((host, *source.allow)))
+        excluded = tuple(e for e in source.excluded if not sites.excluded_conflicts(e, allow))
+    policy = sites.Policy(site, start, allow, excluded, private_networks=listed)
     taken = sites.policy_path(roots, site).exists() or sites.profile_path(roots, site).exists()
     if taken and not force:
         msg = (
@@ -328,6 +375,7 @@ def _private_network_change(site: str, network: str, *, add: bool) -> int:
     roots = sites.roots_from_env()
     try:
         policy = _load(roots, site)
+        site = policy.site
         try:
             changed, done = (sites.add_private_network if add else sites.remove_private_network)(
                 policy, network
@@ -369,7 +417,8 @@ def allow(site: str, host: str | None = None, *, network: PrivateNetwork = None)
     Parameters
     ----------
     site
-        The site name, as shown by ``valetkey sites``.
+        The site name, as shown by ``valetkey sites``, with its account (``sitex:work``) when
+        the site has more than one.
     host
         A host name, or a URL on it.
     network
@@ -385,6 +434,7 @@ def allow(site: str, host: str | None = None, *, network: PrivateNetwork = None)
     roots = sites.roots_from_env()
     try:
         policy = _load(roots, site)
+        site = policy.site
         name = _host(str(host))
         changed, added, removed = sites.allow_host(policy, name)
         if not (added or removed):
@@ -411,7 +461,8 @@ def deny(site: str, host: str | None = None, *, network: PrivateNetwork = None) 
     Parameters
     ----------
     site
-        The site name, as shown by ``valetkey sites``.
+        The site name, as shown by ``valetkey sites``, with its account (``sitex:work``) when
+        the site has more than one.
     host
         A host name, or a URL on it.
     network
@@ -427,6 +478,7 @@ def deny(site: str, host: str | None = None, *, network: PrivateNetwork = None) 
     roots = sites.roots_from_env()
     try:
         policy = _load(roots, site)
+        site = policy.site
         name = _host(str(host))
         allowed = tuple(entry for entry in policy.allow if entry != name)
         covered = sites.host_matches(name, allowed)
@@ -514,11 +566,6 @@ def _close_session(roots: sites.Roots, site: str) -> None:
 
 def _forget_checks(roots: sites.Roots, site: str, *, yes: bool) -> list[Path] | None:
     """Return what to delete for ``site``, or None when the person declines."""
-    try:
-        sites.validate_site_name(site)
-    except ValueError as error:
-        message = str(error)
-        raise CommandError(message) from error
     targets = _forget_targets(roots, site)
     if not targets:
         raise _unknown_site(roots, site)
@@ -569,6 +616,7 @@ def forget(site: str, *, yes: Annotated[bool, Parameter(name="--yes", negative="
     """
     roots = sites.roots_from_env()
     try:
+        site = _resolve(roots, site)
         targets = _forget_checks(roots, site, yes=yes)
     except CommandError as error:
         return _fail(error)

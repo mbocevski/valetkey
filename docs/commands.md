@@ -10,7 +10,7 @@ Usage: valetkey COMMAND
 A logged-in browser for MCP clients, contained to the sites it may reach.
 
 Commands:
-  add: Create a site before its first login, for one on a private network.
+  add: Create a site or another account of one before its first login.
   allow: Allow a host, and its subdomains, for a site.
   bridge: Take login windows from a server onto this desktop, until stopped.
   daemon: Run the valetkeyd daemon in the foreground.
@@ -43,8 +43,10 @@ List the sites valetkey knows.
 Each line shows the site name, the host it starts at, how many hosts are allowed
 and excluded, when the hosts were last learned, the private address ranges it
 may reach (a dash for none), and whether a login profile exists. With --json,
-each site is an object with the keys site, host, allowed, excluded, learned (a
-UTC time, or null), private_networks (a list) and profile (true or false).
+each site is an object with the keys site, account (the part after the colon of
+sitex:work, or null), host, allowed, excluded, learned (a UTC time, or null),
+private_networks (a list) and profile (true or false). A site with several
+accounts has a line for each.
 
 Parameters:
   --json: Print a JSON array instead of a table. [default: False]
@@ -76,7 +78,9 @@ the narrowest range that holds the address. Only private ranges are accepted,
 none wider than /8 (IPv6: /48).
 
 Parameters:
-  SITE, --site: The site name, as shown by valetkey sites. [required]
+  SITE, --site: The site name, as shown by valetkey sites, with its account
+(sitex:work) when
+  the site has more than one. [required]
   HOST, --host: A host name, or a URL on it.
   --private-network STR: A private address range such as 10.20.0.0/24, instead
 of a host.
@@ -96,7 +100,9 @@ needed. With --private-network and a range instead of a host, the range is no
 longer listed.
 
 Parameters:
-  SITE, --site: The site name, as shown by valetkey sites. [required]
+  SITE, --site: The site name, as shown by valetkey sites, with its account
+(sitex:work) when
+  the site has more than one. [required]
   HOST, --host: A host name, or a URL on it.
   --private-network STR: A private address range such as 10.20.0.0/24, instead
 of a host.
@@ -111,11 +117,24 @@ proxy refuses private addresses until you list their range. `valetkey add SITE S
 client can log in to it. It refuses a site that already exists unless you pass `--force`, which
 replaces the policy and keeps the login. Only you can run it.
 
+## Accounts
+
+A site can have more than one account, such as `sitex` and `sitex:work`. Each has its own login,
+policy and downloads, so approving a host for one never allows it for the other. The commands that
+take a site name (`allow`, `deny`, `forget`, `add`) take `sitex:work` too. While a site has one
+account its bare name works. Once it has several, a bare name is refused, and the account that
+existed first is written `sitex:main`. An account label starts with a letter, so `intranet:8080`
+is always a host and a port.
+
+`valetkey add sitex:work START --copy-hosts-from sitex` creates the account with the allowed and
+excluded hosts of another account, and nothing else: not its private ranges, and not what its
+login learned. `valetkey forget sitex:work` deletes that account only.
+
 <!-- begin: valetkey add --help -->
 ```text
 Usage: valetkey add [OPTIONS] SITE START
 
-Create a site before its first login, for one on a private network.
+Create a site or another account of one before its first login.
 
 A site is normally created by logging in. A site whose host resolves to a
 private address cannot be logged in to that way, because the login proxy refuses
@@ -125,12 +144,22 @@ log in to it. Only you can do this: a client cannot create a site or list a
 range. It refuses a site that already exists, unless --force, which replaces the
 policy and keeps the login profile.
 
+A site can have more than one account, each with its own login, policy and
+downloads. Name one sitex:work. With --copy-hosts-from the new account starts
+with the allowed and excluded hosts of another account of the site, and with
+nothing else of it: not its private ranges, which are a permission of their own,
+and not what its login learned.
+
 Parameters:
-  SITE, --site: The new site's name: lowercase letters, digits and hyphens.
-[required]
+  SITE, --site: The new site's name, with an account after a colon for another
+account of a site
+  (sitex:work): lowercase letters, digits and hyphens. An account starts with a
+  letter. [required]
   START, --start: The URL the login starts at. [required]
   --private-network STR...: A private address range the site may reach, such as
 10.20.0.0/24. Repeat it.
+  --copy-hosts-from STR: Start with the allowed and excluded hosts of this other
+account of the site.
   --force: Replace the policy of an existing site. [default: False]
 ```
 <!-- end: valetkey add --help -->

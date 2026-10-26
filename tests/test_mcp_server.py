@@ -293,7 +293,7 @@ def text_of(result: Any) -> str:  # noqa: ANN401 - an SDK result
 
 EXPECTED_TOOLS = {
     "browser_sites": set(),
-    "browser_login": {"site_or_url"},
+    "browser_login": {"site_or_url", "account"},
     "browser_open": {"site"},
     "browser_snapshot": {"site"},
     "browser_click": {"site", "ref", "text", "role", "expect"},
@@ -2191,3 +2191,52 @@ def test_text_from_the_browser_or_a_log_is_fenced_and_labelled(
 )
 def test_the_daemons_own_messages_are_printed_as_they_are(code: str, message: str) -> None:
     assert mcp_server.error_text(DaemonError(code, message)) == f"{code}: {message}"
+
+
+def test_a_login_can_name_an_account_and_a_bare_name_can_be_refused(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["login"] = lambda a: {
+                "site": f"{a['target']}:{a['account']}",
+                "window": "open",
+            }
+            started = await mcp.call_tool(
+                "browser_login", {"site_or_url": "sitex", "account": "work"}
+            )
+            assert not started.is_error
+            assert "login window for sitex:work is open" in text_of(started)
+            assert fake.requests[-1]["args"] == {"target": "sitex", "account": "work"}
+
+            def ambiguous(_a: dict[str, Any]) -> dict[str, Any]:
+                fail("ambiguous_account", "sitex has accounts sitex:main, sitex:work. Say which.")
+
+            fake.handlers["open"] = ambiguous
+            refused = await mcp.call_tool("browser_open", {"site": "sitex"})
+            assert refused.is_error
+            assert "sitex has accounts sitex:main, sitex:work. Say which." in text_of(refused)
+
+    run(scenario())
+
+
+def test_the_site_list_shows_each_account(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["sites"] = lambda _a: {
+                "sites": [
+                    {
+                        "site": name,
+                        "account": name.partition(":")[2],
+                        "state": "idle",
+                        "start": "https://sitex.test/",
+                        "allow": ["sitex.test"],
+                        "learned": None,
+                        "summary": None,
+                    }
+                    for name in ("sitex:main", "sitex:work")
+                ]
+            }
+            listing = text_of(await mcp.call_tool("browser_sites", {}))
+            assert "- sitex:main: no session" in listing
+            assert "- sitex:work: no session" in listing
+
+    run(scenario())

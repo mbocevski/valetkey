@@ -906,6 +906,7 @@ def test_a_login_learns_a_policy_and_reports_it_once(roots: sites.Roots) -> None
             assert listing["sites"] == [
                 {
                     "site": "newsite",
+                    "account": None,
                     "state": "login",
                     "start": "https://newsite.test/signin",
                     "allow": [],
@@ -4182,3 +4183,191 @@ def test_a_config_others_can_write_to_does_not_turn_on_a_bridge(roots: sites.Roo
         return logins
 
     assert all("bridge" not in options for options in run(scenario()).options)
+
+
+# -- accounts ------------------------------------------------------------------------------
+
+
+def add_accounts(roots: sites.Roots) -> None:
+    add_site(roots, "sitex")
+    sites.save_policy(
+        roots, sites.Policy("sitex:work", "https://work.sitex.test/", ("work.sitex.test",))
+    )
+
+
+def test_a_bare_name_is_refused_by_every_operation_while_a_site_has_several_accounts(
+    roots: sites.Roots,
+) -> None:
+    add_accounts(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            for op in ("open", "snapshot", "status", "close", "reload_policy"):
+                with pytest.raises(DaemonError) as info:
+                    await c.call(op, site="sitex")
+                assert info.value.code == "ambiguous_account"
+                assert info.value.message == "sitex has accounts sitex:main, sitex:work. Say which."
+            with pytest.raises(DaemonError) as info:
+                await c.call("login", target="sitex")
+            assert info.value.code == "ambiguous_account"
+            assert rig.factory.calls == []
+
+    run(scenario())
+
+
+def test_two_accounts_of_a_site_run_side_by_side_and_each_names_itself(
+    roots: sites.Roots,
+) -> None:
+    add_accounts(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            personal = await c.call("open", site="sitex:main")
+            work = await c.call("open", site="sitex:work")
+            assert (personal["site"], work["site"]) == ("sitex:main", "sitex:work")
+            assert personal["url"] != work["url"]
+            listing = (await c.call("sites"))["sites"]
+            assert [(e["site"], e["account"], e["state"]) for e in listing] == [
+                ("sitex:main", "main", "session"),
+                ("sitex:work", "work", "session"),
+            ]
+            assert (await c.call("close", site="sitex:work"))["closed"] is True
+            assert (await c.call("status", site="sitex:main"))["state"] == "session"
+            assert sites.policy_path(roots, "sitex").exists()
+            with pytest.raises(DaemonError) as info:
+                await c.call("open", site="nosuch-1:main")
+            assert info.value.code == "unknown_site"
+
+    run(scenario())
+
+
+def test_the_only_account_of_a_site_answers_to_the_bare_name(roots: sites.Roots) -> None:
+    sites.save_policy(
+        roots, sites.Policy("sitex:work", "https://work.sitex.test/", ("work.sitex.test",))
+    )
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            assert (await c.call("open", site="sitex"))["site"] == "sitex:work"
+
+    run(scenario())
+
+
+def test_a_login_adds_an_account_that_starts_where_the_site_does(roots: sites.Roots) -> None:
+    add_site(roots, "sitex")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            started = await c.call("login", target="sitex", account="work")
+            assert started == {"site": "sitex:work", "window": "open"}
+            (window,) = rig.logins.windows
+            assert (window.site, window.start) == ("sitex:work", "https://sitex.test/")
+            await window.close_window([SeenHost("cdn.other.test", 1)], roots.state / "p")
+            await eventually(lambda: rig.daemon._sites["sitex:work"].kind == "idle")  # noqa: SLF001
+            assert sites.load_policy(roots, "sitex:work").allow == ("sitex.test",)
+            assert sites.load_policy(roots, "sitex").excluded == ()
+            assert (await c.call("login", target="sitex:work"))["site"] == "sitex:work"
+
+    run(scenario())
+
+
+def test_a_login_names_an_account_for_a_host_too(roots: sites.Roots) -> None:
+    add_site(roots, "sitex")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            assert (await c.call("login", target="sitex.test", account="work"))[
+                "site"
+            ] == "sitex:work"
+            (window,) = rig.logins.windows
+            assert window.start == "https://sitex.test"
+
+    run(scenario())
+
+
+def test_a_login_for_a_host_finds_the_only_account_of_its_site(roots: sites.Roots) -> None:
+    sites.save_policy(roots, sites.Policy("sitex:work", "https://sitex.test/", ("sitex.test",)))
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            assert (await c.call("login", target="sitex.test"))["site"] == "sitex:work"
+            await c.call("close", site="sitex:work")
+
+    run(scenario())
+
+
+def test_a_login_for_a_host_with_a_port_is_not_a_site_name(roots: sites.Roots) -> None:
+    add_site(roots, "sitex")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            started = await c.call("login", target="intranet:8080")
+            assert started["site"] == "intranet"
+            assert rig.logins.windows[0].start == "https://intranet:8080"
+
+    run(scenario())
+
+
+def test_login_account_errors(roots: sites.Roots) -> None:
+    add_site(roots, "sitex")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            for bad in (5, ["work"]):
+                with pytest.raises(DaemonError) as info:
+                    await c.call("login", target="sitex", account=bad)
+                assert info.value.code == "bad_request"
+            for account in ("Work", "a:b", "", "-x"):
+                with pytest.raises(DaemonError) as info:
+                    await c.call("login", target="sitex", account=account)
+                assert info.value.code == "bad_request"
+            with pytest.raises(DaemonError) as info:
+                await c.call("login", target="sitex:work", account="home")
+            assert info.value.code == "bad_request"
+            with pytest.raises(DaemonError) as info:
+                await c.call("login", target="nosuch", account="work")
+            assert info.value.code == "unknown_site"
+            with pytest.raises(DaemonError) as info:
+                await c.call("login", target="sitex.test", account="Work")
+            assert info.value.code == "bad_request"
+            assert rig.logins.windows == []
+
+    run(scenario())
+
+
+def test_main_is_the_account_less_account_and_cannot_be_a_label(roots: sites.Roots) -> None:
+    add_site(roots, "sitex")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            assert (await c.call("login", target="sitex", account="main"))["site"] == "sitex"
+            await c.call("close", site="sitex:main")
+            assert (await c.call("open", site="sitex:main"))["site"] == "sitex"
+            assert rig.factory.calls[0][0] == "sitex"
+
+    run(scenario())
+
+
+def test_a_host_with_a_port_is_never_taken_for_an_account(roots: sites.Roots) -> None:
+    names = {
+        "sitex": True,
+        "sitex:work": True,
+        "sitex:main": True,
+        "-bad": False,
+        "sitex:Work": False,
+        "Bad:work": False,
+        "intranet:8080": False,
+    }
+    assert {name: daemon.Daemon._names_a_site(name) for name in names} == names  # noqa: SLF001
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            for existing in (False, True):
+                if existing:
+                    add_site(roots, "intranet")
+                started = await c.call("login", target="intranet:8080")
+                assert started["site"] == ("intranet-2" if existing else "intranet")
+                assert rig.logins.windows[-1].start == "https://intranet:8080"
+                await c.call("close", site=started["site"])
+
+    run(scenario())

@@ -305,12 +305,12 @@ async def start_display(
 
 def _prepare(roots: sites.Roots, site: str) -> Path:
     """Create the empty ``0700`` directory of ``site``'s display."""
-    sites.validate_site_name(site)
+    key = sites.storage_key(site)
     sites.ensure_runtime(roots)
     directory = sites.runtime_path(roots) / _DISPLAYS
     directory.mkdir(mode=0o700, exist_ok=True)
     directory.chmod(0o700)
-    directory /= site
+    directory /= key
     shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(mode=0o700)
     directory.chmod(0o700)

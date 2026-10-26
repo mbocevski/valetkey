@@ -226,8 +226,9 @@ def session_paths(roots: sites.Roots, site: str) -> SessionPaths:
 
     """
     app_dir = sites.runtime_path(roots)
-    directory = app_dir / "sessions" / sites.validate_site_name(site)
-    driver_dir = app_dir.parent / DRIVER_DIR / "namespaces" / site
+    key = sites.storage_key(site)
+    directory = app_dir / "sessions" / key
+    driver_dir = app_dir.parent / DRIVER_DIR / "namespaces" / key
     return SessionPaths(
         site=site,
         directory=directory,
@@ -251,7 +252,7 @@ def _identity_env(paths: SessionPaths, runtime: Path) -> dict[str, str]:
     return {
         "XDG_RUNTIME_DIR": str(runtime),
         "AGENT_BROWSER_SESSION": SESSION_NAME,
-        "AGENT_BROWSER_NAMESPACE": paths.site,
+        "AGENT_BROWSER_NAMESPACE": sites.storage_key(paths.site),
         "AGENT_BROWSER_IDLE_TIMEOUT_MS": "0",
     }
 

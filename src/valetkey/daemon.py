@@ -9,9 +9,9 @@ profile.
 
 **Operations.** ``args`` are JSON; every success carries the fields below in ``result``.
 
-* ``sites``: no args. ``{"sites": [{"site", "state", "start", "allow", "learned", "summary"}]}``
-  from the policy files and the live state. ``summary`` is what the last login learned, and it
-  is delivered once.
+* ``sites``: no args. ``{"sites": [{"site", "account", "state", "start", "allow", "learned",
+  "summary"}]}`` from the policy files and the live state, one entry per account. ``summary`` is
+  what the last login learned, and it is delivered once.
 * ``open`` ``{site}``: start the site's session, or join the running one (``reused: true``).
 * ``snapshot``, ``type`` ``{ref, text, submit?}``, ``navigate`` ``{url}``,
   ``screenshot`` ``{name?}``, ``status`` ``{site}``: act on the site's session. ``submit``
@@ -47,12 +47,17 @@ profile.
   See :mod:`valetkey.bridge`.
 * ``close`` ``{site}``: end the site's session or login. ``{site, closed}``.
 * ``reload_policy`` ``{site}``: read the policy file again and give it to the live proxy.
-* ``login`` ``{target}``: ``target`` is a known site name or a host or URL. Opens a login
+* ``login`` ``{target, account?}``: ``target`` is a known site name or a host or URL, and
+  ``account`` names another account of the site (``sitex:work``). Opens a login
   window and returns at once with ``{site, window: "open"}``. The window is on this machine's
   screen. With none to use it is on a laptop through a connected bridge when the config turns on
   ``remote_logins.waypipe`` (the answer then has ``route: "bridge"``), and otherwise in a web
   browser when it turns on ``novnc``. When the window closes the hosts it reached are
   classified and merged into the site's policy.
+
+**Accounts.** A site can have several, named ``site:account`` and each with its own policy,
+profile and downloads. A bare ``site`` is the account of a site that has only one, and is refused
+with ``ambiguous_account`` when it has several.
 
 Every response about a session carries an envelope: ``site``, ``contained: true``, the page's
 ``url``, ``refused``, the hosts the proxy refused since this client last asked about the
@@ -66,8 +71,8 @@ Text that came from a web page is wrapped as ``{"untrusted": true, "text": ...}`
 can tell it from anything the daemon says itself.
 
 **Errors** are ``{code, message}``: ``bad_request``, ``request_too_large``, ``unknown_op``,
-``unknown_site``, ``unknown_ref``, ``target_not_found``, ``target_ambiguous``,
-``login_in_progress``, ``private_address``, ``bridge_exists``, ``no_socket``,
+``unknown_site``, ``ambiguous_account``, ``unknown_ref``, ``target_not_found``,
+``target_ambiguous``, ``login_in_progress``, ``private_address``, ``bridge_exists``, ``no_socket``,
 ``session_running``, ``no_session``, ``session_ended``, ``session_failed``,
 ``browser_error``, ``no_display``, ``x11_only``, ``bad_policy`` and ``internal``.
 
@@ -169,6 +174,7 @@ _ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
     (sessions.AgentBrowserError, "browser_error"),
     (sessions.SessionError, "session_failed"),
     (sites.PolicyError, "bad_policy"),
+    (sites.AmbiguousAccountError, "ambiguous_account"),
     (ValueError, "bad_request"),
 )
 """How errors from below become codes. The first match wins, so subclasses come first."""
@@ -940,24 +946,32 @@ class Daemon:
     def _state(self, site: str) -> _Site:
         return self._sites.setdefault(site, _Site(site))
 
+    def _site(self, args: dict[str, Any]) -> str:
+        """Return the account the ``site`` argument names; a bare name must be unambiguous."""
+        return sites.resolve_account(self.roots, _string_arg(args, "site"))
+
+    def _shown(self, name: str, known: list[str] | None = None) -> str:
+        """Return ``name`` as a client has to write it (see :func:`valetkey.sites.listed_name`)."""
+        return sites.listed_name(name, self._known_sites() if known is None else known)
+
     def _known_sites(self) -> list[str]:
-        directory = sites.policy_path(self.roots, "x").parent
-        found = {p.stem for p in directory.glob("*.json")} if directory.is_dir() else set()
-        valid = {name for name in found if _is_site_name(name)}
-        return sorted(valid | {n for n, s in self._sites.items() if s.kind != "idle" or s.summary})
+        found = set(sites.known_sites(self.roots))
+        return sorted(found | {n for n, s in self._sites.items() if s.kind != "idle" or s.summary})
 
     async def _load_policy(self, site: str) -> sites.Policy:
         try:
             return await asyncio.to_thread(sites.load_policy, self.roots, site)
         except FileNotFoundError:
-            known = ", ".join(self._known_sites()) or "none yet"
+            found = self._known_sites()
+            known = ", ".join(self._shown(n, found) for n in found) or "none yet"
             _fail("unknown_site", f"no site named {site!r}; known sites: {known}")
 
     # -- operations: sites and policies --
 
     async def _op_sites(self, _connection: _Connection, _args: dict[str, Any]) -> dict[str, Any]:
         entries = []
-        for name in self._known_sites():
+        found = self._known_sites()
+        for name in found:
             state = self._state(name)
             try:
                 policy: sites.Policy | None = await asyncio.to_thread(
@@ -965,9 +979,11 @@ class Daemon:
                 )
             except OSError, sites.PolicyError:
                 policy = None
+            shown = self._shown(name, found)
             entries.append(
                 {
-                    "site": name,
+                    "site": shown,
+                    "account": shown.partition(sites.ACCOUNT_SEPARATOR)[2] or None,
                     "state": state.kind,
                     "start": policy.start if policy else state.start,
                     "allow": list(policy.allow) if policy else [],
@@ -984,7 +1000,7 @@ class Daemon:
     async def _op_reload_policy(
         self, _connection: _Connection, args: dict[str, Any]
     ) -> dict[str, Any]:
-        site = _site_arg(args)
+        site = self._site(args)
         policy = await self._load_policy(site)
         state = self._state(site)
         live = state.proxy is not None
@@ -1026,7 +1042,7 @@ class Daemon:
         self, _connection: _Connection, args: dict[str, Any]
     ) -> dict[str, Any]:
         """Say whether ``host`` may be asked about for a site, and whether the daemon can ask."""
-        site = _site_arg(args)
+        site = self._site(args)
         _policy, host, found = await self._eligibility(site, args.get("host"))
         state = self._state(site)
         return {
@@ -1055,7 +1071,7 @@ class Daemon:
         The daemon takes the word of the MCP server process for it (see :mod:`approvals`). The
         host must still be eligible: refused, or excluded.
         """
-        site = _site_arg(args)
+        site = self._site(args)
         if args.get("channel") != "elicitation":
             _fail("bad_request", 'this operation is for the "elicitation" channel')
         policy, host, found = await self._eligibility(site, args.get("host"))
@@ -1065,7 +1081,7 @@ class Daemon:
 
     async def _op_allow_ask(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         """Ask through the approval command, and grant if it exits with status 0."""
-        site = _site_arg(args)
+        site = self._site(args)
         reason = approvals.sanitize_reason(args.get("reason"))
         state = self._state(site)
         async with state.ask_lock:
@@ -1158,7 +1174,10 @@ class Daemon:
 
     async def _op_login(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         target = _string_arg(args, "target")
-        site, start = await self._login_target(target)
+        account = args.get("account")
+        if account is not None and not isinstance(account, str):
+            _fail("bad_request", '"account" must be a string')
+        site, start = await self._login_target(target, account)
         existing = await self._existing_policy(site)
         await self._refuse_private_start(site, start, existing)
         state = self._state(site)
@@ -1180,7 +1199,7 @@ class Daemon:
             state.since = self._now()
             state.watcher = asyncio.ensure_future(self._watch_login(state, state.window))
             self._emit("login_opened", site)
-        result: dict[str, Any] = {"site": site, "window": "open"}
+        result: dict[str, Any] = {"site": self._shown(site), "window": "open"}
         if state.route == "bridge":
             result["route"] = "bridge"
         if state.shown is not None:
@@ -1288,13 +1307,48 @@ class Daemon:
             "and then log in again.",
         )
 
-    async def _login_target(self, target: str) -> tuple[str, str]:
-        """Return the site name and start URL for a known site name, a host or a URL."""
-        if _is_site_name(target) and "." not in target:
-            policy = await self._load_policy(target)
-            return target, policy.start
+    async def _login_target(self, target: str, account: str | None) -> tuple[str, str]:
+        """Return the account name and start URL for a known site name, a host or a URL.
+
+        ``account`` names another account of the site (``sitex`` and ``work`` give ``sitex:work``).
+        Without it, a site with one account is that account, and a site with several must be
+        named in full. A new account starts at the start URL of one the site already has.
+        """
+        if "." not in target and self._names_a_site(target):
+            return await self._login_known(target, account)
         start = login.normalize_start_url(target)
-        return await asyncio.to_thread(sites.choose_site_name, self.roots, start), start
+        base = await asyncio.to_thread(sites.choose_site_name, self.roots, start)
+        if account is None:
+            return sites.resolve_account(self.roots, base), start
+        return sites.account_name(base, account), start
+
+    @staticmethod
+    def _names_a_site(target: str) -> bool:
+        """Say whether ``target`` is a site, not a host with a port such as ``intranet:8080``."""
+        site, _, account = target.partition(sites.ACCOUNT_SEPARATOR)
+        if account == sites.FIRST_ACCOUNT:
+            return _is_site_name(site)
+        return _is_site_name(target)
+
+    async def _login_known(self, target: str, account: str | None) -> tuple[str, str]:
+        if account is None:
+            name = sites.resolve_account(self.roots, target)
+            return name, (await self._load_policy(name)).start
+        site, current = sites.split_site_name(target)
+        if current is not None:
+            _fail("bad_request", f"name the account once: {target!r} already has one")
+        try:
+            name = sites.account_name(site, account)
+        except ValueError as error:
+            _fail("bad_request", str(error))
+        try:
+            return name, (await asyncio.to_thread(sites.load_policy, self.roots, name)).start
+        except FileNotFoundError:
+            pass
+        accounts = [n for n in sites.known_sites(self.roots) if sites.split_site_name(n)[0] == site]
+        if not accounts:
+            await self._load_policy(target)  # says that the site is not known
+        return name, (await self._load_policy(accounts[0])).start
 
     def _finisher(self, state: _Site, start: str) -> Callable[[list[Any], Path], Awaitable[None]]:
         async def finish(seen: list[Any], profile: Path) -> None:
@@ -1358,7 +1412,7 @@ class Daemon:
     # -- operations: sessions --
 
     async def _op_open(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        site = _site_arg(args)
+        site = self._site(args)
         state = self._state(site)
         async with state.lock:
             if state.kind == "login":
@@ -1463,12 +1517,12 @@ class Daemon:
                 self._emit("session_ended", state.name)
 
     async def _op_close(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        site = _site_arg(args)
+        site = self._site(args)
         state = self._state(site)
         async with state.lock:
             was = state.kind != "idle"
             await self._end(state)
-        return {"site": site, "closed": was}
+        return {"site": self._shown(site), "closed": was}
 
     async def _op_status(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         if "site" not in args:
@@ -1476,7 +1530,7 @@ class Daemon:
             if not isinstance(links, bool):
                 _fail("bad_request", '"links" must be true or false')
             return self._activity(links=links)
-        site = _site_arg(args)
+        site = self._site(args)
         state = self._state(site)
         if state.kind != "session":
             if state.kind == "idle":
@@ -1488,7 +1542,7 @@ class Daemon:
         return result
 
     async def _op_snapshot(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._state(_site_arg(args))
+        state = self._state(self._site(args))
         result = await self._session_op(connection, state, lambda session: session.snapshot())
         snap: sessions.Snapshot = result.pop("_value")
         result["url"] = snap.url
@@ -1501,7 +1555,7 @@ class Daemon:
         return result
 
     async def _op_click(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._state(_site_arg(args))
+        state = self._state(self._site(args))
         generation, known = connection.refs.get(state.name, (-1, {}))
         target = clicks.build_target(args, known if generation == state.generation else {})
         expect = clicks.parse_expectation(args.get("expect"))
@@ -1520,7 +1574,7 @@ class Daemon:
         return result
 
     async def _op_type(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._state(_site_arg(args))
+        state = self._state(self._site(args))
         ref, text = _string_arg(args, "ref"), _string_arg(args, "text")
         submit = args.get("submit", False)
         if not isinstance(submit, bool):
@@ -1538,7 +1592,7 @@ class Daemon:
         return result
 
     async def _op_navigate(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._state(_site_arg(args))
+        state = self._state(self._site(args))
         url = _string_arg(args, "url")
         seen = await self._seen_downloads(connection, state.name)
         try:
@@ -1629,7 +1683,7 @@ class Daemon:
         return 0
 
     async def _op_downloads(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        site = _site_arg(args)
+        site = self._site(args)
         seen = await self._seen_downloads(connection, site)
         paths = sessions.session_paths(self.roots, site)
         found = await asyncio.to_thread(
@@ -1649,7 +1703,7 @@ class Daemon:
         }
 
     async def _op_screenshot(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._state(_site_arg(args))
+        state = self._state(self._site(args))
         name = args.get("name", "screenshot.png")
         if not isinstance(name, str):
             _fail("bad_request", '"name" must be a string')
@@ -1713,7 +1767,7 @@ class Daemon:
         background = [] if floor is None else [r.host for r in quiet if r.seq > floor]
         counts = Counter(background)
         return {
-            "site": state.name,
+            "site": self._shown(state.name),
             "contained": True,
             "url": url,
             "refused": refused,
@@ -1746,14 +1800,6 @@ def _is_site_name(name: str) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _site_arg(args: dict[str, Any]) -> str:
-    site = _string_arg(args, "site")
-    try:
-        return sites.validate_site_name(site)
-    except ValueError as error:
-        _fail("bad_request", str(error))
 
 
 def _string_arg(args: dict[str, Any], name: str) -> str:

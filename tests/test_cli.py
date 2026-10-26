@@ -85,7 +85,8 @@ def make_site(
     excluded: tuple[str, ...] = (),
     learned: datetime | None = None,
 ) -> sites.Policy:
-    policy = sites.Policy(name, f"https://app.{name}.com/", allow, excluded, learned)
+    host = name.replace(":", "-")
+    policy = sites.Policy(name, f"https://app.{host}.com/", allow, excluded, learned)
     sites.save_policy(roots, policy)
     return policy
 
@@ -133,6 +134,7 @@ def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]
     assert json.loads(out) == [
         {
             "site": "another",
+            "account": None,
             "host": "app.another.com",
             "allowed": 1,
             "excluded": 0,
@@ -142,6 +144,7 @@ def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]
         },
         {
             "site": "sitex",
+            "account": None,
             "host": "app.sitex.com",
             "allowed": 1,
             "excluded": 0,
@@ -1904,3 +1907,132 @@ def test_remote_logins_follow_the_config(tmp_path: Path, monkeypatch: pytest.Mon
     assert cli.remote_logins_enabled() is True
     config.write_text("[]", encoding="utf-8")
     assert cli.remote_logins_enabled() is False
+
+
+# -- accounts ------------------------------------------------------------------------------
+
+
+def make_accounts(roots: sites.Roots) -> None:
+    make_site(roots, "sitex", allow=("sitex.com",))
+    sites.save_policy(
+        roots, sites.Policy("sitex:work", "https://work.sitex.com/", ("work.sitex.com",))
+    )
+
+
+def test_a_bare_name_is_refused_for_a_site_with_several_accounts(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_accounts(roots)
+    for argv in (
+        ("allow", "sitex", "a.test"),
+        ("deny", "sitex", "a.test"),
+        ("forget", "sitex", "--yes"),
+        ("allow", "sitex", "--private-network", "10.0.0.0/8"),
+    ):
+        assert run(capsys, *argv) == (
+            1,
+            "",
+            "valetkey: sitex has accounts sitex:main, sitex:work. Say which.\n",
+        )
+    assert sites.load_policy(roots, "sitex").allow == ("sitex.com",)
+
+
+def test_allow_deny_and_networks_act_on_the_named_account(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_accounts(roots)
+    assert run(capsys, "allow", "sitex:work", "login.okta.com")[:2] == (
+        0,
+        "sitex:work: login.okta.com is allowed.\n",
+    )
+    assert sites.load_policy(roots, "sitex:work").allow == ("work.sitex.com", "login.okta.com")
+    assert run(capsys, "deny", "sitex:work", "login.okta.com")[0] == 0
+    assert run(capsys, "allow", "sitex:work", "--private-network", "10.0.0.0/8")[0] == 0
+    assert sites.load_policy(roots, "sitex:work").private_networks == ("10.0.0.0/8",)
+    assert sites.load_policy(roots, "sitex").private_networks == ()
+    assert sites.load_policy(roots, "sitex").allow == ("sitex.com",)
+
+
+def test_a_bare_name_is_the_only_account_of_a_site(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sites.save_policy(
+        roots, sites.Policy("sitex:work", "https://work.sitex.com/", ("work.sitex.com",))
+    )
+    status, out, _ = run(capsys, "allow", "sitex", "a.test")
+    assert (status, out) == (0, "sitex:work: a.test is allowed.\n")
+
+
+def test_forget_deletes_one_account_only(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gone = seed(roots, "sitex:work")
+    kept = seed(roots, "sitex")
+    assert run(capsys, "forget", "sitex:work", "--yes") == (0, "Forgot sitex:work.\n", "")
+    assert not any(path.exists() for path in gone)
+    assert all(path.exists() for path in kept)
+
+
+def test_sites_lists_each_account_with_its_account_field(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_accounts(roots)
+    _, out, _ = run(capsys, "sites", "--json")
+    assert [(row["site"], row["account"]) for row in json.loads(out)] == [
+        ("sitex:main", "main"),
+        ("sitex:work", "work"),
+    ]
+    _, table, _ = run(capsys, "sites")
+    assert [line.split()[0] for line in table.splitlines()] == ["SITE", "sitex:main", "sitex:work"]
+    assert run(capsys, "allow", "sitex:main", "a.test")[:2] == (0, "sitex: a.test is allowed.\n")
+
+
+def test_add_makes_another_account_that_starts_with_the_hosts_of_one(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sites.save_policy(
+        roots,
+        sites.Policy(
+            "sitex",
+            "https://sitex.com/",
+            ("sitex.com", "login.okta.com"),
+            ("ads.sitex.com", "login.okta.com.evil.test"),
+            datetime(2026, 10, 26, 9, 0, tzinfo=UTC),
+            ("sitex.com/signin",),
+            ("10.0.0.0/8",),
+        ),
+    )
+    status, out, _ = run(
+        capsys, "add", "sitex:work", "https://work.sitex.com/", "--copy-hosts-from", "sitex"
+    )
+    assert status == 0
+    assert out.splitlines() == [
+        "sitex:work: added, starting at https://work.sitex.com/.",
+        "sitex:work: copied 2 allowed and 2 excluded hosts from sitex.",
+        "sitex:work: now ask your client to log in to sitex:work.",
+    ]
+    copy = sites.load_policy(roots, "sitex:work")
+    assert copy.allow == ("work.sitex.com", "sitex.com", "login.okta.com")
+    assert copy.excluded == ("ads.sitex.com", "login.okta.com.evil.test")
+    assert copy.private_networks == ()
+    assert copy.learned is None
+    assert copy.login_pages == ()
+
+
+def test_add_copy_drops_an_exclusion_the_new_start_host_would_conflict_with(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots, "sitex", allow=("sitex.com",), excluded=("work.sitex.com",))
+    assert run(capsys, "add", "sitex:work", "work.sitex.com", "--copy-hosts-from", "sitex")[0] == 0
+    copy = sites.load_policy(roots, "sitex:work")
+    assert copy.allow == ("work.sitex.com", "sitex.com")
+    assert copy.excluded == ()
+
+
+def test_add_copy_from_a_site_that_is_not_there_writes_nothing(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, _, err = run(capsys, "add", "sitex:work", "sitex.com", "--copy-hosts-from", "nosuch")
+    assert status == 1
+    assert "nosuch" in err
+    assert not sites.policy_path(roots, "sitex:work").exists()

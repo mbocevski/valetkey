@@ -14,6 +14,7 @@ from valetkey.sites import (
     PolicyError,
     Roots,
     RuntimeDirUnavailableError,
+    account_name,
     allows,
     choose_site_name,
     downloads_path,
@@ -23,16 +24,22 @@ from valetkey.sites import (
     host_matches,
     host_of,
     is_plausible_host,
+    known_sites,
+    listed_name,
     load_policy,
     normalize_host,
     policy_json,
     policy_path,
     profile_path,
     registrable_domain,
+    resolve_account,
     roots_from_env,
     runtime_path,
     save_policy,
+    site_from_key,
     site_name_for,
+    split_site_name,
+    storage_key,
     validate_site_name,
 )
 
@@ -220,8 +227,8 @@ def test_site_name_for(value: str, name: str | None) -> None:
 
 
 def test_site_name_for_cuts_a_long_label() -> None:
-    name = site_name_for(f"{'a' * 39}-{'b' * 20}.com")
-    assert name == "a" * 39
+    name = site_name_for(f"{'a' * 31}-{'b' * 20}.com")
+    assert name == "a" * 31
     assert validate_site_name(name) == name
 
 
@@ -273,6 +280,14 @@ def test_valid_site_names(name: str) -> None:
         "site x",
         "site_x",
         "site.x",
+        "sitex:",
+        ":work",
+        "sitex:-work",
+        "sitex:work:home",
+        "sitex:Work",
+        "sitex:8080",
+        "sitex:1work",
+        "sitex:main",
         "x\n",
         "x\0",
         "a" * 49,
@@ -319,6 +334,105 @@ def test_choose_site_name_treats_a_profile_without_policy_as_taken(roots: Roots)
 def test_choose_site_name_treats_a_broken_policy_as_another_domain(roots: Roots) -> None:
     write_policy_file(roots, "sitex", "not json")
     assert choose_site_name(roots, "sitex.com") == "sitex-2"
+
+
+# -- accounts ------------------------------------------------------------------------------
+
+
+def test_a_name_may_carry_an_account() -> None:
+    assert validate_site_name("sitex:work") == "sitex:work"
+    assert split_site_name("sitex:work") == ("sitex", "work")
+    assert split_site_name("sitex") == ("sitex", None)
+    assert account_name("sitex", "work") == "sitex:work"
+    assert account_name("sitex", None) == account_name("sitex", "main") == "sitex"
+    with pytest.raises(ValueError, match="invalid site name"):
+        account_name("sitex", "Work")
+
+
+def test_the_account_less_name_is_written_main_once_the_site_has_another() -> None:
+    assert listed_name("sitex", ["sitex"]) == "sitex"
+    assert listed_name("sitex", ["sitex", "sitexy"]) == "sitex"
+    assert listed_name("sitex", ["sitex", "sitex:work"]) == "sitex:main"
+    assert listed_name("sitex:work", ["sitex", "sitex:work"]) == "sitex:work"
+    assert listed_name("sitex:work", ["sitex:work"]) == "sitex:work"
+
+
+def test_a_name_with_an_account_is_cut_at_48_characters() -> None:
+    assert validate_site_name("a" * 24 + ":" + "b" * 23)
+    with pytest.raises(ValueError, match="invalid site name"):
+        validate_site_name("a" * 24 + ":" + "b" * 24)
+
+
+def test_an_account_has_its_own_files_and_a_bare_name_keeps_the_old_ones(roots: Roots) -> None:
+    assert storage_key("sitex") == "sitex"
+    assert storage_key("sitex:work") == "sitex.work"
+    assert policy_path(roots, "sitex").name == "sitex.json"
+    assert policy_path(roots, "sitex:work").name == "sitex.work.json"
+    assert profile_path(roots, "sitex:work").name == "sitex.work"
+    assert downloads_path(roots, "sitex:work").name == "sitex.work"
+    save_policy(roots, policy("sitex:work", start="https://sitex.com/", allow=("sitex.com",)))
+    assert load_policy(roots, "sitex:work").site == "sitex:work"
+    assert not policy_path(roots, "sitex").exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "name"), [("sitex", "sitex"), ("sitex.work", "sitex:work"), ("a-1.b-2", "a-1:b-2")]
+)
+def test_site_from_key_undoes_storage_key(key: str, name: str) -> None:
+    assert site_from_key(key) == name
+    assert storage_key(name) == key
+
+
+@pytest.mark.parametrize("key", ["a.b.c", ".x", "x.", "Sitex", "a b"])
+def test_site_from_key_rejects_what_is_no_key(key: str) -> None:
+    with pytest.raises(ValueError, match=r"storage key|invalid site name"):
+        site_from_key(key)
+
+
+def test_known_sites_lists_every_account_and_skips_strays(roots: Roots) -> None:
+    assert known_sites(roots) == []
+    for name in ("sitex", "sitex:work", "another"):
+        save_policy(roots, policy(name, start="https://x.com/", allow=("x.com",)))
+    directory = policy_path(roots, "x").parent
+    (directory / "a.b.c.json").write_text("{}")
+    (directory / "notes.txt").write_text("")
+    (directory / "dir.json").mkdir()
+    assert known_sites(roots) == ["another", "sitex", "sitex:work"]
+
+
+def test_a_bare_name_is_the_only_account_of_a_site(roots: Roots) -> None:
+    assert resolve_account(roots, "sitex") == "sitex"
+    save_policy(roots, policy("sitex:work", start="https://sitex.com/", allow=("sitex.com",)))
+    assert resolve_account(roots, "sitex") == "sitex:work"
+    assert resolve_account(roots, "sitex:work") == "sitex:work"
+    assert resolve_account(roots, "sitex:home") == "sitex:home"
+
+
+def test_a_bare_name_is_refused_once_a_site_has_several_accounts(roots: Roots) -> None:
+    save_policy(roots, policy("sitex"))
+    save_policy(roots, policy("sitex:work", start="https://sitex.com/", allow=("sitex.com",)))
+    save_policy(roots, policy("sitexy"))
+    with pytest.raises(sites.AmbiguousAccountError) as error:
+        resolve_account(roots, "sitex")
+    assert str(error.value) == "sitex has accounts sitex:main, sitex:work. Say which."
+    assert resolve_account(roots, "sitex:main") == "sitex"
+    assert resolve_account(roots, "sitex:work") == "sitex:work"
+    assert resolve_account(roots, "sitexy") == "sitexy"
+
+
+def test_choose_site_name_counts_every_account_as_the_site(roots: Roots) -> None:
+    save_policy(roots, policy("sitex:work", start="https://sitex.com/", allow=("sitex.com",)))
+    assert choose_site_name(roots, "app.sitex.com") == "sitex"
+    assert choose_site_name(roots, "sitex.org") == "sitex-2"
+    ensure_profile(roots, "other:home")
+    (profile_path(roots, "other").parent / "a.b.c").mkdir(parents=True, exist_ok=True)
+    assert choose_site_name(roots, "other.com") == "other-2"
+
+
+def test_choose_site_name_skips_an_account_whose_policy_is_broken(roots: Roots) -> None:
+    write_policy_file(roots, "sitex:work", "not json")
+    save_policy(roots, policy("sitex:home", start="https://sitex.com/", allow=("sitex.com",)))
+    assert choose_site_name(roots, "sitex.com") == "sitex"
 
 
 # -- host matching -------------------------------------------------------------------------

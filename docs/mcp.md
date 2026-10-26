@@ -22,7 +22,8 @@ Start with `browser_sites`. The others act on one site by its name.
 - `browser_sites` lists the sites you have set up, their state, the hosts each may reach, and what
   the last login learned. That names the other sites the login allowed, and the hosts it only passed
   through and did not allow.
-- `browser_login` opens a login window on your screen and returns at once. With no screen it
+- `browser_login` opens a login window on your screen and returns at once. Pass `account` to add
+  another account to a site (see [accounts](#accounts)). With no screen it
   uses a connected bridge if `remote_logins.waypipe` is on, so the window opens on your laptop.
   Otherwise, with `remote_logins.novnc` on, the window is shown in a web browser. The link goes to
   you, never to the agent: your client shows it, or you run `valetkey status` (see
@@ -59,6 +60,18 @@ first two touch nothing but valetkey's own state. `browser_click` and `browser_t
 destructive, because a click or Enter can submit, send or delete. `browser_open`,
 `browser_navigate`, `browser_allow` and `browser_close` are idempotent. Every tool that touches a
 page is marked open world. They are hints, not promises.
+
+## Accounts
+
+A site can have several accounts, each its own login named like `sitex:work`. While a site has one
+account the agent can use its bare name. Once it has several, a bare name is refused with the
+names to choose from, because acting as the wrong account is worse than one refused call. The
+account that existed first is `sitex:main`. Every answer starts with the account that acted.
+
+The agent adds an account with `browser_login` and its `account` argument, for example
+`site_or_url` `sitex` with `account` `work`. The new account starts at the same page, with its own
+list of hosts. You can start it with the hosts of another account using
+`valetkey add sitex:work START --copy-hosts-from sitex`. Only you can do that.
 
 ## Downloads
 

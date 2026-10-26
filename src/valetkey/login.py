@@ -567,7 +567,7 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
         box = sandbox.Sandbox(
             profile_dir=profile_dir,
             proxy_socket=proxy_socket,
-            log_file=runtime / "logins" / f"{site}.log",
+            log_file=runtime / "logins" / f"{sites.storage_key(site)}.log",
             runtime_dir=cast("Path", roots.runtime),
             wayland_socket=_window_display(context, socket_path, login_dir, bridge),
             policy_dir=policy_dir,
@@ -618,7 +618,7 @@ def _prepare(roots: sites.Roots, site: str, runtime: Path) -> tuple[Path, Path]:
     profile = sites.ensure_profile(roots, site)
     sites.ensure_runtime(roots)
     login_dir = runtime
-    for part in ("logins", site):
+    for part in ("logins", sites.storage_key(site)):
         login_dir /= part
         login_dir.mkdir(mode=0o700, exist_ok=True)
         login_dir.chmod(0o700)
