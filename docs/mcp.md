@@ -196,3 +196,5 @@ page that sent the browser to a page you used during the login and left by submi
 to a page with a password field, means the login expired. A page that sent itself on at once does
 not count. `browser_open` then says so, and the agent calls
 `browser_login` again without asking first.
+
+A login usually comes while the site's browser is still running. `browser_login` closes that browser first, as `browser_close` does, and says so in its result. A login window that is already open for the site is an error.

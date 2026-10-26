@@ -35,7 +35,7 @@ _READ_LIMIT = 64 * 1024 * 1024
 class DaemonError(Exception):
     """The daemon answered a request with an error, or could not be reached.
 
-    ``code`` is a short machine-readable name such as ``unknown_site`` or ``session_running``,
+    ``code`` is a short machine-readable name such as ``unknown_site`` or ``no_session``,
     ``message`` is for people, and ``details`` holds extra fields the daemon sent with it.
     """
 

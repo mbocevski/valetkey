@@ -664,8 +664,10 @@ DESCRIPTIONS = {
     ),
     "browser_login": (
         "Open a login window on the person's own screen so they can sign in to a site. Returns "
-        "at once. The person signs in and closes the window; then the site is ready for "
-        "browser_open. When a page shows a login screen, call this again without asking first. "
+        "at once. If the site's browser is running, it is closed first, as browser_close does; "
+        "a login window that is already open is an error. The person signs in and closes the "
+        "window; then the site is ready for browser_open. When a page shows a login screen, "
+        "call this again without asking first. "
         "With no screen to use, the window may be shown in a web browser instead; the link is "
         "for the person only and is never given to you. To add another account to a site, name "
         "the site and pass account; it starts with its own login and its own list of hosts."
@@ -888,6 +890,21 @@ def _login_state(ctx: Context) -> str | None:
     return site if isinstance(site, str) else None
 
 
+def _login_closed(ctx: Context) -> bool:
+    """Tell whether a login's second round follows the closing of the site's session."""
+    try:
+        return json.loads(ctx.request_state or "")["closed"] is True
+    except ValueError, KeyError, TypeError:
+        return False
+
+
+def _closed_note(site: str, *, closed: bool) -> str:
+    """Return the sentence that says a login closed the site's running session, or nothing."""
+    if not closed:
+        return ""
+    return f"The running {site} session was closed to open the login. "
+
+
 def _remote_login_text(site: str, *, shown: bool) -> str:
     """Say what happened to a login in a web browser, and what the agent should tell the person."""
     if shown:
@@ -970,17 +987,22 @@ class _Tools:
         arguments = {"account": account} if account else {}
         if (site := _login_state(ctx)) is not None:
             # The second round of a login whose link the client was asked to show.
-            return _remote_login_text(site, shown=LINK_KEY in (ctx.input_responses or {}))
+            return _closed_note(site, closed=_login_closed(ctx)) + _remote_login_text(
+                site, shown=LINK_KEY in (ctx.input_responses or {})
+            )
         result = await self._ask("login", target=site_or_url, **arguments)
+        closed = bool(result.get("closed_session"))
+        note = _closed_note(result["site"], closed=closed)
         if remote := result.get("remote"):
             if can_elicit_url(ctx) and uses_input_required(ctx):
                 return InputRequiredResult(
                     input_requests={LINK_KEY: link_request(result["site"], remote)},
-                    request_state=json.dumps({"site": result["site"]}),
+                    request_state=json.dumps({"site": result["site"], "closed": closed}),
                 )
-            return _remote_login_text(result["site"], shown=await show_link(ctx, result, remote))
+            shown = await show_link(ctx, result, remote)
+            return note + _remote_login_text(result["site"], shown=shown)
         where = "laptop" if result.get("route") == "bridge" else "screen"
-        return (
+        return note + (
             f"A login window for {result['site']} is open on the person's {where}. Ask them to "
             "sign in there and close the window when they are done. Then call browser_sites to "
             "see what was learned, and browser_open to start."

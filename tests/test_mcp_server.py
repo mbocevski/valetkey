@@ -1255,7 +1255,7 @@ def test_daemon_errors_become_tool_errors(short_dir: Path) -> None:
                 fail("unknown_site", "no site named 'x'; known sites: sitex")
 
             def busy(_a: dict[str, Any]) -> dict[str, Any]:
-                fail("session_running", "sitex has a running session")
+                fail("login_in_progress", "a login window for sitex is open")
 
             fake.handlers["open"] = unknown
             fake.handlers["login"] = busy
@@ -1264,9 +1264,37 @@ def test_daemon_errors_become_tool_errors(short_dir: Path) -> None:
             assert "unknown_site: no site named 'x'; known sites: sitex" in text_of(opened)
             login = await mcp.call_tool("browser_login", {"site_or_url": "sitex"})
             assert login.is_error
-            assert "session_running" in text_of(login)
+            assert "login_in_progress" in text_of(login)
 
     run(scenario())
+
+
+def test_a_login_says_when_it_closed_the_running_session(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["login"] = lambda _a: {
+                "site": "sitex",
+                "window": "open",
+                "closed_session": True,
+            }
+            opened = await mcp.call_tool("browser_login", {"site_or_url": "sitex"})
+            assert text_of(opened).startswith("The running sitex session was closed")
+            assert "login window for sitex is open" in text_of(opened)
+
+    run(scenario())
+
+
+def test_the_closing_of_a_session_is_remembered_for_the_second_round_of_a_login() -> None:
+    def closed_in(state: str | None) -> bool:
+        ctx = cast("Context", type("C", (), {"request_state": state})())
+        return mcp_server._login_closed(ctx)  # noqa: SLF001
+
+    assert closed_in('{"site": "s", "closed": true}') is True
+    assert closed_in('{"site": "s", "closed": false}') is False
+    for state in ("not json", "{}", "[1]", None):
+        assert closed_in(state) is False
+    assert mcp_server._closed_note("s", closed=True).startswith("The running s session")  # noqa: SLF001
+    assert mcp_server._closed_note("s", closed=False) == ""  # noqa: SLF001
 
 
 def test_screenshot_returns_image_content(short_dir: Path) -> None:

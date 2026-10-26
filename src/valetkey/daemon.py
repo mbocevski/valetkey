@@ -84,7 +84,7 @@ can tell it from anything the daemon says itself.
 **Errors** are ``{code, message}``: ``bad_request``, ``request_too_large``, ``unknown_op``,
 ``unknown_site``, ``ambiguous_account``, ``unknown_ref``, ``target_not_found``,
 ``target_ambiguous``, ``login_in_progress``, ``private_address``, ``bridge_exists``, ``no_socket``,
-``session_running``, ``no_session``, ``session_ended``, ``session_failed``,
+``no_session``, ``session_ended``, ``session_failed``,
 ``browser_error``, ``no_display``, ``x11_only``, ``bad_policy`` and ``internal``.
 
 **Liveness.** A task polls every session twice a second. A session whose browser has been
@@ -1341,8 +1341,11 @@ class Daemon:
         await self._refuse_private_start(site, start, existing)
         state = self._state(site)
         async with state.lock:
-            if state.kind == "session":
-                _fail("session_running", f"{site} has a running session; close it first")
+            closed = state.kind == "session"
+            if closed:
+                # A login is usually wanted because the saved one expired, with the session
+                # still open, so close it the way ``close`` does.
+                await self._end(state)
             if state.kind == "login":
                 _fail("login_in_progress", f"a login window for {site} is already open")
             state.kind = "login"
@@ -1359,6 +1362,8 @@ class Daemon:
             state.watcher = asyncio.ensure_future(self._watch_login(state, state.window))
             self._emit("login_opened", site)
         result: dict[str, Any] = {"site": self._shown(site), "window": "open"}
+        if closed:
+            result["closed_session"] = True
         if state.route == "bridge":
             result["route"] = "bridge"
         if state.shown is not None:

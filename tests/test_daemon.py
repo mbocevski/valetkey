@@ -1058,11 +1058,15 @@ def test_login_and_session_exclude_each_other(roots: sites.Roots) -> None:
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("open", site="sitex")
+            opened = await c.call("login", target="sitex")
+            assert opened["closed_session"] is True
+            assert (await c.call("status", site="sitex"))["state"] == "login"
+            again = await c.call("close", site="sitex")
+            assert again["closed"] is True
+            assert "closed_session" not in await c.call("login", target="sitex")
             with pytest.raises(DaemonError) as info:
                 await c.call("login", target="sitex")
-            assert info.value.code == "session_running"
-            await c.call("close", site="sitex")
-            await c.call("login", target="sitex")
+            assert info.value.code == "login_in_progress"
             with pytest.raises(DaemonError) as info:
                 await c.call("open", site="sitex")
             assert info.value.code == "login_in_progress"
