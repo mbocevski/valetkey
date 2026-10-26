@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import contextlib
+import fcntl
 import json
+import os
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from valetkey.client import Client, DaemonError, is_running
+from valetkey.client import Client, DaemonError, daemon_holds_lock, is_running, lock_path
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -338,3 +340,25 @@ def test_an_error_answer_for_nothing_this_client_asked_is_ignored(short_dir: Pat
             assert await c.call("x") == {"a": 1}
 
     run(scenario())
+
+
+def test_a_held_lock_means_a_daemon_and_looking_leaves_nothing_behind(short_dir: Path) -> None:
+    path = short_dir / "d.sock"
+    assert daemon_holds_lock(path) is False
+    assert not lock_path(path).exists()  # looking does not create the file
+    descriptor = os.open(lock_path(path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        assert daemon_holds_lock(path) is False  # a lock file nobody holds
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        assert daemon_holds_lock(path) is True
+        assert daemon_holds_lock(path) is True  # looking does not take the lock either
+    finally:
+        os.close(descriptor)
+    assert daemon_holds_lock(path) is False
+
+
+def test_looking_for_a_daemon_without_a_runtime_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    assert daemon_holds_lock() is False

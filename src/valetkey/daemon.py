@@ -91,6 +91,7 @@ import struct
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
 from urllib.parse import urlsplit
 
@@ -100,7 +101,6 @@ from valetkey.proxy import Mode, Proxy
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
-    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -370,9 +370,7 @@ def _take_lock(socket_path: Path) -> int:
         AlreadyRunningError: when another process holds the lock.
 
     """
-    descriptor = os.open(
-        socket_path.with_name(socket_path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600
-    )
+    descriptor = os.open(client.lock_path(socket_path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -539,9 +537,10 @@ class Daemon:
 
         Only one daemon may own a socket path. A lock file next to the socket decides which of
         several that start at once wins, so a loser fails at once instead of replacing the
-        winner's socket. The lock does not cover a socket that systemd holds, because a daemon
-        started by systemd takes no lock, so the winner also checks that nothing answers on the
-        path (connecting to the systemd socket starts its daemon, which then answers).
+        winner's socket. A daemon started by systemd takes the same lock, named after the socket
+        it was passed, so a client can tell that one runs without connecting to a socket that
+        would start it. A daemon that binds its own socket also checks that nothing answers
+        on the path, in case a systemd socket is there.
 
         Raises:
             AlreadyRunningError: when another daemon holds that path or listens on it.
@@ -551,10 +550,7 @@ class Daemon:
         if inherited is not None:
             for name in _ACTIVATION_VARIABLES:
                 os.environ.pop(name, None)
-            self._server = await asyncio.start_unix_server(
-                self._serve_connection, sock=inherited, limit=MAX_LINE_BYTES, cleanup_socket=False
-            )
-            self._monitor = asyncio.ensure_future(self._monitor_sessions())
+            await self._start_activated(inherited, path)
             return
         target = path or client.socket_path(self.roots)
         await asyncio.to_thread(make_private_dirs, target.parent)
@@ -573,6 +569,38 @@ class Daemon:
             self._release_lock()
             raise
         self._monitor = asyncio.ensure_future(self._monitor_sessions())
+
+    async def _start_activated(self, inherited: socket.socket, path: Path | None) -> None:
+        """Serve on the socket systemd passed in, holding the lock that sits next to it.
+
+        The lock is what lets a command that must never start a daemon (see
+        :func:`valetkey.client.daemon_holds_lock`) tell that this one is running. It is named
+        after the inherited socket's own path, falling back to ``path`` and then the default.
+        A daemon that finds the lock held leaves with an error, so ``Restart=on-failure`` and the
+        start limit stop a loop instead of running two daemons.
+
+        Raises:
+            AlreadyRunningError: when another process holds the lock.
+
+        """
+        name = inherited.getsockname()
+        target = Path(name) if isinstance(name, str) and name else path
+        try:
+            self._lock_fd = await asyncio.to_thread(
+                _take_lock, target or client.socket_path(self.roots)
+            )
+        except BaseException:
+            inherited.close()
+            raise
+        try:
+            self._server = await asyncio.start_unix_server(
+                self._serve_connection, sock=inherited, limit=MAX_LINE_BYTES, cleanup_socket=False
+            )
+            self._monitor = asyncio.ensure_future(self._monitor_sessions())
+        except BaseException:
+            inherited.close()
+            self._release_lock()
+            raise
 
     def _release_lock(self) -> None:
         if self._lock_fd is not None:

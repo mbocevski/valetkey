@@ -25,3 +25,7 @@ Changes that affect users of valetkey. The format follows
 - The browser tools now say when a page's background requests were refused, such as Chrome's own update requests, in a separate quiet line.
 - The `valetkey status` and `valetkey watch` commands, which show the open browser sessions and login windows, and a desktop notification when a session starts.
 - A `PKGBUILD` in `packaging/arch` that builds an Arch Linux package with the daemon's systemd units.
+
+### Changed
+
+- `valetkey allow` and `valetkey deny` now apply to a running session at once, and `valetkey forget` closes a running session before it deletes.

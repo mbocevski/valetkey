@@ -1353,6 +1353,71 @@ def test_start_uses_a_socket_passed_by_systemd(
     run(scenario())
 
 
+def test_a_daemon_started_by_systemd_holds_the_lock_next_to_its_socket(
+    roots: sites.Roots, short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = short_dir / "passed.sock"
+
+    async def scenario() -> None:
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(path))
+            listener.listen()
+            monkeypatch.setattr(daemon, "activated_socket", lambda *_: listener.dup())
+            assert client.daemon_holds_lock(path) is False
+            server = daemon.Daemon(roots)
+            await server.start()
+            assert client.daemon_holds_lock(path) is True
+            # A second one on the same socket gives up at once, and closes what it was handed.
+            second = daemon.Daemon(roots)
+            with pytest.raises(daemon.AlreadyRunningError, match="already running"):
+                await second.start()
+            assert client.daemon_holds_lock(path) is True
+            await server.shutdown()
+            assert client.daemon_holds_lock(path) is False
+            assert path.exists()  # the service manager's socket stays
+
+    run(scenario())
+
+
+def test_an_activated_daemon_without_a_socket_name_uses_the_path_it_was_given(
+    roots: sites.Roots, short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = short_dir / "given.sock"
+
+    async def scenario() -> None:
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind("")  # an unnamed socket: nothing to name the lock after
+            listener.listen()
+            monkeypatch.setattr(daemon, "activated_socket", lambda *_: listener.dup())
+            server = daemon.Daemon(roots)
+            await server.start(path)
+            assert client.daemon_holds_lock(path) is True
+            await server.shutdown()
+
+    run(scenario())
+
+
+def test_an_activated_daemon_releases_the_lock_if_it_cannot_serve(
+    roots: sites.Roots, short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = short_dir / "passed.sock"
+
+    async def broken(*_args: object, **_kwargs: object) -> None:
+        raise OSError
+
+    async def scenario() -> None:
+        with socket.socket(socket.AF_UNIX) as listener:
+            listener.bind(str(path))
+            listener.listen()
+            monkeypatch.setattr(daemon, "activated_socket", lambda *_: listener.dup())
+            monkeypatch.setattr(daemon.asyncio, "start_unix_server", broken)
+            with pytest.raises(OSError):  # noqa: PT011 - the error itself is the point
+                await daemon.Daemon(roots).start()
+            assert client.daemon_holds_lock(path) is False
+
+    run(scenario())
+
+
 def test_shutdown_ends_sessions_and_logins(roots: sites.Roots) -> None:
     add_site(roots, "alpha")
     add_site(roots, "beta")

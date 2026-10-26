@@ -62,12 +62,11 @@ they were last learned and whether a login profile exists. Add `--json` for a sc
 
 `valetkey allow SITE HOST` lets a site reach another host and its subdomains, and removes any
 excluded entry that would block it. `valetkey deny SITE HOST` takes a host away. When a wider
-allowed entry still covers it, the host is also excluded so it stays blocked. Tool results mention
-requests Chrome makes on its own, such as update checks, separately; allow the host if a page
-needs it.
+allowed entry still covers it, the host is also excluded so it stays blocked. Tool results mention Chrome's own
+update checks on a separate line; allow the host only if a page needs it.
 
 `valetkey forget SITE` deletes the site's policy, login profile and downloads after asking. It
-refuses while the site's browser is open.
+closes the site's session first.
 
 <!-- begin: valetkey sites --help -->
 ```text
@@ -124,7 +123,9 @@ Usage: valetkey forget [OPTIONS] SITE
 Delete a site's policy, login profile and downloads.
 
 It asks first, and refuses when input is not a terminal unless --yes is given.
-It also refuses while the site's browser is open: close that session first.
+If valetkeyd is running it closes the site's session before deleting. It refuses
+while a login window is open, and while a browser that valetkeyd does not own is
+using the profile.
 
 Parameters:
   SITE, --site: The site name, as shown by valetkey sites. [required]

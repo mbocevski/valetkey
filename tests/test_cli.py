@@ -72,6 +72,8 @@ def test_runs_as_a_module_in_a_subprocess() -> None:
 def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sites.Roots:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    # No real daemon of the person running the tests may be reached.
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run"))
     return sites.roots_from_env()
 
 

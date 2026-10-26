@@ -16,7 +16,17 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from cyclopts import App, Parameter
 
-from valetkey import __version__, client, daemon, login, mcp_server, procs, sandbox, sessions, sites
+from valetkey import (
+    __version__,
+    client,
+    daemon,
+    login,
+    mcp_server,
+    procs,
+    sandbox,
+    sessions,
+    sites,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -40,6 +50,76 @@ class CommandError(Exception):
 def _fail(error: CommandError) -> int:
     sys.stderr.write(f"valetkey: {error}\n")
     return 1
+
+
+CONNECT_TIMEOUT = 1.0
+"""Seconds to wait for a running daemon to accept a connection."""
+ANSWER_TIMEOUT = 10.0
+"""Seconds to wait for the daemon to answer a quick request such as ``reload_policy``."""
+CLOSE_TIMEOUT = 60.0
+"""Seconds to wait for the daemon to close a session, which ends a browser."""
+
+
+def _ask_daemon(
+    roots: sites.Roots, op: str, *, timeout: float | None = None, **args: str
+) -> dict[str, Any] | None:
+    """Ask the running daemon to do ``op`` and return its answer, or ``None`` if none is running.
+
+    This never starts a daemon: it looks for the daemon's lock first (see
+    :func:`valetkey.client.daemon_holds_lock`) and connects only when one holds it.
+
+    Raises:
+        DaemonError: when the daemon answers with an error, does not answer in time, or goes
+            away in the middle of the request.
+
+    """
+    if roots.runtime is None:
+        return None
+    path = client.socket_path(roots)
+    if not client.daemon_holds_lock(path):
+        return None
+    wait = ANSWER_TIMEOUT if timeout is None else timeout
+
+    async def ask() -> dict[str, Any]:
+        connection = await asyncio.wait_for(client.Client.connect(path), CONNECT_TIMEOUT)
+        async with connection:
+            return await asyncio.wait_for(connection.call(op, **args), wait)
+
+    try:
+        return asyncio.run(ask())
+    except TimeoutError:
+        message = f"valetkeyd did not answer within {wait:g} seconds"
+        code = "timeout"
+        raise client.DaemonError(code, message) from None
+    except client.DaemonError as error:
+        if error.code == "not_running":  # it ended between the lock and the connection
+            return None
+        raise
+
+
+def save_and_reload(roots: sites.Roots, site: str, policy: sites.Policy | None) -> bool:
+    """Save ``policy`` (when there is one), then tell a running daemon to read it again.
+
+    Returns whether a live session of ``site`` now uses the saved policy. Anything that changes a
+    site's policy by hand goes through here, so a running session follows at once. The file is
+    saved before the daemon is asked, so a daemon that fails or does not answer is only a warning.
+    """
+    if policy is not None:
+        sites.save_policy(roots, policy)
+    try:
+        reply = _ask_daemon(roots, "reload_policy", site=site)
+    except client.DaemonError as error:
+        sys.stderr.write(
+            f"valetkey: {site}: the change is saved, but the running daemon did not apply it "
+            f"({error.message}).\n"
+        )
+        return False
+    return reply is not None and bool(reply.get("live"))
+
+
+def _say_applied(site: str, *, applied: bool) -> None:
+    if applied:
+        _say(f"{site}: applied to the running session.")
 
 
 def _known_sites(roots: sites.Roots) -> list[str]:
@@ -175,15 +255,18 @@ def allow(site: str, host: str) -> int:
         allowed = (*policy.allow, name) if added else policy.allow
         kept = tuple(e for e in policy.excluded if not sites.excluded_conflicts(e, [name]))
         removed = [e for e in policy.excluded if e not in kept]
-        if added or removed:
-            sites.save_policy(
-                roots, sites.Policy(policy.site, policy.start, allowed, kept, policy.learned)
-            )
+        changed = (
+            sites.Policy(policy.site, policy.start, allowed, kept, policy.learned)
+            if added or removed
+            else None
+        )
     except CommandError as error:
         return _fail(error)
+    applied = save_and_reload(roots, site, changed)
     _say(f"{site}: {name} is allowed." if added else f"{site}: {name} was already allowed.")
     if removed:
         _say(f"{site}: no longer excluding {', '.join(removed)}.")
+    _say_applied(site, applied=applied)
     return 0
 
 
@@ -212,12 +295,14 @@ def deny(site: str, host: str) -> int:
         excluded = policy.excluded
         if covered and name not in excluded:
             excluded = (*excluded, name)
-        if allowed != policy.allow or excluded != policy.excluded:
-            sites.save_policy(
-                roots, sites.Policy(policy.site, policy.start, allowed, excluded, policy.learned)
-            )
+        changed = (
+            sites.Policy(policy.site, policy.start, allowed, excluded, policy.learned)
+            if allowed != policy.allow or excluded != policy.excluded
+            else None
+        )
     except CommandError as error:
         return _fail(error)
+    applied = save_and_reload(roots, site, changed)
     removed = allowed != policy.allow
     if removed:
         _say(f"{site}: {name} is no longer allowed.")
@@ -225,6 +310,7 @@ def deny(site: str, host: str) -> int:
         _say(f"{site}: a wider allowed entry still covers {name}, so it is now excluded.")
     if not removed and not covered:
         _say(f"{site}: {name} was not allowed. Nothing changed.")
+    _say_applied(site, applied=applied)
     return 0
 
 
@@ -264,6 +350,30 @@ def _forget_targets(roots: sites.Roots, site: str) -> list[Path]:
     return found
 
 
+def _daemon_state(roots: sites.Roots, site: str) -> str | None:
+    """Return what a running daemon is doing for ``site`` (``idle``, ``login`` or ``session``).
+
+    ``None`` means no daemon is running, so the process table is the only guard.
+    """
+    try:
+        reply = _ask_daemon(roots, "sites")
+    except client.DaemonError as error:
+        message = f"could not ask the running daemon about {site}: {error.message}"
+        raise CommandError(message) from error
+    if reply is None:
+        return None
+    entry = next((e for e in reply.get("sites", []) if e.get("site") == site), None)
+    return str(entry["state"]) if entry else "idle"
+
+
+def _close_session(roots: sites.Roots, site: str) -> None:
+    try:
+        _ask_daemon(roots, "close", timeout=CLOSE_TIMEOUT, site=site)
+    except client.DaemonError as error:
+        message = f"could not close the {site} session: {error.message}"
+        raise CommandError(message) from error
+
+
 def _forget_checks(roots: sites.Roots, site: str, *, yes: bool) -> list[Path] | None:
     """Return what to delete for ``site``, or None when the person declines."""
     try:
@@ -274,11 +384,24 @@ def _forget_checks(roots: sites.Roots, site: str, *, yes: bool) -> list[Path] | 
     targets = _forget_targets(roots, site)
     if not targets:
         raise _unknown_site(roots, site)
-    if _profile_in_use(sites.profile_path(roots, site)):
+    state = _daemon_state(roots, site)
+    if state == "login":
+        message = f"a login window for {site} is open; close it first"
+        raise CommandError(message)
+    profile = sites.profile_path(roots, site)
+    if state != "session" and _profile_in_use(profile):
         message = f"the browser for {site} is open; close that session first"
         raise CommandError(message)
     if not yes and not _confirmed(site):
         return None
+    if state == "session":
+        _close_session(roots, site)
+        if _profile_in_use(profile):
+            message = (
+                f"a browser outside valetkey's daemon is still using {site}'s profile; "
+                "close it first"
+            )
+            raise CommandError(message)
     return targets
 
 
@@ -294,8 +417,9 @@ def _confirmed(site: str) -> bool:
 def forget(site: str, *, yes: Annotated[bool, Parameter(name="--yes", negative="")] = False) -> int:
     """Delete a site's policy, login profile and downloads.
 
-    It asks first, and refuses when input is not a terminal unless --yes is given. It also
-    refuses while the site's browser is open: close that session first.
+    It asks first, and refuses when input is not a terminal unless --yes is given. If valetkeyd
+    is running it closes the site's session before deleting. It refuses while a login window is
+    open, and while a browser that valetkeyd does not own is using the profile.
 
     Parameters
     ----------

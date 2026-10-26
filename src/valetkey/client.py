@@ -11,8 +11,10 @@ calls may be in flight on one client at once.
 
 import asyncio
 import contextlib
+import fcntl
 import itertools
 import json
+import os
 from typing import TYPE_CHECKING, Any, Self
 
 from valetkey import sites
@@ -60,6 +62,33 @@ def socket_path(roots: sites.Roots | None = None) -> Path:
 
     """
     return sites.runtime_path(roots or sites.roots_from_env()) / SOCKET_NAME
+
+
+def lock_path(path: Path) -> Path:
+    """Return the lock file the daemon holds while it runs on the socket at ``path``."""
+    return path.with_name(path.name + ".lock")
+
+
+def daemon_holds_lock(path: Path | None = None) -> bool:
+    """Tell whether a daemon is running on ``path`` (default: :func:`socket_path`).
+
+    This looks at the daemon's lock file and does not connect. Under systemd socket activation,
+    connecting to the socket starts the daemon, so a command that must never start one asks
+    here first and connects only when this is true. A missing lock file, or one nobody holds,
+    means no daemon, and a missing runtime directory is the same.
+    """
+    try:
+        target = lock_path(path or socket_path())
+        descriptor = os.open(target, os.O_RDWR)  # no O_CREAT: looking must not leave a file
+    except OSError, sites.RuntimeDirUnavailableError:
+        return False
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    finally:
+        os.close(descriptor)  # also drops a lock taken here
+    return False
 
 
 async def is_running(path: Path | None = None) -> bool:
