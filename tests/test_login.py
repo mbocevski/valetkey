@@ -1105,10 +1105,21 @@ def bounce_site(host: str, path: str) -> bytes:
     return answer(status=404)
 
 
-async def log_in(
-    sway: Sway, roots: sites.Roots, hosts: Hosts, form: tuple[str, str], end: str
+async def log_in(  # noqa: PLR0913 - what the person does, and where it leads
+    sway: Sway,
+    roots: sites.Roots,
+    hosts: Hosts,
+    form: tuple[str, str],
+    posted: tuple[str, str],
+    *,
+    dwell: float = 0.0,
 ) -> learn.Classification:
-    """Open a login at ``http://site.test/``, press Enter on ``form``, end at ``end``, classify."""
+    """Open a login at ``http://site.test/``, submit ``form``, and classify what it learned.
+
+    The person presses Enter on ``form`` after ``dwell`` seconds, and the form posts to ``posted``.
+    The keys are sent again until the post arrives, because the window may not have the focus
+    yet. The window is closed as soon as the form has gone through.
+    """
     finished: list[list[SeenHost]] = []
     began = datetime.now(UTC)
     env = {
@@ -1134,17 +1145,15 @@ async def log_in(
         while not hosts.reached(*form):
             assert time.monotonic() < deadline, (hosts.log, sway_log(roots))
             await asyncio.sleep(0.2)
-        await asyncio.sleep(2.5)  # the page is shown, and the browser takes the focus
-        await sway.msg("[app_id=chromium]", "focus")
-        await asyncio.sleep(0.3)
-        for keys in (["x"], ["-k", "Return"]):
-            typing = await asyncio.create_subprocess_exec("wtype", *keys, env=env)
-            assert await typing.wait() == 0
-            await asyncio.sleep(1.0)
-        while not hosts.reached("site.test", end):
+        await asyncio.sleep(dwell)  # the person reads the page for a while
+        while not hosts.reached(*posted):
             assert time.monotonic() < deadline, (hosts.log, sway_log(roots))
-            await asyncio.sleep(0.2)
-        await asyncio.sleep(2.5)  # the person looks at the page they land on
+            await sway.msg("[app_id=chromium]", "focus")
+            for keys in (["x"], ["-k", "Return"]):
+                typing = await asyncio.create_subprocess_exec("wtype", *keys, env=env)
+                assert await typing.wait() == 0
+                await asyncio.sleep(0.15)
+            await asyncio.sleep(0.4)
         await sway.msg("[app_id=chromium]", "kill")
         result = await asyncio.wait_for(handle.wait(), 40)
         assert result.cancelled is False
@@ -1163,7 +1172,14 @@ async def log_in(
 def test_a_sign_in_provider_that_showed_its_form_is_allowed(sway: Sway, roots: sites.Roots) -> None:
     async def scenario() -> learn.Classification:
         async with Hosts(oidc_site).serving() as hosts:
-            return await log_in(sway, roots, hosts, ("idp.test", "/authorize"), "/home")
+            return await log_in(
+                sway,
+                roots,
+                hosts,
+                ("idp.test", "/authorize"),
+                ("idp.test", "/login"),
+                dwell=learn.SHOWN_MS / 1000 + 0.3,
+            )
 
     result = run(scenario(), 150)
     assert result.allow == ("idp.test", "site.test")
@@ -1177,7 +1193,9 @@ def test_a_host_the_login_was_only_sent_through_is_not_allowed(
 ) -> None:
     async def scenario() -> learn.Classification:
         async with Hosts(bounce_site).serving() as hosts:
-            return await log_in(sway, roots, hosts, ("site.test", "/login"), "/home")
+            return await log_in(
+                sway, roots, hosts, ("site.test", "/login"), ("site.test", "/signin")
+            )
 
     result = run(scenario(), 150)
     assert result.allow == ("site.test",)
