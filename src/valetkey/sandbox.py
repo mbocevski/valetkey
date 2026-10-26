@@ -165,8 +165,9 @@ class Sandbox:
     downloads_dir: Path
     """Where downloads land. Read-write."""
     proxy_socket: Path
-    """The proxy's unix socket. Its parent directory is bound read-write, so that directory
-    should hold nothing else, and the socket may be recreated while the sandbox runs."""
+    """The proxy's unix socket, which must exist when the sandbox starts. The file itself is
+    bound, not its directory, so nothing inside can unlink it, rename it or put another file in
+    its place. A proxy that listens on a new socket file needs a new sandbox."""
     log_file: Path
     """Receives the output of everything started inside. The sandbox itself never sees it."""
     runtime_dir: Path
@@ -322,7 +323,7 @@ def bwrap_argv(
     writable = [
         sandbox.profile_dir,
         sandbox.downloads_dir,
-        sandbox.proxy_socket.parent,
+        sandbox.proxy_socket,
         *([sandbox.shared_dir] if sandbox.shared_dir else []),
     ]
     for path in dict.fromkeys(writable):

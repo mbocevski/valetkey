@@ -518,7 +518,8 @@ class Proxy:
         await server.wait_closed()
         if self._owned_resolver is not None:
             self._owned_resolver.close()
-        await asyncio.to_thread(socket_path.unlink, missing_ok=True)
+        with contextlib.suppress(OSError):  # the browser may have swapped it for a directory
+            await asyncio.to_thread(socket_path.unlink, missing_ok=True)
 
     @contextlib.asynccontextmanager
     async def serving(self, socket_path: Path) -> AsyncGenerator[Self]:

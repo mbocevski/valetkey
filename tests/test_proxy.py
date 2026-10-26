@@ -1549,3 +1549,20 @@ def test_a_range_that_is_never_allowed_stays_refused_when_listed(text: str) -> N
 def test_a_private_range_is_allowed_when_listed(text: str, address: str) -> None:
     assert address_refusal(address) is not None
     assert proxy_module.private_address_allowed(address, [text])
+
+
+def swap_for_a_directory(path: Path) -> None:
+    path.unlink()
+    path.mkdir()
+    (path / "x").write_text("x")
+
+
+def test_close_survives_a_socket_path_that_became_a_directory(sock: Path) -> None:
+    async def scenario() -> None:
+        proxy = Proxy(POLICY)
+        await proxy.start(sock)
+        await asyncio.to_thread(swap_for_a_directory, sock)
+        await proxy.close()  # does not raise
+
+    run(scenario())
+    assert sock.is_dir()

@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import signal
+import socket
 import subprocess
 import sys
 from dataclasses import replace
@@ -211,7 +212,7 @@ def test_argv_writes_only_where_it_was_told(tmp_path: Path) -> None:
     assert writable == {
         str(tmp_path / "profile"),
         str(tmp_path / "downloads"),
-        str(tmp_path / "proxy"),
+        str(tmp_path / "proxy" / "p.sock"),
         str(tmp_path / "shared"),
     }
     for src, dest in pairs(argv, "--bind"):
@@ -219,8 +220,8 @@ def test_argv_writes_only_where_it_was_told(tmp_path: Path) -> None:
 
 
 def test_argv_binds_a_shared_directory_once(tmp_path: Path) -> None:
-    argv = build(tmp_path, shared_dir=tmp_path / "proxy")
-    assert [src for src, _ in pairs(argv, "--bind")].count(str(tmp_path / "proxy")) == 1
+    argv = build(tmp_path, shared_dir=tmp_path / "shared")
+    assert [src for src, _ in pairs(argv, "--bind")].count(str(tmp_path / "shared")) == 1
 
 
 def test_argv_tmpfs_come_before_every_bind_that_may_sit_inside_them(tmp_path: Path) -> None:
@@ -413,6 +414,9 @@ def box(short_dir: Path) -> sandbox.Sandbox:
 
 def run_inside(box: sandbox.Sandbox, command: list[str], timeout: float = 60) -> tuple[int, str]:
     """Run ``command`` in the namespace and return its exit status and the log."""
+    if not box.proxy_socket.exists():  # the proxy is up before a sandbox starts
+        with socket.socket(socket.AF_UNIX) as placeholder:
+            placeholder.bind(str(box.proxy_socket))
     process = sandbox.start(box, command)
     status = process.wait(timeout=timeout)
     return status, box.log_file.read_text()
@@ -775,3 +779,44 @@ def test_a_driver_call_runs_in_a_namespace_without_network_or_the_persons_files(
         argv.index("AGENT_BROWSER_SESSION") - 1 : argv.index("AGENT_BROWSER_SESSION") + 2
     ] == ["--setenv", "AGENT_BROWSER_SESSION", "s"]
     assert argv[-3:] == ["/opt/ab/agent-browser", "--json", "snapshot"]
+
+
+@integration
+@needs_namespaces
+def test_the_proxy_socket_cannot_be_removed_or_replaced_from_inside(box: sandbox.Sandbox) -> None:
+    code = """
+import errno, os, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+results = {}
+
+
+def replace():
+    other = Path(str(path) + ".new")
+    other.write_text("x")
+    os.replace(other, path)
+
+
+for name, action in {
+    "unlink": path.unlink,
+    "rename": lambda: path.rename(path.with_name("moved")),
+    "replace": replace,
+    "rmdir": path.parent.rmdir,
+}.items():
+    try:
+        action()
+        results[name] = "worked"
+    except OSError as error:
+        results[name] = errno.errorcode[error.errno]
+print(results)
+print("still a socket:", path.is_socket())
+"""
+    with ProxyStub(box.proxy_socket):
+        status, log = run_python(box, code, str(box.proxy_socket))
+        assert box.proxy_socket.is_socket()
+    assert status == 0, log
+    assert "'unlink': 'EBUSY'" in log
+    assert "'rename': 'EBUSY'" in log
+    assert "'replace': 'EBUSY'" in log
+    assert "worked" not in log
+    assert "still a socket: True" in log
