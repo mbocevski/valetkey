@@ -789,6 +789,30 @@ def test_type_can_press_enter(short_dir: Path) -> None:
     run(scenario())
 
 
+def test_a_login_on_a_private_display_gives_the_link_and_the_ssh_line(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["login"] = lambda _a: {
+                "site": "sitex",
+                "window": "open",
+                "remote": {
+                    "url": "http://127.0.0.1:4242/token/vnc.html?autoconnect=true",
+                    "port": 4242,
+                    "ssh": "ssh -L 4242:localhost:4242 box",
+                },
+            }
+            result = await mcp.call_tool("browser_login", {"site_or_url": "sitex"})
+            assert not result.is_error
+            text = text_of(result)
+            assert "http://127.0.0.1:4242/token/vnc.html?autoconnect=true" in text
+            assert "first run: ssh -L 4242:localhost:4242 box" in text
+            assert "ten minutes" in text
+            assert "one viewer at a time" in text
+            assert "on the person's screen" not in text
+
+    run(scenario())
+
+
 def test_an_expired_login_leads_the_result_with_what_to_do(short_dir: Path) -> None:
     async def scenario() -> None:
         async with connected(short_dir) as (mcp, fake, _bridge):

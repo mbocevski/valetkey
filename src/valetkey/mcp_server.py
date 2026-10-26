@@ -622,6 +622,15 @@ class _Tools:
         ],
     ) -> str:
         result = await self._ask("login", target=site_or_url)
+        if remote := result.get("remote"):
+            return (
+                f"No screen is available here, so the {result['site']} login window is on a "
+                f"private display that the person opens in a web browser. Give them this link: "
+                f"{remote['url']}\nOn another machine they must first run: {remote['ssh']}\n"
+                "The link works for ten minutes and for one viewer at a time. Ask them to sign in "
+                "and close the browser window when they are done. Then call browser_sites to see "
+                "what was learned, and browser_open to start."
+            )
         return (
             f"A login window for {result['site']} is open on the person's screen. Ask them to "
             "sign in there and close the window when they are done. Then call browser_sites to "

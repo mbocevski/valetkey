@@ -21,7 +21,9 @@ Start with `browser_sites`. The others act on one site by its name.
 
 - `browser_sites` lists the sites you have set up, their state, the hosts each may reach, and what
   the last login learned.
-- `browser_login` opens a login window on your screen and returns at once.
+- `browser_login` opens a login window on your screen and returns at once. With no screen, and
+  `remote_logins.novnc` on, it returns a link and an `ssh -L` line instead (see
+  [remote logins](remote.md)).
 - `browser_open` starts the signed-in browser for a site, or joins the running one. It says when
   the saved login has expired.
 - `browser_snapshot` reads the page as a text tree, with a reference such as `e3` for each element

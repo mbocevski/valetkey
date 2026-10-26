@@ -20,6 +20,10 @@ check:
 test *args:
     uv run pytest {{ args }}
 
+# Download the noVNC viewer files the remote login display serves, checked against tools/novnc.lock.
+novnc:
+    uv run python tools/fetch_novnc.py
+
 # Run the tests that need bubblewrap, a browser and a desktop; a skipped one fails.
 test-integration:
     uv run pytest -m integration --require-integration -rs --no-cov

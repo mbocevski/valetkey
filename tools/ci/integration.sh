@@ -35,6 +35,7 @@ run_as_ci() {
 
 cd /work
 run_as_ci uv sync
+run_as_ci uv run python tools/fetch_novnc.py
 # A skipped integration test fails the run: a skip here means something was not installed.
 # One test starts a transient service with the unit file's hardening, which needs a systemd
 # user manager, and a container has none, so it runs on a developer's machine only.

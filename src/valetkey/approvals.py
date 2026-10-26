@@ -44,13 +44,15 @@ from valetkey import sites
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
+    from pathlib import Path
 
     from valetkey.sites import Roots
 
 CONFIG_NAME = "config.json"
 COMMAND_TIMEOUT = 60.0
 REASON_LENGTH = 240
-_CONFIG_KEYS = frozenset({"approve_command"})
+_CONFIG_KEYS = frozenset({"approve_command", "remote_logins"})
+_REMOTE_KEYS = frozenset({"novnc"})
 _PASSED_ENVIRONMENT = (
     "HOME",
     "XDG_RUNTIME_DIR",
@@ -189,17 +191,23 @@ def eligibility(
 
 @dataclass(frozen=True, slots=True)
 class Config:
-    """What ``config.json`` holds. ``approve_command`` is an argument list, or ``None``."""
+    """What ``config.json`` holds.
+
+    ``approve_command`` is an argument list, or ``None``. The ``remote_logins``
+    switch says whether a login with no screen to open on may be shown in a web browser.
+    """
 
     approve_command: tuple[str, ...] | None = None
+    novnc: bool = False
 
 
 def load_config(roots: Roots) -> Config:
     """Read ``$XDG_CONFIG_HOME/valetkey/config.json``; a missing file is an empty config.
 
     Raises:
-        ConfigError: when the file is not a JSON object with only known keys, or
-            ``approve_command`` is not a non-empty list of non-empty strings.
+        ConfigError: when the file is not a JSON object with only known keys, when
+            ``approve_command`` is not a non-empty list of non-empty strings, or when
+            ``remote_logins`` is not an object holding one boolean switch.
 
     """
     path = roots.config / "valetkey" / CONFIG_NAME
@@ -218,9 +226,12 @@ def load_config(roots: Roots) -> Config:
     if not isinstance(data, dict) or not set(data) <= _CONFIG_KEYS:
         message = f"{path}: expected an object with only these keys: {', '.join(_CONFIG_KEYS)}"
         raise ConfigError(message)
-    command = data.get("approve_command")
+    return Config(_approve_command(path, data.get("approve_command")), _novnc(path, data))
+
+
+def _approve_command(path: Path, command: object) -> tuple[str, ...] | None:
     if command is None:
-        return Config()
+        return None
     if not (
         isinstance(command, list)
         and command
@@ -230,7 +241,22 @@ def load_config(roots: Roots) -> Config:
             f"{path}: approve_command must be a list of strings: the program, then its arguments"
         )
         raise ConfigError(message)
-    return Config(tuple(command))
+    return tuple(command)
+
+
+def _novnc(path: Path, data: Mapping[str, Any]) -> bool:
+    """Return the ``remote_logins`` switch from the config: off unless it is exactly ``true``."""
+    remote = data.get("remote_logins")
+    if remote is None:
+        return False
+    if not isinstance(remote, dict) or not set(remote) <= _REMOTE_KEYS:
+        message = f"{path}: remote_logins must be an object with only these keys: novnc"
+        raise ConfigError(message)
+    value = remote.get("novnc", False)
+    if not isinstance(value, bool):
+        message = f"{path}: remote_logins.novnc must be true or false"
+        raise ConfigError(message)
+    return value
 
 
 def command_environment(

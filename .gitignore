@@ -6,3 +6,7 @@ __pycache__/
 coverage.xml
 htmlcov/
 dist/
+
+# The pinned noVNC release, fetched by tools/fetch_novnc.py
+src/valetkey/novnc/
+src/valetkey/novnc.new/

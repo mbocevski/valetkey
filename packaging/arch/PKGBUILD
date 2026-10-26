@@ -19,7 +19,7 @@ pkgrel=1
 pkgdesc='A logged-in browser for MCP clients, contained to the sites it is allowed to reach'
 # Some locked dependencies (pydantic-core, cryptography, cffi) are compiled wheels.
 arch=('x86_64')
-license=('Apache-2.0')
+license=('Apache-2.0' 'MPL-2.0')
 depends=(
   'agent-browser>=0.39'
   'bubblewrap'
@@ -29,7 +29,11 @@ depends=(
   'python>=3.14'
   'python<3.15'
 )
-optdepends=('libnotify: a desktop notification when a browser session starts')
+optdepends=(
+  'libnotify: a desktop notification when a browser session starts'
+  'sway: the private display for a login on a machine with no screen (remote_logins.novnc)'
+  'wayvnc: serves that display to the noVNC page (remote_logins.novnc)'
+)
 makedepends=(
   'python-build'
   'python-installer'
@@ -56,6 +60,9 @@ prepare() {
   rm -rf "$srcdir/deps/bin"
   # uv's lock file, which would be world-writable in the package.
   rm -f "$srcdir/deps/.lock"
+  # The noVNC viewer files, from the release and SHA-256 in tools/novnc.lock. They are not in the
+  # source tree, so they are fetched here, unmodified, and checked before they are unpacked.
+  python "$_root/tools/fetch_novnc.py" "$srcdir/novnc"
 }
 
 build() {
@@ -101,6 +108,12 @@ package() {
     chmod 644 "$pkgdir/usr/lib/systemd/user/$unit"
   done
 
+  # The viewer files go next to the package's modules, where the gateway looks for them. They are
+  # under the MPL-2.0, which asks that the licence text travel with them: it stays in the tree and
+  # is also installed where Arch looks for licences.
+  cp -a "$srcdir/novnc" "$site/valetkey/novnc"
+  install -Dm644 "$srcdir/novnc/LICENSE.txt" "$pkgdir/usr/share/licenses/$pkgname/novnc-LICENSE.txt"
+  install -Dm644 "$_root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 "$_root/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 "$_root/CHANGELOG.md" "$pkgdir/usr/share/doc/$pkgname/CHANGELOG.md"
 }

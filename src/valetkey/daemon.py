@@ -110,6 +110,7 @@ from valetkey import (
     approvals,
     clicks,
     client,
+    display,
     downloads,
     expiry,
     learn,
@@ -130,7 +131,7 @@ from valetkey.proxy import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +229,7 @@ class LoginWindow(Protocol):
 
 type SessionFactory = Callable[[sites.Roots, str, str, Path], BrowserSession]
 type LoginStarter = Callable[..., Awaitable[LoginWindow]]
+type DisplayStarter = Callable[..., Awaitable[display.Display]]
 type PeerUid = Callable[[socket.socket], int]
 type Announcer = Callable[[str], Awaitable[None]]
 
@@ -511,6 +513,7 @@ class _Site:
     session: BrowserSession | None = None
     proxy: Proxy | None = None
     window: LoginWindow | None = None
+    shown: display.Display | None = None
     watcher: asyncio.Task[None] | None = None
     generation: int = 0
     quiet_floor: int | None = None
@@ -576,7 +579,8 @@ class Daemon:
     how long to look for a download that a click has only just started, and ``download_wait`` is
     the longest to wait for downloads that are running. ``announcer`` (default
     :func:`announce_session`) tells the person that a session started, and ``poll_interval`` is
-    how often each session's browser is checked.
+    how often each session's browser is checked. ``display_starter`` makes the private display of
+    a login shown in a web browser (:func:`valetkey.display.start_display`).
     """
 
     def __init__(  # noqa: PLR0913 - each is a seam the tests replace
@@ -595,6 +599,7 @@ class Daemon:
         poll_interval: float = POLL_INTERVAL,
         approve_timeout: float = approvals.COMMAND_TIMEOUT,
         user_environment: Callable[[], Mapping[str, str]] = login.systemd_user_environment,
+        display_starter: DisplayStarter = display.start_display,
     ) -> None:
         """Create a daemon for the directories in ``roots``. Nothing listens until :func:`run`."""
         self.roots = roots
@@ -602,6 +607,7 @@ class Daemon:
         self._user_environment = user_environment
         self._session_factory = session_factory or start_session
         self._login_starter = login_starter
+        self._display_starter = display_starter
         self._proxy_options = dict(proxy_options or {})
         self._startup_grace = startup_grace
         self._peer_uid = peer_uid
@@ -1146,13 +1152,8 @@ class Daemon:
             state.kind = "login"
             state.start = start
             try:
-                state.window = await self._login_starter(
-                    site,
-                    start,
-                    self.roots,
-                    self._finisher(state, start),
-                    proxy_options=self._proxy_options,
-                    private_networks=existing.private_networks if existing else (),
+                state.window, state.shown = await self._open_window(
+                    state, site, start, existing.private_networks if existing else ()
                 )
             except BaseException:
                 state.kind = "idle"
@@ -1160,7 +1161,47 @@ class Daemon:
             state.since = self._now()
             state.watcher = asyncio.ensure_future(self._watch_login(state, state.window))
             self._emit("login_opened", site)
-        return {"site": site, "window": "open"}
+        result: dict[str, Any] = {"site": site, "window": "open"}
+        if state.shown is not None:
+            result["remote"] = display.describe(state.shown)
+        return result
+
+    async def _open_window(
+        self, state: _Site, site: str, start: str, networks: Sequence[str]
+    ) -> tuple[LoginWindow, display.Display | None]:
+        """Open the login window on the person's screen, or else on a private display.
+
+        When there is no screen to use and the ``remote_logins`` switch is on in the config, the
+        window opens on a display of its own that a web browser can view (see
+        :mod:`valetkey.display`). The display is returned with the window, and it ends with it.
+        """
+        options: dict[str, Any] = {
+            "proxy_options": self._proxy_options,
+            "private_networks": networks,
+        }
+        finisher = self._finisher(state, start)
+        try:
+            return await self._login_starter(site, start, self.roots, finisher, **options), None
+        except login.DisplayError:
+            if not await self._novnc_enabled():
+                raise
+        shown = await self._display_starter(self.roots, site)
+        try:
+            window = await self._login_starter(
+                site, start, self.roots, finisher, wayland_socket=shown.wayland_socket, **options
+            )
+        except BaseException:
+            await shown.close()
+            raise
+        return window, shown
+
+    async def _novnc_enabled(self) -> bool:
+        """Tell whether the config lets a login with no screen be shown in a web browser."""
+        try:
+            return (await asyncio.to_thread(approvals.load_config, self.roots)).novnc
+        except approvals.ConfigError:
+            logger.warning("the config is not usable, so a login is not offered in a browser")
+            return False
 
     async def _existing_policy(self, site: str) -> sites.Policy | None:
         """Return ``site``'s policy, or ``None`` when it has none yet."""
@@ -1251,6 +1292,9 @@ class Daemon:
         except Exception:
             logger.exception("login for %s failed", state.name)
         finally:
+            shown, state.shown = state.shown, None
+            if shown is not None:
+                await shown.close()
             state.window = None
             state.kind = "idle"
             self._emit("login_closed", state.name)

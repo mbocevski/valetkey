@@ -28,3 +28,9 @@ bridge_connected
 bridge_disconnected
 remote_runtime
 print_runtime
+noVNC
+wayvnc
+sway
+RFB
+[Uu]nix
+setpriv

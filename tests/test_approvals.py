@@ -210,6 +210,22 @@ def test_no_config_means_no_command(roots: sites.Roots) -> None:
     assert approvals.load_config(roots).approve_command is None
 
 
+def test_remote_logins_are_off_unless_the_config_says_true(roots: sites.Roots) -> None:
+    assert approvals.load_config(roots).novnc is False
+    for text in ("{}", '{"remote_logins": null}', '{"remote_logins": {}}'):
+        write_config(roots, text)
+        assert approvals.load_config(roots).novnc is False, text
+    write_config(roots, '{"remote_logins": {"novnc": false}}')
+    assert approvals.load_config(roots).novnc is False
+    write_config(roots, '{"remote_logins": {"novnc": true}}')
+    assert approvals.load_config(roots) == approvals.Config(None, novnc=True)
+
+
+def test_the_command_and_remote_logins_are_read_together(roots: sites.Roots) -> None:
+    write_config(roots, '{"approve_command": ["ask"], "remote_logins": {"novnc": true}}')
+    assert approvals.load_config(roots) == approvals.Config(("ask",), novnc=True)
+
+
 def test_the_command_is_an_argument_list(roots: sites.Roots) -> None:
     write_config(roots, '{"approve_command": ["/usr/bin/true", "--flag", "a b"]}')
     assert approvals.load_config(roots).approve_command == ("/usr/bin/true", "--flag", "a b")
@@ -228,6 +244,11 @@ def test_the_command_is_an_argument_list(roots: sites.Roots) -> None:
         '{"approve_command": ["a", 5]}',
         '{"approve_command": {"a": 1}}',
         '{"approve_command": ["a"], "other": 1}',
+        '{"remote_logins": true}',
+        '{"remote_logins": []}',
+        '{"remote_logins": {"novnc": "yes"}}',
+        '{"remote_logins": {"novnc": 1}}',
+        '{"remote_logins": {"waypipe": true}}',
     ],
 )
 def test_a_config_that_cannot_be_used_says_why(roots: sites.Roots, text: str) -> None:

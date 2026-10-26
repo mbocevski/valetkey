@@ -856,6 +856,8 @@ class FakeSystem:
         self.units = tmp_path / "units"
         self.system_units: tuple[Path, ...] = ()
         self.calls: list[list[str]] = []
+        self.remote = False
+        self.viewer: Path | cli.display.RemoteDisplayError = tmp_path / "novnc"
         for key, value in overrides.items():
             setattr(self, key, value)
 
@@ -878,6 +880,11 @@ class FakeSystem:
             raise self.offered
         return self.offered
 
+    def viewer_files(self) -> Path:
+        if isinstance(self.viewer, Exception):
+            raise self.viewer
+        return self.viewer
+
     def system(self) -> cli.System:
         return System(
             which=self.which,
@@ -885,6 +892,8 @@ class FakeSystem:
             environ=self.environ,
             wayland=self.wayland,
             offered=self.interfaces,
+            remote_logins=lambda: self.remote,
+            viewer=self.viewer_files,
             unit_dirs=(self.units, *self.system_units),
         )
 
@@ -1743,3 +1752,39 @@ def test_systemd_accepts_the_bridge_unit(tmp_path: Path) -> None:
         if "valetkey-bridge" in line and "Unknown" in line
     ]
     assert unit_problems == []
+
+
+def test_doctor_says_nothing_about_remote_logins_while_they_are_off(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path, viewer=cli.display.RemoteDisplayError("missing"))
+    assert "remote-login" not in results(fake)
+
+
+def test_doctor_checks_what_a_remote_login_needs(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path, remote=True)
+    fake.tools |= {"sway": "/usr/bin/sway", "wayvnc": "/usr/bin/wayvnc"}
+    fake.outputs["/usr/bin/wayvnc --version"] = (0, "wayvnc: v0.10.2\n")
+    assert results(fake)["remote-login"] == ("ok", "a login with no screen is shown in a browser")
+    fake.outputs["/usr/bin/wayvnc --version"] = (0, "wayvnc: v0.8.0\n")
+    assert results(fake)["remote-login"] == (
+        "fail",
+        "wayvnc 0.8 is too old; a login from a browser needs 0.9 or newer",
+    )
+    fake.tools.pop("sway")
+    fake.tools.pop("wayvnc")
+    assert results(fake)["remote-login"] == (
+        "fail",
+        "remote logins are on but sway and wayvnc not found",
+    )
+    fake.viewer = cli.display.RemoteDisplayError("the noVNC viewer is not installed; run it")
+    assert results(fake)["remote-login"] == ("fail", "the noVNC viewer is not installed; run it")
+
+
+def test_remote_logins_follow_the_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    assert cli.remote_logins_enabled() is False
+    config = tmp_path / "valetkey" / "config.json"
+    config.parent.mkdir()
+    config.write_text('{"remote_logins": {"novnc": true}}', encoding="utf-8")
+    assert cli.remote_logins_enabled() is True
+    config.write_text("[]", encoding="utf-8")
+    assert cli.remote_logins_enabled() is False

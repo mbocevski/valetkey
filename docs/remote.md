@@ -1,9 +1,11 @@
 # Logging in from another machine
 
-When valetkeyd runs on a server with no screen, login windows can open on your laptop instead.
-This is optional and off until you start a bridge. Back to the [README](../README.md).
+When valetkeyd runs on a machine with no screen, `browser_login` has nowhere to open the login
+window. Two optional ways get it in front of you: a bridge, which opens the window on your laptop's
+desktop, and a noVNC display, which shows it in a browser tab. Back to the [README](../README.md).
 
-## How it works
+## How the bridge works
+
 
 You run `valetkey bridge SERVER` on the laptop, as a service. It starts waypipe there, and keeps an
 ssh connection to the server that forwards a socket back to it. On the server, the connection runs
@@ -61,3 +63,45 @@ exact rule. It is a second layer behind the security context, not a replacement 
 On the server, `waypipe -s /run/user/1000/valetkey/bridge-NAME.sock server -- foot` opens a
 terminal on the laptop. Use the name `valetkey status` shows and your own user number. From the
 server, `grim` through the same socket is refused.
+
+## The noVNC display
+
+Off by default. Turn it on in `$XDG_CONFIG_HOME/valetkey/config.json`:
+
+```json
+{"remote_logins": {"novnc": true}}
+```
+
+It needs `sway` and `wayvnc` 0.9 or newer installed, and the viewer files that the package ships. From a source
+checkout, run `just novnc` once to fetch them. Without them the login fails and says so, and
+`valetkey doctor` shows `fail` on its `remote-login` line while the setting is on.
+
+`browser_login` uses it only when no local display is available. For each login, valetkey starts
+a private headless sway, in a directory only you can open, and a wayvnc that serves it. The only
+program on that display is the login's Chromium, with its address bar visible. A small web server
+on `127.0.0.1` serves the [noVNC](https://github.com/novnc/noVNC) viewer and passes the VNC traffic
+on.
+
+The tool result holds a link and an `ssh -L` line. On your own machine, run the `ssh` line first,
+then open the link. The address is on the daemon's loopback, so the link only works through the
+tunnel.
+
+## What limits the link
+
+- The link holds a random 192-bit token. A request with any other token gets a 404.
+- Only one viewer at a time. A second one is refused while the first is connected.
+- It stops accepting new connections ten minutes after the login starts.
+- A page on another site cannot use it: a request whose `Origin` is not the viewer page gets a 403.
+- The server answers only to a loopback host name.
+
+## When it ends
+
+Closing the login window ends everything: the web server, wayvnc, sway and the directory. So does
+stopping the daemon. Nothing keeps listening afterwards.
+
+## Licenses
+
+The viewer is noVNC v1.7.0, under the Mozilla Public License 2.0, with its license texts. valetkey does not change
+the files. They are not in the repository: `tools/fetch_novnc.py` downloads the release named in
+`tools/novnc.lock` and checks its SHA-256 before unpacking, and the Arch package does the same
+when it is built.

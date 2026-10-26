@@ -21,7 +21,7 @@ from mcp import Client as McpClient
 from mcp_types import ElicitResult
 from proxy_stub import PageServer
 
-from valetkey import clicks, client, daemon, login, mcp_server, procs, sessions, sites
+from valetkey import clicks, client, daemon, display, login, mcp_server, procs, sessions, sites
 from valetkey.client import DaemonError
 from valetkey.proxy import SeenHost
 
@@ -3633,3 +3633,220 @@ def test_the_note_stands_alone_when_the_login_could_not_be_saved() -> None:
     note = daemon._private_note(None, "sitex", ("a.test",))  # noqa: SLF001
     assert note.startswith("Refused because they are on a private network: a.test. Only")
     assert daemon._private_note("Saved.", "sitex", ("a.test",)).startswith("Saved. Refused")  # noqa: SLF001
+
+
+# -- a login shown in a web browser --------------------------------------------------------
+
+
+class ScreenlessLogins(Logins):
+    """A login that finds no screen unless it is given a display's socket."""
+
+    fail_with_socket: Exception | None = None
+
+    async def __call__(
+        self,
+        site: str,
+        start: str,
+        _roots: sites.Roots,
+        finish: Finish,
+        **options: Any,  # noqa: ANN401
+    ) -> FakeWindow:
+        if "wayland_socket" not in options:
+            self.options.append(options)
+            message = "no desktop session here"
+            raise login.NoDisplayError(message)
+        if self.fail_with_socket is not None:
+            raise self.fail_with_socket
+        return await super().__call__(site, start, _roots, finish, **options)
+
+
+class FakeDisplay:
+    """A private display that records being closed."""
+
+    def __init__(self, roots: sites.Roots, site: str) -> None:
+        self.directory = sites.runtime_path(roots) / "displays" / site
+        self.wayland_socket = self.directory / "wayland-1"
+        self.url = "http://127.0.0.1:4242/token/vnc.html"
+        self.port = 4242
+        self.closed = 0
+
+    async def close(self) -> None:
+        self.closed += 1
+
+
+class FakeDisplays:
+    """Stands in for ``display.start_display``."""
+
+    def __init__(self) -> None:
+        self.made: list[FakeDisplay] = []
+        self.fail: Exception | None = None
+
+    async def __call__(self, roots: sites.Roots, site: str) -> FakeDisplay:
+        if self.fail is not None:
+            raise self.fail
+        shown = FakeDisplay(roots, site)
+        self.made.append(shown)
+        return shown
+
+
+def allow_novnc(roots: sites.Roots, text: str = '{"remote_logins": {"novnc": true}}') -> None:
+    path = roots.config / "valetkey" / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_a_login_with_no_screen_opens_on_a_private_display_when_the_config_allows(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_site(roots)
+    allow_novnc(roots)
+    displays = FakeDisplays()
+    logins = ScreenlessLogins()
+    monkeypatch.setattr(display, "ssh_command", lambda port, _host=None: f"ssh -L {port} box")
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, login_starter=logins, display_starter=displays) as rig,
+            await rig.connect() as c,
+            await rig.connect() as w,
+        ):
+            stream = w.watch()
+            await next_event(stream)
+            answer = await c.call("login", target="sitex")
+            assert answer == {
+                "site": "sitex",
+                "window": "open",
+                "remote": {
+                    "url": "http://127.0.0.1:4242/token/vnc.html",
+                    "port": 4242,
+                    "ssh": "ssh -L 4242 box",
+                },
+            }
+            (shown,) = displays.made
+            window = logins.windows[0]
+            assert window.site == "sitex"
+            assert logins.options[-1]["wayland_socket"] == shown.wayland_socket
+            assert (await next_event(stream))["event"] == "login_opened"
+            assert shown.closed == 0
+            await window.close_window([], Path("/profile"))  # the person closes the browser window
+            assert (await next_event(stream))["event"] == "login_closed"
+            assert shown.closed == 1
+            await stream.aclose()
+
+    run(scenario())
+
+
+def test_without_the_config_a_login_with_no_screen_stays_an_error(roots: sites.Roots) -> None:
+    add_site(roots)
+    displays = FakeDisplays()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, login_starter=ScreenlessLogins(), display_starter=displays) as rig,
+            await rig.connect() as c,
+        ):
+            for text in (None, '{"remote_logins": {"novnc": false}}'):
+                if text is not None:
+                    allow_novnc(roots, text)
+                with pytest.raises(DaemonError) as info:
+                    await c.call("login", target="sitex")
+                assert info.value.code == "no_display"
+            assert displays.made == []
+            assert (await c.call("status"))["logins"] == []
+
+    run(scenario())
+
+
+def test_an_unusable_config_does_not_start_a_display(
+    roots: sites.Roots, caplog: pytest.LogCaptureFixture
+) -> None:
+    add_site(roots)
+    allow_novnc(roots, "{not json")
+    displays = FakeDisplays()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, login_starter=ScreenlessLogins(), display_starter=displays) as rig,
+            await rig.connect() as c,
+        ):
+            with pytest.raises(DaemonError) as info:
+                await c.call("login", target="sitex")
+            assert info.value.code == "no_display"
+            assert displays.made == []
+            assert "the config is not usable" in caplog.text
+
+    run(scenario())
+
+
+def test_a_login_with_a_screen_never_starts_a_display(roots: sites.Roots) -> None:
+    add_site(roots)
+    allow_novnc(roots)
+    displays = FakeDisplays()
+
+    async def scenario() -> None:
+        async with serving(roots, display_starter=displays) as rig, await rig.connect() as c:
+            assert await c.call("login", target="sitex") == {"site": "sitex", "window": "open"}
+            assert displays.made == []
+
+    run(scenario())
+
+
+def test_a_display_that_cannot_start_is_a_no_display_error(roots: sites.Roots) -> None:
+    add_site(roots)
+    allow_novnc(roots)
+    displays = FakeDisplays()
+    displays.fail = display.RemoteDisplayError("a login from a browser needs sway")
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, login_starter=ScreenlessLogins(), display_starter=displays) as rig,
+            await rig.connect() as c,
+        ):
+            with pytest.raises(DaemonError) as info:
+                await c.call("login", target="sitex")
+            assert (info.value.code, "needs sway" in info.value.message) == ("no_display", True)
+            assert (await c.call("status"))["logins"] == []
+
+    run(scenario())
+
+
+def test_a_display_is_closed_when_the_window_cannot_open_on_it(roots: sites.Roots) -> None:
+    add_site(roots)
+    allow_novnc(roots)
+    displays = FakeDisplays()
+    logins = ScreenlessLogins()
+    logins.fail_with_socket = login.DisplayError("chromium would not start")
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, login_starter=logins, display_starter=displays) as rig,
+            await rig.connect() as c,
+        ):
+            with pytest.raises(DaemonError):
+                await c.call("login", target="sitex")
+            assert [d.closed for d in displays.made] == [1]
+            assert (await c.call("status"))["logins"] == []
+
+    run(scenario())
+
+
+def test_closing_a_site_or_stopping_the_daemon_closes_its_display(roots: sites.Roots) -> None:
+    add_site(roots, "sitex")
+    add_site(roots, "another")
+    allow_novnc(roots)
+    displays = FakeDisplays()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, login_starter=ScreenlessLogins(), display_starter=displays) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("login", target="sitex")
+            await c.call("login", target="another")
+            first, second = displays.made
+            assert await c.call("close", site="sitex") == {"site": "sitex", "closed": True}
+            await eventually(lambda: first.closed == 1)
+            assert second.closed == 0
+        assert second.closed == 1  # the daemon stopped: the context manager shut it down
+
+    run(scenario())

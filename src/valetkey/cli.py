@@ -18,8 +18,10 @@ from cyclopts import App, Parameter
 
 from valetkey import (
     __version__,
+    approvals,
     client,
     daemon,
+    display,
     login,
     mcp_server,
     procs,
@@ -869,6 +871,14 @@ def _run(args: Sequence[str]) -> tuple[int, str]:
     return result.returncode, result.stdout + result.stderr
 
 
+def remote_logins_enabled() -> bool:
+    """Tell whether the config allows a login with no screen to be shown in a browser."""
+    try:
+        return approvals.load_config(sites.roots_from_env()).novnc
+    except approvals.ConfigError:
+        return False
+
+
 @dataclass(frozen=True, slots=True)
 class System:
     """Everything ``doctor`` asks the machine, so tests can answer instead."""
@@ -879,6 +889,10 @@ class System:
     wayland: Callable[[], Path] = login.find_wayland_socket
     offered: Callable[[Path], Mapping[str, int]] = compositor_globals
     """The interfaces the compositor at a socket offers."""
+    remote_logins: Callable[[], bool] = remote_logins_enabled
+    """Whether the config turns on showing a login with no screen in a browser."""
+    viewer: Callable[[], Path] = display.novnc_root
+    """The directory of noVNC viewer files; raises when they are not installed."""
     unit_dirs: tuple[Path, ...] = field(
         default_factory=lambda: (unit_directory(sites.roots_from_env()), *SYSTEM_UNIT_DIRS)
     )
@@ -1000,6 +1014,26 @@ def check_security_context(system: System) -> list[Check]:
     return [Check("security-context", "warn", login.UNRESTRICTED_SHORT)]
 
 
+def check_remote_login(system: System) -> list[Check]:
+    """Check what a login shown in a browser needs; nothing unless the config turns it on."""
+    if not system.remote_logins():
+        return []
+    try:
+        system.viewer()
+    except display.RemoteDisplayError as error:
+        return [Check("remote-login", "fail", str(error))]
+    missing = [tool for tool in ("sway", "wayvnc") if system.which(tool) is None]
+    if missing:
+        detail = f"remote logins are on but {' and '.join(missing)} not found"
+        return [Check("remote-login", "fail", detail)]
+    problem = display.wayvnc_problem(
+        system.run([system.which("wayvnc") or "wayvnc", "--version"])[1]
+    )
+    if problem is not None:
+        return [Check("remote-login", "fail", problem)]
+    return [Check("remote-login", "ok", "a login with no screen is shown in a browser")]
+
+
 def check_units(system: System) -> list[Check]:
     """Report, without judging, whether the units are installed and the socket is active.
 
@@ -1032,6 +1066,7 @@ def run_checks(system: System) -> list[Check]:
         check_runtime_dir(system),
         check_display(system),
         *check_security_context(system),
+        *check_remote_login(system),
         *check_units(system),
     ]
 
