@@ -109,6 +109,7 @@ their private address says so in what it learned, so the agent can pass it on.
 ## Expired logins
 
 After a session opens, valetkey compares the page it landed on with the login it saved. A start
-page that sent the browser to a page where a form was filled in during the login, or to a page
-with a password field, means the login expired. `browser_open` then says so, and the agent calls
+page that sent the browser to a page you used during the login and left by submitting a form, or
+to a page with a password field, means the login expired. A page that sent itself on at once does
+not count. `browser_open` then says so, and the agent calls
 `browser_login` again without asking first.

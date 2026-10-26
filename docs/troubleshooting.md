@@ -45,6 +45,10 @@ headless and do not need one.
 `browser_open` says the saved login has expired when the start page sent the browser to a sign-in
 page. The agent calls `browser_login` again, and you sign in again in the window that opens.
 
+A site that shows its sign-in form on the start page itself is not noticed this way, because
+nothing tells a form there from a sign-in box on a public front page. The agent still sees the
+form in the page and calls `browser_login`.
+
 ## A page needs a host that is refused
 
 The browser tools list refused hosts after a load. Tool results also mention Chrome's own update

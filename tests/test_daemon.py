@@ -1890,7 +1890,7 @@ def test_a_login_records_where_forms_were_submitted_from(roots: sites.Roots) -> 
             )
             steps = [
                 ("https://newsite.test/", 1, None),
-                ("https://newsite.test/login", 1, 1),
+                ("https://newsite.test/login", 0x20000001, 1),  # a page the person used
                 ("https://newsite.test/app", 7, 2),
             ]
             for number, (url, transition, origin) in enumerate(steps, start=1):

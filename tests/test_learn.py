@@ -396,15 +396,21 @@ def test_real_chromium_history_has_the_columns_the_query_reads(tmp_path: Path) -
 # -- the pages a login submitted a form from -----------------------------------------------
 
 FORM_SUBMIT = 7
-type Step = tuple[str, int, int | None]
-"""A visit: the URL, the transition, and the 1-based number of the visit it came from."""
+type Step = tuple[str, int, int | None] | tuple[str, int, int | None, int]
+"""A visit: the URL, the transition, the 1-based number of the visit it came from, and
+(optionally) how many milliseconds the page stayed open; the default is a few seconds."""
+STAY_MS = 3000
 
 
 def history_of_steps(tmp_path: Path, steps: list[Step]) -> Path:
     path = tmp_path / "History"
-    database = build(path, [(url, transition) for url, transition, _ in steps])
-    for number, (_, _, origin) in enumerate(steps, start=1):
-        database.execute("UPDATE visits SET from_visit = ? WHERE id = ?", (origin, number))
+    database = build(path, [(step[0], step[1]) for step in steps])
+    for number, step in enumerate(steps, start=1):
+        stay = step[3] if len(step) == 4 else STAY_MS
+        database.execute(
+            "UPDATE visits SET from_visit = ?, visit_duration = ? WHERE id = ?",
+            (step[2], stay * 1000, number),
+        )
     database.commit()
     database.close()
     return path
@@ -427,9 +433,9 @@ def test_every_page_of_a_sign_in_flow_counts_but_not_the_pages_around_it(tmp_pat
         tmp_path,
         [
             ("https://sitex.com/", TYPED, None),
-            ("https://login.okta.com/signin?x=1#top", LINK, 1),
-            ("https://login.okta.com/mfa/", FORM_SUBMIT, 2),
-            ("https://login.okta.com/done", FORM_SUBMIT, 3),
+            ("https://login.okta.com/signin?x=1#top", LINK | CHAIN_END, 1),
+            ("https://login.okta.com/mfa/", FORM_SUBMIT | CHAIN_END, 2),
+            ("https://login.okta.com/done", FORM_SUBMIT | CHAIN_END, 3),
             ("https://sitex.com/callback?code=abc", LINK, 4),
             ("https://sitex.com/app/", LINK, 5),
         ],
@@ -838,7 +844,8 @@ def timed_history(tmp_path: Path, visits: list[tuple[str, int, datetime]]) -> Pa
     with closing(sqlite3.connect(path)) as database:
         for number, (_, _, when) in enumerate(visits, start=1):
             database.execute(
-                "UPDATE visits SET visit_time = ? WHERE id = ?", (learn.chrome_time(when), number)
+                "UPDATE visits SET visit_time = ?, visit_duration = ? WHERE id = ?",
+                (learn.chrome_time(when), 3_000_000, number),
             )
         database.commit()
     return path
@@ -887,10 +894,10 @@ def test_the_login_pages_and_the_last_page_are_of_this_login_too(tmp_path: Path)
         tmp_path,
         [
             ("https://sitex.com/", TYPED, BEGAN - timedelta(days=1)),
-            ("https://sitex.com/old-signin", LINK, BEGAN - timedelta(days=1)),
+            ("https://sitex.com/old-signin", LINK | CHAIN_END, BEGAN - timedelta(days=1)),
             ("https://sitex.com/old-home", 7, BEGAN - timedelta(days=1)),
             ("https://sitex.com/", TYPED, BEGAN + timedelta(seconds=1)),
-            ("https://sitex.com/signin", LINK, BEGAN + timedelta(seconds=2)),
+            ("https://sitex.com/signin", LINK | CHAIN_END, BEGAN + timedelta(seconds=2)),
             ("https://sitex.com/app", 7, BEGAN + timedelta(seconds=3)),
             ("https://sitex.com/dashboard", LINK, BEGAN + timedelta(seconds=4)),
         ],
@@ -1123,3 +1130,184 @@ def test_a_history_that_stores_text_where_numbers_belong_still_gives_its_hosts(
         database.commit()
     found = learn.navigation(path, since=BEGAN)
     assert (found.shown, found.passed) == (frozenset(), frozenset({"idp.test"}))
+
+
+# -- which page is the sign-in page, across the flows Chromium recorded -----------------------
+
+# The sign-in pages the rule finds in each recorded flow (the table above). Where the form is on
+# the start page itself, nothing in the history can tell; the check of the password field at open
+# time covers a page that has one.
+LOGIN_PAGES: dict[str, set[str]] = {
+    "a_direct_form": set(),
+    "b_oidc_idp_form": {"idp.test/authorize"},
+    "b2_idp_redirect_only": set(),
+    "b3_saml_post_back": {"idp.test/sso"},  # not idp.test/login, which posts itself back in 13 ms
+    "b4_idp_chooser_then_form": {"idp.test/choose", "idp.test/signin"},  # not the callback hop
+    "c_tracker_server_bounce": {"site.test/login"},
+    "c2_tracker_client_bounce": {"site.test/login"},
+    "d1_evil_after_login_js": set(),
+    "d2_evil_visible_page": set(),
+    "d3_evil_server_bounce": {"site.test/login"},
+    "d4_evil_shown_3s_then_script": set(),
+}
+
+type Row = tuple[int, int, int, int, str]
+type Flow = tuple[str, list[Row], set[str]]
+"""A flow: the start URL, its visits, and the sign-in pages the rule should find."""
+
+# Shapes that were not recorded, built from the transitions the recorded flows show, and a
+# recording of a person following a link, typing an address and using a search form.
+MORE_FLOWS: dict[str, Flow] = {
+    # The two negatives of the expired-login check. A redirect within the site to a normal page
+    # (/welcome) is not a sign-in page, and neither is a public start page with a login box.
+    "m1_promo_then_a_link_to_the_login": (
+        "http://site.test/promo",
+        [
+            (1, 0, 0x10000001, 0, "http://site.test/promo"),
+            (2, 1, 0xA0000001, 2000, "http://site.test/welcome"),
+            (3, 2, 0x30000000, 5200, "http://site.test/login"),
+            (4, 3, 0x30000007, 3700, "http://site.test/home"),
+        ],
+        {"site.test/login"},
+    ),
+    "m2_public_start_page_with_a_login_box": (
+        "http://site.test/",
+        [
+            (1, 0, 0x30000001, 20000, "http://site.test/"),
+            (2, 1, 0x30000000, 5100, "http://site.test/login"),
+            (3, 2, 0x30000007, 3700, "http://site.test/home"),
+        ],
+        {"site.test/login"},
+    ),
+    # A profile keeps its history: the agent browsed (visit 5) and the person logged in again.
+    "m3_a_second_login_after_an_agent_session": (
+        "http://site.test/",
+        [
+            (1, 0, 0x10000001, 0, "http://site.test/"),
+            (2, 1, 0xA0000001, 6000, "http://idp.test/authorize?client=site"),
+            (3, 2, 0x10000001, 0, "http://idp.test/login"),
+            (4, 3, 0xA0000001, 3000, "http://site.test/home"),
+            (5, 0, 0x30000001, 40000, "http://site.test/reports"),
+            (6, 0, 0x10000001, 0, "http://site.test/"),
+            (7, 6, 0xA0000001, 6100, "http://idp.test/authorize?client=site"),
+            (8, 7, 0x10000001, 0, "http://idp.test/login"),
+            (9, 8, 0xA0000001, 3000, "http://site.test/home"),
+        ],
+        {"idp.test/authorize"},
+    ),
+    "m5_a_form_posted_99_ms_after_it_loaded": (
+        "http://site.test/",
+        [
+            (1, 0, 0x10000001, 0, "http://site.test/"),
+            (2, 1, 0xA0000001, 99, "http://site.test/login"),
+            (3, 2, 0x10000001, 0, "http://site.test/session"),
+            (4, 3, 0xA0000001, 3000, "http://site.test/home"),
+        ],
+        set(),  # too quick for a person; the password field check covers it at open time
+    ),
+    "m5b_a_form_posted_100_ms_after_it_loaded": (
+        "http://site.test/",
+        [
+            (1, 0, 0x10000001, 0, "http://site.test/"),
+            (2, 1, 0xA0000001, 100, "http://site.test/login"),
+            (3, 2, 0x10000001, 0, "http://site.test/session"),
+            (4, 3, 0xA0000001, 3000, "http://site.test/home"),
+        ],
+        {"site.test/login"},
+    ),
+    # Recorded: a link click (LINK, the page it came from set), an address typed in the bar (TYPED
+    # with the address-bar flag and no page it came from), and a GET search form.
+    "r1_a_link_a_typed_address_and_a_search_form": (
+        "http://site.test/",
+        [
+            (1, 0, 0x30000001, 3640, "http://site.test/"),
+            (2, 1, 0x30000000, 2110, "http://site.test/two"),
+            (3, 0, 0x32000001, 2040, "http://site.test/three"),
+            (4, 3, 0x30000007, 0, "http://site.test/search?q="),
+        ],
+        # /two was left by a typed address and is not a sign-in page. /three held a search
+        # form, and a GET form is a form submission: the known limit of the rule.
+        {"site.test/three"},
+    ),
+}
+
+
+@pytest.mark.parametrize("flow", sorted(FLOWS))
+def test_the_sign_in_pages_of_each_recorded_flow(tmp_path: Path, flow: str) -> None:
+    path = flow_history(tmp_path, FLOWS[flow])
+    found = learn.login_pages(path, "http://site.test/", since=BEGAN)
+    assert set(found) == LOGIN_PAGES[flow]
+
+
+@pytest.mark.parametrize("flow", sorted(MORE_FLOWS))
+def test_the_sign_in_pages_of_the_flows_that_were_not_recorded(tmp_path: Path, flow: str) -> None:
+    start, rows, expected = MORE_FLOWS[flow]
+    path = flow_history(tmp_path, rows)
+    assert set(learn.login_pages(path, start, since=BEGAN)) == expected
+
+
+def test_the_two_negatives_of_the_expired_login_check_stay_negative(tmp_path: Path) -> None:
+    for flow in ("m1_promo_then_a_link_to_the_login", "m2_public_start_page_with_a_login_box"):
+        start, rows, _ = MORE_FLOWS[flow]
+        (tmp_path / flow).mkdir()
+        found = learn.login_pages(flow_history(tmp_path / flow, rows), start, since=BEGAN)
+        assert sites.page_key(start) not in found
+        assert "site.test/welcome" not in found
+
+
+def test_a_page_the_start_redirected_to_is_not_a_login_page_unless_a_form_left_it(
+    tmp_path: Path,
+) -> None:
+    rows: list[Row] = [
+        (1, 0, 0x10000001, 0, "http://site.test/"),
+        (2, 1, 0xA0000001, 4000, "http://site.test/dashboard"),
+        (3, 2, 0x30000000, 3000, "http://site.test/reports"),
+    ]
+    found = learn.login_pages(flow_history(tmp_path, rows), "http://site.test/", since=BEGAN)
+    assert found == ()
+
+
+def test_a_hop_in_the_middle_of_a_chain_is_not_a_page_even_if_a_form_left_it(
+    tmp_path: Path,
+) -> None:
+    rows: list[Row] = [
+        (1, 0, 0x10000001, 0, "http://site.test/"),
+        (2, 1, 0x10000001, 5000, "http://idp.test/hop"),  # no CHAIN_END: the chain went on
+        (3, 2, 0x30000007, 3000, "http://site.test/home"),
+    ]
+    found = learn.login_pages(flow_history(tmp_path, rows), "http://site.test/", since=BEGAN)
+    assert found == ()
+
+
+def test_the_stay_that_makes_a_sign_in_page_is_a_tenth_of_a_second() -> None:
+    assert learn.LOGIN_PAGE_MS == 100
+    assert "100000" in learn._FORM_ORIGINS  # noqa: SLF001 - the literal and the name agree
+    assert learn.LOGIN_PAGE_MS * 1000 == 100_000
+
+
+@pytest.mark.parametrize(
+    ("core", "found"),
+    [(FORM_SUBMIT, True), (TYPED, True), (LINK, False), (8, False), (AUTO_SUBFRAME, False)],
+)
+def test_only_a_form_or_script_navigation_leaves_a_sign_in_page(
+    tmp_path: Path, core: int, *, found: bool
+) -> None:
+    rows: list[Row] = [
+        (1, 0, 0x30000001, 3000, "http://site.test/"),
+        (2, 1, 0x30000000, 3000, "http://site.test/signin"),
+        (3, 2, 0x30000000 | core, 3000, "http://site.test/next"),
+        (4, 3, 0x30000000, 3000, "http://site.test/home"),
+    ]
+    got = learn.login_pages(flow_history(tmp_path, rows), "http://site.test/", since=BEGAN)
+    assert (got == ("site.test/signin",)) is found
+
+
+def test_a_typed_address_has_no_page_it_came_from(tmp_path: Path) -> None:
+    rows: list[Row] = [
+        (1, 0, 0x30000001, 3000, "http://site.test/"),
+        (2, 1, 0x30000000, 3000, "http://site.test/signin"),
+        (3, 0, 0x32000001, 3000, "http://site.test/typed"),  # typed in the address bar
+        (4, 3, 0x30000000, 3000, "http://site.test/home"),
+    ]
+    found = learn.login_pages(flow_history(tmp_path, rows), "http://site.test/", since=BEGAN)
+    assert found == ()

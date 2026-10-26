@@ -41,6 +41,14 @@ headless to a local page that redirects with HTTP 302 and reading ``<profile>/De
   script after 0.3 s, an already signed-in provider that only redirected, a tracker bounce by
   server redirect and by meta refresh, and a host that a page's script or a server redirect sent
   the browser through.
+* How a person's own navigation is recorded, measured in a login window with keys sent to it: a
+  link click is ``LINK`` with ``from_visit`` set to the page; a URL typed in the address bar is
+  ``TYPED`` with ``from_visit`` 0 and the ``FROM_ADDRESS_BAR`` flag (``0x02000000``); a GET form
+  is ``FORM_SUBMIT`` with ``from_visit`` set. A form posted to a redirect is ``FORM_SUBMIT`` in some
+  flows and ``TYPED`` in others, but always with ``from_visit`` set to the page, which a typed
+  address never has. So a visit of either type that came from a page left that page by a form
+  or a script, not by a link. Pages a script moves on from at once are open for 13 to 26 ms; a
+  chooser page was open 300 ms; the pages a person used, seconds.
 * Nothing in the history says whether the person acted on a page. A form posted to a redirect
   often leaves no form-submit visit, and the same script navigation is recorded as typed in one
   flow and as a link in another. A page that is shown for a few seconds before it moves on looks
@@ -98,6 +106,10 @@ _PROGRESS_STEP = 10_000
 _TABLES = frozenset({"urls", "visits"})
 SHOWN_MS = 2000
 """A page counts as shown when it ended its redirect chain and was open at least this long."""
+LOGIN_PAGE_MS = 100
+"""A page can be a sign-in page when it ended its chain and was open at least this long. Pages a
+script moves on from at once are open for 26 ms or less. The query spells the number out in
+microseconds, and a test keeps the two equal."""
 _CHAIN_END = 0x20000000
 _FLAGS = 0xFFFFFFFF
 _MAX_NAMED_THIRD_PARTIES = 20
@@ -119,11 +131,15 @@ _NAVIGATION = (
     "WHERE (v.transition & 255) NOT IN (3, 4) AND v.visit_time >= ? LIMIT 100000"
 )
 
-# A form submission is core type 7; the visit it came from is the page that held the form.
+# A sign-in page is a page the person could use (it ended its chain, ``CHAIN_END``, 0x20000000 =
+# 536870912) and stayed on for at least ``LOGIN_PAGE_MS`` (100000 microseconds), and that was left
+# by a visit that came from it and was not a link: a form submission (core type 7) or a typed
+# visit that has a ``from_visit`` (a form posted to a redirect; a typed address has none).
 _FORM_ORIGINS = (
     "SELECT p.url FROM visits AS v JOIN visits AS f ON f.id = v.from_visit "
     "JOIN urls AS p ON p.id = f.url "
-    "WHERE (v.transition & 255) = 7 AND (f.transition & 255) NOT IN (3, 4) "
+    "WHERE (v.transition & 255) IN (1, 7) AND (f.transition & 255) NOT IN (3, 4) "
+    "AND (f.transition & 536870912) != 0 AND f.visit_duration >= 100000 "
     "AND v.visit_time >= ? AND f.visit_time >= ? LIMIT 100000"
 )
 _LAST_PAGE = (
@@ -334,12 +350,15 @@ def navigation(history_path: Path, *, since: datetime) -> Navigation:
 
 
 def login_pages(history_path: Path, start_url: str, *, since: datetime) -> tuple[str, ...]:
-    """Return the pages a form was submitted from during a login, as ``host/path`` keys.
+    """Return the sign-in pages of a login, as ``host/path`` keys.
 
-    These are the pages where credentials, or a second factor, were entered: the page a
-    form-submit navigation came from. That is a navigation Chromium marks as a form submission
-    (core type 7), and its ``from_visit`` is the visit of the page that held the form. Sign-in
-    pages are the only top-level pages that reliably have this in common across sites.
+    A sign-in page is a page the person could use and stayed on, that they then left by
+    submitting a form and not by a link. Chromium records that leaving as a form submission
+    (core type 7), or, when the form was posted to a redirect, as a typed visit that has a
+    ``from_visit``: a typed address has none (see the module docstring). Only a page that ended
+    its redirect chain counts, so the hops of a redirect and the callback a provider sends the
+    browser through do not, and it must have been open for :data:`LOGIN_PAGE_MS`, which leaves
+    out a page that submits itself.
 
     Two pages are left out. The start page, because a start URL that is not redirected ends on
     itself and must not look like a login page. And the page the login ended on (the last

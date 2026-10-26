@@ -13,7 +13,9 @@ LOGIN_FORM = (
     '<button type="submit">Sign in</button></form>'
     "{script}"
 )
-AUTO_SUBMIT = '<script>document.getElementById("f").submit()</script>'
+# The page stays open for a moment first: a page that submits itself at once is not a page a person
+# used, and learn does not take it for a sign-in page.
+AUTO_SUBMIT = '<script>setTimeout(() => document.getElementById("f").submit(), 400)</script>'
 PAGES = {
     "/": "<title>Home</title><h1>Home, signed in</h1>",
     "/app": "<title>Dashboard</title><h1>Dashboard</h1>",
