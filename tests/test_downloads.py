@@ -44,6 +44,25 @@ PDF = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n"
         (b"ID3\x04\x00", "audio/mpeg"),
         (b"RIFF\x24\x00\x00\x00WEBPVP8 ", "image/webp"),
         (b"\x00\x00\x00\x18ftypmp42", "video/mp4"),
+        (b"\x00\x00\x00\x1cftypisom\x00\x00\x02\x00isomiso2mp41", "video/mp4"),
+        (b"\x00\x00\x00\x14ftypM4V \x00\x00\x00\x00", "video/mp4"),
+        (b"\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00", "video/mp4"),
+        (b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf", "image/avif"),
+        (b"\x00\x00\x00\x18ftypavis\x00\x00\x00\x00avismsf1", "image/avif"),
+        (b"\x00\x00\x00\x1cftypmif1\x00\x00\x00\x00mif1miafavif", "image/avif"),
+        (b"\x00\x00\x00\x1cftypmsf1\x00\x00\x00\x00msf1miafavis", "image/avif"),
+        (b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic", "image/heic"),
+        (b"\x00\x00\x00\x18ftypheix\x00\x00\x00\x00mif1heix", "image/heic"),
+        (b"\x00\x00\x00\x18ftyphevc\x00\x00\x00\x00msf1hevc", "image/heic"),
+        (b"\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00mif1heic", "image/heic"),
+        (b"\x00\x00\x00\x14ftypmif1\x00\x00\x00\x00", "image/heic"),
+        (b"\x00\x00\x00\x14ftypmsf1\x00\x00\x00\x00", "image/heic"),
+        (b"\x00\x00\x00\x10ftypmif1", "image/heic"),
+        (b"\x00\x00\x00\x08ftypmif1", "image/heic"),
+        (b"\x00\x00\x00\x00ftypmif1\x00\x00\x00\x00avif", "image/avif"),
+        (b"\x00\x00\x01\x00ftypmif1\x00\x00\x00\x00mif1heic", "image/heic"),
+        (b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mif1avif", "video/mp4"),
+        (b"\x00\x00\x00\x0cftypav", "video/mp4"),
         (b"<!DOCTYPE html><title>x</title>", "text/html"),
         (b"  \n<html lang=en>", "text/html"),
         (b'<?xml version="1.0"?><a/>', "application/xml"),
@@ -61,6 +80,17 @@ PDF = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\n"
 )
 def test_sniff_mime_reads_the_content(head: bytes, mime: str) -> None:
     assert sniff_mime(head) == mime
+
+
+def test_a_picture_in_the_video_container_is_listed_as_a_picture(tmp_path: Path) -> None:
+    avif = b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf" + b"\x00" * 40
+    heic = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\x00" * 40
+    video = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00isommp42" + b"\x00" * 40
+    (tmp_path / "a.avif").write_bytes(avif)
+    (tmp_path / "b.heic").write_bytes(heic)
+    (tmp_path / "c.mp4").write_bytes(video)
+    found = {d.name: d.mime for d in collect(tmp_path, {}).everything}
+    assert found == {"a.avif": "image/avif", "b.heic": "image/heic", "c.mp4": "video/mp4"}
 
 
 def test_the_name_and_the_claim_of_the_page_do_not_matter(tmp_path: Path) -> None:
@@ -994,6 +1024,9 @@ def test_a_link_planted_in_the_incoming_folder_mid_session_is_not_followed(
         ("https://x.test/img/photo.png", "image/png", "photo.png"),
         ("https://x.test/img/photo", "image/png", "photo.png"),
         ("https://x.test/img/photo.jpg", "image/avif", "photo.avif"),
+        ("https://x.test/img/photo.jpg", "image/heic", "photo.heic"),
+        ("https://x.test/img/photo", "image/heic", "photo.heic"),
+        ("https://x.test/img/photo.heif", "image/heic", "photo.heif"),
         ("https://x.test/img/photo.jpeg", "image/jpeg", "photo.jpeg"),
         ("https://x.test/img/photo.jpg", "image/jpeg; charset=x", "photo.jpg"),
         ("https://x.test/a/my%20file.PDF", "application/pdf", "my file.PDF"),

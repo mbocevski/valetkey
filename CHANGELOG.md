@@ -56,6 +56,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- An AVIF or HEIC picture is no longer listed as `video/mp4` in a download's type.
 - A login no longer allows `passwordsleakcheck-pa.googleapis.com`, `c.bing.com` or `myvisitors.se`, and leaves out Facebook's hosts unless its window went to a Facebook page.
 - A login no longer allows the browser's own update host, `edgedl.me.gvt1.com`, and the browser no longer checks for component updates, which `--disable-component-update` did not stop.
 - `browser_save` now saves pictures that a site's server keeps scripts from reading, as picture services do, and ones behind a redirect. A `data:` or `blob:` address gets a clear reason.

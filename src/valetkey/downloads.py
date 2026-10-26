@@ -142,8 +142,36 @@ def _binary_type(head: bytes) -> str | None:
     if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
         return "image/webp"
     if head[4:8] == b"ftyp":
-        return "video/mp4"
+        return _ftyp_type(head)
     return None
+
+
+_AVIF_BRANDS = frozenset({b"avif", b"avis"})
+_HEIC_BRANDS = frozenset({b"heic", b"heix", b"hevc", b"hevx"})
+_HEIF_GENERIC = frozenset({b"mif1", b"msf1"})
+_BRAND_END = 16
+"""Where the compatible brands start in a ``ftyp`` box: size, ``ftyp``, major brand, version."""
+
+
+def _ftyp_type(head: bytes) -> str:
+    """Tell what an ISO base media file is from its ``ftyp`` box: a picture or a video.
+
+    AVIF and HEIC pictures use the same container as MP4 video. The major brand says which
+    (``avif``, ``avis``, ``heic``, ``heix``); the generic picture brands ``mif1`` and ``msf1`` are
+    major brands of both, so the compatible brands decide between AVIF and HEIC there, and HEIC is
+    the answer when they say nothing more. Any other brand is video, as before.
+    """
+    major = head[8:12]
+    if major in _AVIF_BRANDS:
+        return "image/avif"
+    if major in _HEIC_BRANDS:
+        return "image/heic"
+    if major not in _HEIF_GENERIC:
+        return "video/mp4"
+    size = int.from_bytes(head[:4], "big")  # zero: the box runs to the end of the file
+    end = len(head) if size == 0 else min(size, len(head)) if size >= _BRAND_END else _BRAND_END
+    compatible = {head[i : i + 4] for i in range(_BRAND_END, end - 3, 4)}
+    return "image/avif" if compatible & _AVIF_BRANDS else "image/heic"
 
 
 def _text_type(head: bytes) -> str:
@@ -290,6 +318,7 @@ _EXTENSIONS = {
     "image/gif": ".gif",
     "image/webp": ".webp",
     "image/avif": ".avif",
+    "image/heic": ".heic",
     "image/svg+xml": ".svg",
     "video/mp4": ".mp4",
     "video/webm": ".webm",
