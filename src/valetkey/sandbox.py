@@ -16,6 +16,7 @@ The environment is cleared. Credentials sockets (SSH and GPG agents, the Docker 
 system D-Bus, the resolver) and the rest of the user's home do not exist inside.
 """
 
+import os
 import re
 import subprocess
 import sys
@@ -114,7 +115,7 @@ def chrome_flags(major: int) -> list[str]:
         "--disable-extensions",
         "--disable-search-engine-choice-screen",
         "--disable-component-extensions-with-background-pages",
-        "--disable-features=NetworkTimeServiceQuerying,OptimizationHints,MediaRouter,Translate,PreconnectToSearch,SearchEnginePreconnect,NetworkPrediction,LoadingPredictor,PreconnectFromKeyedService,AutofillServerCommunication",
+        "--disable-features=NetworkTimeServiceQuerying,OptimizationHints,MediaRouter,Translate,PreconnectToSearch,SearchEnginePreconnect,NetworkPrediction,LoadingPredictor,PreconnectFromKeyedService,AutofillServerCommunication,SafeBrowsingHashPrefixRealTimeLookups,SafeBrowsingHashPrefixRealTimeLookupsSamplePing",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
@@ -198,6 +199,39 @@ def python_roots() -> tuple[Path, ...]:
     return tuple(roots)
 
 
+_MAX_LINKS = 20
+
+
+def interpreter_link_args(
+    executable: Path | None = None, bound: tuple[Path, ...] | None = None
+) -> list[str]:
+    """Return ``--symlink`` arguments for the links on the way to the interpreter.
+
+    ``uv`` points a virtual environment at ``cpython-3.14-linux-…``, which is itself a link to
+    ``cpython-3.14.9-linux-…``, and only the resolved directory is bound. Without the link
+    recreated, the path in the environment dangles inside the namespace. Each link is recreated
+    as a link, so nothing but the link itself becomes visible: no directory around it is bound.
+
+    Links under ``/usr`` or inside a bound directory exist already and are skipped.
+    ``executable`` defaults to ``sys.executable`` and ``bound`` to ``python_roots()``.
+    """
+    path = Path(sys.executable if executable is None else executable)
+    roots = python_roots() if bound is None else bound
+    args: list[str] = []
+    seen: set[Path] = set()
+    for _ in range(_MAX_LINKS):
+        link = next((p for p in (*reversed(path.parents), path) if p.is_symlink()), None)
+        if link is None:
+            break
+        target = link.readlink()
+        inside = link.is_relative_to("/usr") or any(link.is_relative_to(r) for r in roots)
+        if link not in seen and not inside:
+            args += ["--symlink", str(target), str(link)]
+            seen.add(link)
+        path = Path(os.path.normpath(link.parent / target / path.relative_to(link)))
+    return args
+
+
 def system_link_args(root: Path = Path("/")) -> list[str]:
     """Return bwrap arguments that recreate ``/bin``, ``/lib`` and friends.
 
@@ -220,11 +254,12 @@ def bwrap_argv(
     *,
     roots: tuple[Path, ...] | None = None,
     system_links: list[str] | None = None,
+    interpreter_links: list[str] | None = None,
 ) -> list[str]:
     """Return the full ``bwrap`` command line that runs ``command`` inside the namespace.
 
-    ``roots`` (default ``python_roots()``) and ``system_links`` (default read from the host)
-    exist so tests can build the same line on any machine.
+    ``roots`` (default ``python_roots()``), ``system_links`` and ``interpreter_links`` (both
+    default to what the host has) exist so tests can build the same line on any machine.
 
     The sandbox is a PID namespace: when the first command exits, bubblewrap kills everything
     else inside. So a session starts one long-lived command (a shell that runs the forwarder,
@@ -248,8 +283,12 @@ def bwrap_argv(
     # directory is not hidden by a later tmpfs.
     argv += ["--tmpfs", "/tmp"]  # noqa: S108  # path inside the namespace, not on the host
     argv += ["--tmpfs", str(sandbox.runtime_dir), "--tmpfs", home]
-    for root in python_roots() if roots is None else roots:
+    python = python_roots() if roots is None else roots
+    for root in python:
         argv += ["--ro-bind", str(root), str(root)]
+    argv += (
+        interpreter_links if interpreter_links is not None else interpreter_link_args(bound=python)
+    )
     writable = [
         sandbox.profile_dir,
         sandbox.downloads_dir,

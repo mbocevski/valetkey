@@ -57,6 +57,7 @@ def build(
         command or ["chromium"],
         roots=(Path("/opt/venv"), Path("/opt/src")),
         system_links=["--symlink", "usr/lib", "/lib"],
+        interpreter_links=[],
     )
 
 
@@ -257,6 +258,66 @@ def test_python_roots_leave_out_system_paths(
     assert all(not root.is_relative_to("/usr") for root in roots)
 
 
+def uv_layout(base: Path) -> tuple[Path, Path, Path]:
+    """Build venv/bin/python -> alias/bin/python3, alias -> real, real/bin/python3 -> /usr."""
+    real, alias, venv = base / "python-3.14.9", base / "python-3.14", base / "venv"
+    (real / "bin").mkdir(parents=True)
+    (real / "bin" / "python3").symlink_to("/usr/bin/python3")
+    alias.symlink_to("python-3.14.9")
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(alias / "bin" / "python3")
+    return venv, alias, real
+
+
+def test_interpreter_links_recreate_a_uv_style_alias(tmp_path: Path) -> None:
+    venv, alias, real = uv_layout(tmp_path)
+    args = sandbox.interpreter_link_args(venv / "bin" / "python", (venv, real))
+    assert args == ["--symlink", "python-3.14.9", str(alias)]
+
+
+def test_interpreter_links_skip_what_the_sandbox_has_already(tmp_path: Path) -> None:
+    venv, _, real = uv_layout(tmp_path)
+    assert sandbox.interpreter_link_args(Path("/usr/bin/python3"), ()) == []
+    # Every link here sits in a bound directory, so none is recreated.
+    assert sandbox.interpreter_link_args(venv / "bin" / "python", (tmp_path,)) == []
+    assert real.is_dir()
+
+
+def test_interpreter_links_follow_relative_targets(tmp_path: Path) -> None:
+    (tmp_path / "a" / "bin").mkdir(parents=True)
+    (tmp_path / "a" / "bin" / "python").symlink_to("../../b/bin/python")
+    (tmp_path / "b" / "bin").mkdir(parents=True)
+    (tmp_path / "b" / "bin" / "python").touch()
+    args = sandbox.interpreter_link_args(tmp_path / "a" / "bin" / "python", ())
+    assert args == ["--symlink", "../../b/bin/python", str(tmp_path / "a" / "bin" / "python")]
+
+
+def test_interpreter_links_stop_at_a_loop(tmp_path: Path) -> None:
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    args = sandbox.interpreter_link_args(tmp_path / "a", ())
+    assert args.count("--symlink") == 2
+
+
+def test_a_link_in_the_home_never_makes_its_surroundings_visible(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """~/.local/bin/python3 -> /usr/bin/python3: only the link appears, not ~/.local."""
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    (home / ".local" / "share" / "keyrings").mkdir(parents=True)
+    link = home / ".local" / "bin" / "python3"
+    link.symlink_to("/usr/bin/python3")
+    monkeypatch.setattr(sys, "executable", str(link))
+    monkeypatch.setattr(sys, "prefix", "/usr")
+    monkeypatch.setattr(sys, "base_prefix", "/usr")
+    argv = sandbox.bwrap_argv(make_sandbox(tmp_path), ["true"], system_links=[])
+    bound = [argv[i + 1] for i, arg in enumerate(argv) if arg in {"--bind", "--ro-bind"}]
+    assert not [path for path in bound if str(home) in path or path == str(home / ".local")]
+    assert ("/usr/bin/python3", str(link)) in pairs(argv, "--symlink")
+    assert not any("keyrings" in arg for arg in argv)
+
+
 def test_python_roots_list_a_shared_prefix_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -403,13 +464,21 @@ def test_forbidden_paths_do_not_exist_inside(box: sandbox.Sandbox) -> None:
 
 
 def bound_paths(box: sandbox.Sandbox) -> list[Path]:
-    """Every host path the real argv binds from outside the system directories."""
+    """Every path outside the system directories that the real argv binds or links.
+
+    A link, such as uv's alias for its interpreter directory, shows up inside as a name beside
+    the bound directory and nothing else.
+    """
     argv = sandbox.bwrap_argv(box, ["true"])
+    system = ("/usr", "/etc", "/bin", "/sbin", "/lib")
     return [
-        Path(src)
-        for flag in ("--bind", "--ro-bind")
-        for src, _ in pairs(argv, flag)
-        if not src.startswith(("/usr", "/etc", "/bin", "/sbin", "/lib"))
+        *(
+            Path(src)
+            for flag in ("--bind", "--ro-bind")
+            for src, _ in pairs(argv, flag)
+            if not src.startswith(system)
+        ),
+        *(Path(link) for _, link in pairs(argv, "--symlink") if not link.startswith(system)),
     ]
 
 
@@ -608,3 +677,25 @@ def test_chromium_loads_a_page_through_the_bridge(box: sandbox.Sandbox) -> None:
     assert "HeadlessChrome" not in request
     # Chrome contacts the page's host and nothing else, bar the startup requests no flag stops.
     assert {host_of_request(r) for r in stub.requests} - sandbox.BACKGROUND_HOSTS == {"site.test"}
+
+
+@integration
+@needs_namespaces
+def test_a_uv_style_interpreter_runs_inside_the_namespace(
+    box: sandbox.Sandbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The environment's python is a link to a link; both must resolve inside the sandbox."""
+    venv, alias, real = uv_layout(box.profile_dir.parent / "py")
+    monkeypatch.setattr(sys, "executable", str(venv / "bin" / "python"))
+    monkeypatch.setattr(sys, "prefix", str(venv))
+    monkeypatch.setattr(sys, "base_prefix", str(real))
+    status, log = run_inside(box, [str(venv / "bin" / "python"), "-c", "print('resolved')"])
+    assert status == 0, log
+    assert log.strip() == "resolved"
+    # The alias is a link in there too, and nothing around the real directory came with it.
+    box.log_file.unlink()
+    status, log = run_inside(
+        box, ["/usr/bin/sh", "-c", f"test -L {alias} && ls {alias.parent} | sort"]
+    )
+    assert status == 0, log
+    assert log.split() == sorted([alias.name, real.name, venv.name])
