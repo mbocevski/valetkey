@@ -19,6 +19,10 @@ from pathlib import Path
 
 _CHUNK = 65536
 _MAX_PORT = 65535
+MAX_CONNECTIONS = 128
+"""How many connections are relayed at once, as many as the proxy serves. Each one holds two file
+descriptors here, so the bridge stays far below the limit of the process, and a program in the
+sandbox cannot use up the descriptors of the proxy's process by way of this bridge."""
 
 
 def parse_listen(value: str) -> tuple[str, int]:
@@ -69,15 +73,26 @@ async def _splice(
                 await writer.wait_closed()
 
 
-async def serve(host: str, port: int, socket_path: str) -> asyncio.Server:
+async def serve(
+    host: str, port: int, socket_path: str, max_connections: int = MAX_CONNECTIONS
+) -> asyncio.Server:
     """Start listening on ``host:port`` and forward each connection to ``socket_path``.
 
-    Returns the running server. Pass port 0 to take a free port and read it from
-    ``server.sockets``.
+    A connection past ``max_connections`` open ones is closed at once. Returns the running
+    server. Pass port 0 to take a free port and read it from ``server.sockets``.
     """
+    open_connections = 0
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await _splice(reader, writer, socket_path)
+        nonlocal open_connections
+        if open_connections >= max_connections:
+            writer.close()
+            return
+        open_connections += 1
+        try:
+            await _splice(reader, writer, socket_path)
+        finally:
+            open_connections -= 1
 
     return await asyncio.start_server(handle, host, port)
 

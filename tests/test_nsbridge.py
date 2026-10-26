@@ -213,3 +213,35 @@ def test_imports_neither_cyclopts_nor_rich() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True, timeout=30
     )
     assert result.stdout.split() == ["False", "False"]
+
+
+def test_connections_over_the_limit_are_closed_at_once(socket_path: Path) -> None:
+    async def hold(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.read()  # say nothing until the client goes
+        writer.close()
+
+    async def scenario() -> None:
+        upstream = await asyncio.start_unix_server(hold, str(socket_path))
+        bridge = await nsbridge.serve("127.0.0.1", 0, str(socket_path), max_connections=2)
+        port = bridge.sockets[0].getsockname()[1]
+        try:
+            held = [await asyncio.open_connection("127.0.0.1", port) for _ in range(2)]
+            await asyncio.sleep(0.1)
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            assert await asyncio.wait_for(reader.read(), 2) == b""  # closed without a word
+            writer.close()
+            for _reader, held_writer in held:  # a freed place is used again
+                held_writer.close()
+            await asyncio.sleep(0.2)
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"x")
+            await writer.drain()
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(reader.read(), 0.3)  # held open, not turned away
+            writer.close()
+        finally:
+            for server in (bridge, upstream):
+                server.close()
+                await server.wait_closed()
+
+    asyncio.run(scenario())
