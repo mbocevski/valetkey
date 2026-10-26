@@ -68,7 +68,8 @@ The sorting of ads and tracking reads the host name only. It uses Peter Lowe's l
 tracking server domains (pgl.yoyo.org/adservers), kept in the package as the site serves it. It
 adds a short list of more services, and names such as `ads` or `analytics`. A test keeps sign-in
 providers, CDNs and payment services out of it. A tracker it misses is allowed, so check the
-summary.
+summary. The browser's own update hosts are never allowed: the browser is told not to update its
+components, and a host it still asks for on its own is left out of every login.
 
 ## Private networks
 

@@ -166,6 +166,10 @@ class Classification:
     tracking: tuple[str, ...] = ()
     """The hosts in ``excluded`` that look like ads or tracking (see :mod:`valetkey.trackers`).
     That is all of them, now; the field stays so that the summary reads the same way."""
+    background: tuple[str, ...] = ()
+    """The hosts the browser contacted on its own, for its updates (see
+    :data:`valetkey.trackers.BROWSER_BACKGROUND`). They are in neither ``allow`` nor
+    ``excluded``: they are not the site's, and not tracking."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,11 +425,15 @@ def classify(
     ``tracking``, and anything under the site's own domain, which is never excluded. The hosts that
     have the site's owner by name (see :func:`same_owner`) are named in ``owned``, for the
     summary. An IP address is never covered by a domain, so it follows the rules of any other
-    host. A host that another allowed host covers is not listed apart. An excluded host is dropped
+    host. The hosts the browser contacts on its own for updates (``trackers.BROWSER_BACKGROUND``)
+    are neither allowed nor excluded; they are named in ``background``. A host that another
+    allowed host covers is not listed apart. An excluded host is dropped
     if it would block an allowed one. Entries that are not plausible hosts are ignored.
     """
     domain = sites.registrable_domain(sites.host_of(start_url), suffixes)
     reached = _hosts(seen_hosts) | _hosts(shown_hosts) | _hosts(passed_hosts)
+    background = {host for host in reached if trackers.is_browser_background(host)}
+    reached -= background
     others = {host for host in reached if not sites.host_matches(host, [domain])}
     tracking = {host for host in others if trackers.is_tracking(host)}
     allow = {domain} | (others - tracking)
@@ -436,6 +444,7 @@ def classify(
         excluded=tuple(sorted(excluded)),
         owned=tuple(sorted(h for h in allow - {domain} if same_owner(h, domain, suffixes))),
         tracking=tuple(sorted(excluded)),
+        background=tuple(sorted(background)),
     )
 
 
@@ -510,7 +519,8 @@ def summary(policy: sites.Policy, classification: Classification) -> str:
     domain and the hosts that have its owner by name), and the other services the pages used.
     Past twenty names the rest are counted. The `valetkey deny` command is named, for any the
     person does not want. A host that a denied entry blocks is named apart, with how to allow it.
-    The ads and tracking hosts that were left out are counted, never named.
+    The ads and tracking hosts that were left out are counted, never named, and so are the hosts
+    the browser contacted on its own.
     """
     own = sites.registrable_domain(sites.host_of(policy.start))
     text = (
@@ -536,4 +546,10 @@ def summary(policy: sites.Policy, classification: Classification) -> str:
     if tracking:
         noun = "host" if len(tracking) == 1 else "hosts"
         text += f" Left out {len(tracking)} ads and tracking {noun}."
+    if classification.background:
+        noun = "host" if len(classification.background) == 1 else "hosts"
+        text += (
+            f" Never allowed: {len(classification.background)} {noun} the browser contacts "
+            "on its own, for its updates."
+        )
     return text

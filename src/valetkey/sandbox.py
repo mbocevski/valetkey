@@ -98,17 +98,28 @@ def installed_chrome_major(executable: str = "chromium") -> int:
 BACKGROUND_HOSTS = frozenset({"update.googleapis.com"})
 """Hosts Chrome still contacts at start-up whatever the flags say, so a proxy can treat them as
 known noise rather than as hosts the page needs. ``update.googleapis.com`` is the component
-updater asking for a foreground update; no flag or policy stops it. Every other background
-request is stopped by the flags below and by :data:`CHROME_POLICY`, so a host that is refused
-for a page is a host the page asked for."""
+updater asking for a foreground update, which no flag stops; :data:`CHROME_POLICY` does, and the
+host stays here in case a browser asks anyway. Every other background request is stopped by the
+flags below and by the policy, so a host that is refused for a page is a host the page asked
+for."""
 
-CHROME_POLICY = {"DefaultSearchProviderEnabled": False}
+CHROME_POLICY = {"DefaultSearchProviderEnabled": False, "ComponentUpdatesEnabled": False}
 """Chrome enterprise policy applied to every contained browser.
 
 Without a default search engine Chrome stops contacting ``www.google.com`` on its own: the new
 tab page's Google bar and doodle, and the check whether AI mode is available. No command-line
 flag does this, and the requests used to look like a page that needs ``www.google.com``, which
-reCAPTCHA does."""
+reCAPTCHA does.
+
+``ComponentUpdatesEnabled`` off stops the component updater. ``--disable-component-update``
+does not: measured in a headless Chromium 156 for 70 seconds, with the flag it still asks
+``update.googleapis.com`` and downloads one update from ``edgedl.me.gvt1.com``, and without it
+about seven times as many requests go out (``--disable-background-networking`` changes nothing
+here). The flag only stops the scheduled updates, and Chromium checks once at start-up whatever
+it says. The policy stops that too: a login window on a blank page then contacts nothing but the
+page (measured by hand, in a login window: with the policy only the page; without it
+``edgedl.me.gvt1.com`` within eight seconds). The cost is that Chromium's components, such as
+its revocation list, stay as they were installed."""
 
 _POLICY_DESTINATIONS = ("/etc/chromium/policies", "/etc/opt/chrome/policies")
 """Where Chromium and Google Chrome read policy from. Each reads only its own."""

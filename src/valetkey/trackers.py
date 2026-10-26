@@ -100,6 +100,24 @@ TRACKING_LABELS = re.compile(
 """A host-name label that says the host is for ads or tracking, such as ``ads``, ``track-2``."""
 
 
+BROWSER_BACKGROUND: frozenset[str] = frozenset({"update.googleapis.com", "gvt1.com"})
+"""Domains the browser contacts on its own, for its updates, and that no site needs. A login
+never allows them. ``update.googleapis.com`` is the component updater and ``gvt1.com`` is the
+download service it fetches updates from (``edgedl.me.gvt1.com``). This is not the tracking list:
+they are not counted as tracking. Each was seen in a login window on a blank page, as the one
+check Chromium makes at start-up whatever ``--disable-component-update`` says (see
+:data:`valetkey.sandbox.CHROME_POLICY`, which now stops it). This is a second line, for a
+browser that asks anyway. The hosts that Chromium contacts
+and that sign-ins also use, such as ``accounts.google.com``, are not here, because a host name
+cannot tell the two apart."""
+
+
+def is_browser_background(host: str) -> bool:
+    """Tell whether ``host`` is one the browser contacts on its own (:data:`BROWSER_BACKGROUND`)."""
+    labels = sites.normalize_host(host).split(".")
+    return any(".".join(labels[start:]) in BROWSER_BACKGROUND for start in range(len(labels)))
+
+
 def parse(text: str) -> frozenset[str]:
     """Return the domains of a list in hosts format: ``127.0.0.1 domain`` lines and ``#`` comments.
 

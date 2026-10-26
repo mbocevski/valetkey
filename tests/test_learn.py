@@ -1499,3 +1499,27 @@ def test_the_summary_groups_the_hosts_and_counts_the_tracking() -> None:
 )
 def test_is_tracking(host: str, expected: bool) -> None:  # noqa: FBT001
     assert trackers.is_tracking(host) is expected
+
+
+def test_the_browsers_own_update_hosts_are_neither_allowed_nor_excluded() -> None:
+    seen = ["app.sitex.com", "edgedl.me.gvt1.com", "update.googleapis.com", "accounts.google.com"]
+    result = learn.classify(START, seen, ["edgedl.me.gvt1.com"], ["gvt1.com"])
+    assert result.allow == ("accounts.google.com", "sitex.com")
+    assert result.excluded == ()
+    assert result.tracking == ()
+    assert result.background == ("edgedl.me.gvt1.com", "gvt1.com", "update.googleapis.com")
+
+
+def test_the_summary_counts_the_browsers_own_hosts_apart_from_tracking() -> None:
+    result = learn.Classification(
+        ("sitex.com",), ("ads.example",), tracking=("ads.example",), background=("a.gvt1.com",)
+    )
+    saved = policy(allow=("sitex.com",), excluded=("ads.example",))
+    assert learn.summary(saved, result).endswith(
+        " Left out 1 ads and tracking host."
+        " Never allowed: 1 host the browser contacts on its own, for its updates."
+    )
+    two = learn.Classification(("sitex.com",), (), background=("a.gvt1.com", "gvt1.com"))
+    assert learn.summary(saved, two).endswith(
+        "Never allowed: 2 hosts the browser contacts on its own, for its updates."
+    )

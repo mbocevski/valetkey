@@ -214,3 +214,34 @@ def test_download_reads_the_body_of_a_url(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(urllib.request, "urlopen", fake)
     assert update_trackers.download("https://example.org/x") == b"body"
     assert seen == [("https://example.org/x", update_trackers.TIMEOUT)]
+
+
+# -- the browser's own hosts ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["edgedl.me.gvt1.com", "gvt1.com", "r1---sn-abc.gvt1.com", "update.googleapis.com"],
+)
+def test_the_hosts_the_browser_contacts_for_its_updates_are_background(host: str) -> None:
+    assert trackers.is_browser_background(host)
+    assert not trackers.is_tracking(host)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "www.googleapis.com",
+        "accounts.google.com",
+        "www.google.com",
+        "notgvt1.com",
+        "gvt1.com.example.org",
+    ],
+)
+def test_other_google_hosts_are_not_background(host: str) -> None:
+    assert not trackers.is_browser_background(host)
+
+
+@pytest.mark.parametrize("host", PROTECTED)
+def test_no_protected_host_is_taken_for_the_browsers_own(host: str) -> None:
+    assert not trackers.is_browser_background(host)

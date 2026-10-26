@@ -106,9 +106,13 @@ def test_installed_chrome_major_runs_the_executable(tmp_path: Path) -> None:
 
 def test_only_the_updater_is_left_as_background_noise() -> None:
     # The new tab page and the AI-mode check are stopped by policy, so a refused
-    # www.google.com is a page asking for it.
+    # www.google.com is a page asking for it. The policy also stops the component updater, which
+    # the flag alone does not; the host of the updater stays listed in case a browser asks anyway.
     assert {"update.googleapis.com"} == sandbox.BACKGROUND_HOSTS
-    assert sandbox.CHROME_POLICY == {"DefaultSearchProviderEnabled": False}
+    assert sandbox.CHROME_POLICY == {
+        "DefaultSearchProviderEnabled": False,
+        "ComponentUpdatesEnabled": False,
+    }
 
 
 def test_write_chrome_policy(tmp_path: Path) -> None:

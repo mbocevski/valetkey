@@ -56,6 +56,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- A login no longer allows the browser's own update host, `edgedl.me.gvt1.com`, and the browser no longer checks for component updates, which `--disable-component-update` did not stop.
 - `browser_save` now saves pictures that a site's server keeps scripts from reading, as picture services do, and ones behind a redirect. A `data:` or `blob:` address gets a clear reason.
 - A site that signs you in only until the browser is closed, with a cookie that has no expiry, now stays signed in for the session. Sign in again once if a login did not carry over.
 - The Arch package's version now includes the commit, so `makepkg -si` after a `git pull` builds the new code and no longer installs the package of an older commit.
