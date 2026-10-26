@@ -34,6 +34,7 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -610,6 +611,10 @@ class Bridge:
                     # should not be as blind as that.
                     env=login.daemon_environment(),
                 )
+            # The daemon is meant to outlive this bridge, but a bridge that gives up on a slow
+            # start (or is dropped) must not leave a child nobody waits for, which Python reports
+            # as a running subprocess it lost. A thread holds the child until it ends.
+            threading.Thread(target=self.started.wait, daemon=True).start()
         except OSError as error:
             message = f"could not start valetkeyd: {error}"
             code = "daemon_start_failed"

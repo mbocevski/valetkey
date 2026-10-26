@@ -1583,6 +1583,9 @@ def test_the_daemon_is_started_with_no_inherited_stdio(monkeypatch: pytest.Monke
         def poll(self) -> int:
             return 1
 
+        def wait(self) -> int:
+            return 1
+
     def fake_popen(argv: list[str], **kwargs: Any) -> Fake:  # noqa: ANN401
         seen.update(kwargs, argv=argv)
         return Fake()
@@ -1625,6 +1628,9 @@ def test_a_daemon_started_by_a_client_with_a_reduced_environment_is_not_blind(
 
     class Fake:
         def poll(self) -> int:
+            return 1
+
+        def wait(self) -> int:
             return 1
 
     def fake_popen(argv: list[str], **kwargs: Any) -> Fake:  # noqa: ANN401

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import contextlib
+import gc
 import json
 import os
 import socket
@@ -690,6 +691,31 @@ def test_hold_registers_again_after_the_daemon_restarted(roots: sites.Roots) -> 
                 assert await asyncio.wait_for(task, 10) == 0
 
     run(scenario())
+
+
+def test_a_daemon_still_starting_when_the_bridge_gives_up_is_not_reported_as_lost(
+    roots: sites.Roots,
+) -> None:
+    """A slow machine can outlast the wait; the abandoned child must still be waited for."""
+
+    async def scenario() -> None:
+        slow = mcp_server.Bridge(
+            client.socket_path(roots),
+            daemon_command=[sys.executable, "-c", "import time; time.sleep(1)"],
+            start_timeout=0.2,
+            exit_grace=0.1,
+        )
+        with pytest.raises(DaemonError, match="did not listen"):
+            await slow.call("sites")
+        assert slow.started is not None
+        assert slow.started.poll() is None  # still running when the bridge gives up
+        slow.started = None
+
+    run(scenario())
+    # A lost running child would be reported here, and the test run turns that into an error.
+    gc.collect()
+    time.sleep(1.2)  # the child ends, which the thread that waits for it notices
+    gc.collect()
 
 
 def test_hold_says_so_when_the_forward_never_came_up(
