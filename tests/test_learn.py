@@ -18,6 +18,7 @@ from valetkey import learn, sites
 
 START = "https://app.sitex.com/login"
 NOW = datetime(2026, 10, 26, 9, 30, 15, 999999, tzinfo=UTC)
+EPOCH = datetime(1601, 1, 1, tzinfo=UTC)  # before every visit the tests write
 
 LINK, TYPED, AUTO_SUBFRAME, MANUAL_SUBFRAME = 0, 1, 3, 4
 CHAIN_START, CHAIN_END = 0x10000000, 0x20000000
@@ -76,7 +77,7 @@ def test_same_domain_login(tmp_path: Path) -> None:
             ("https://www.sitex.com/", LINK),
         ],
     )
-    hosts = learn.navigation_hosts(path)
+    hosts = learn.navigation_hosts(path, since=EPOCH)
     assert hosts == {"app.sitex.com", "www.sitex.com"}
     assert learn.classify(START, ["app.sitex.com", "cdn.sitex.com"], hosts) == learn.Classification(
         allow=("sitex.com",), excluded=()
@@ -93,7 +94,7 @@ def test_redirect_chain_through_an_sso_provider(tmp_path: Path) -> None:
             ("https://app.sitex.com/home", LINK | CHAIN_END | SERVER_REDIRECT),
         ],
     )
-    hosts = learn.navigation_hosts(path)
+    hosts = learn.navigation_hosts(path, since=EPOCH)
     result = learn.classify(START, ["app.sitex.com", "login.okta.com", "okta.com"], hosts)
     assert result.allow == ("login.okta.com", "sitex.com")
     assert result.excluded == ()
@@ -104,7 +105,7 @@ def test_popup_sso_is_a_separate_top_level_visit(tmp_path: Path) -> None:
         tmp_path,
         [("https://app.sitex.com/", TYPED), ("https://accounts.google.com/o/oauth2/auth", LINK)],
     )
-    result = learn.classify(START, [], learn.navigation_hosts(path))
+    result = learn.classify(START, [], learn.navigation_hosts(path, since=EPOCH))
     assert result.allow == ("accounts.google.com", "sitex.com")
 
 
@@ -116,7 +117,7 @@ def test_navigation_hosts_the_proxy_never_saw_still_count() -> None:
 def test_beacons_seen_by_the_proxy_are_excluded(tmp_path: Path) -> None:
     path = history(tmp_path, [("https://app.sitex.com/login", TYPED)])
     seen = ["app.sitex.com", "t.tracker.example", "cdn.metrics.io", "t.tracker.example"]
-    result = learn.classify(START, seen, learn.navigation_hosts(path))
+    result = learn.classify(START, seen, learn.navigation_hosts(path, since=EPOCH))
     assert result.allow == ("sitex.com",)
     assert result.excluded == ("cdn.metrics.io", "t.tracker.example")
 
@@ -131,7 +132,7 @@ def test_subframe_only_hosts_are_excluded(tmp_path: Path) -> None:
             ("https://pay.sitex.com/frame", AUTO_SUBFRAME),
         ],
     )
-    hosts = learn.navigation_hosts(path)
+    hosts = learn.navigation_hosts(path, since=EPOCH)
     assert hosts == {"app.sitex.com"}
     result = learn.classify(START, ["ads.example", "widgets.example"], hosts)
     assert result.excluded == ("ads.example", "widgets.example")
@@ -154,7 +155,7 @@ def test_odd_urls_in_history_are_skipped(tmp_path: Path) -> None:
     database.execute("INSERT INTO visits(url, visit_time) VALUES (7, 1)")
     database.commit()
     database.close()
-    assert learn.navigation_hosts(path) == {"app.sitex.com", "192.0.2.7"}
+    assert learn.navigation_hosts(path, since=EPOCH) == {"app.sitex.com", "192.0.2.7"}
 
 
 def test_ip_literals_are_third_parties_and_exact() -> None:
@@ -224,13 +225,13 @@ def test_classify_is_sorted_and_deterministic() -> None:
 
 
 def test_missing_history_gives_no_hosts(tmp_path: Path) -> None:
-    assert learn.navigation_hosts(tmp_path / "nope" / "History") == set()
+    assert learn.navigation_hosts(tmp_path / "nope" / "History", since=EPOCH) == set()
 
 
 def test_history_is_read_from_a_copy(tmp_path: Path) -> None:
     path = history(tmp_path, [("https://app.sitex.com/", TYPED)])
     before = path.read_bytes()
-    learn.navigation_hosts(path)
+    learn.navigation_hosts(path, since=EPOCH)
     assert path.read_bytes() == before
     assert sorted(entry.name for entry in tmp_path.iterdir()) == ["History"]
 
@@ -247,7 +248,7 @@ def test_a_database_with_a_pending_wal_is_copied_with_it(tmp_path: Path) -> None
     main_file_only = sqlite3.connect(f"{path.as_uri()}?mode=ro&immutable=1", uri=True)
     with closing(main_file_only), pytest.raises(sqlite3.OperationalError):
         main_file_only.execute("SELECT count(*) FROM visits")
-    assert learn.navigation_hosts(path) == {"app.sitex.com", "login.okta.com"}
+    assert learn.navigation_hosts(path, since=EPOCH) == {"app.sitex.com", "login.okta.com"}
     live.close()
 
 
@@ -256,7 +257,7 @@ def test_a_locked_database_is_still_readable(tmp_path: Path) -> None:
     live = build(path, [("https://app.sitex.com/", TYPED)])
     live.execute("BEGIN EXCLUSIVE")
     try:
-        assert learn.navigation_hosts(path) == {"app.sitex.com"}
+        assert learn.navigation_hosts(path, since=EPOCH) == {"app.sitex.com"}
     finally:
         live.rollback()
         live.close()
@@ -266,7 +267,7 @@ def test_a_file_that_is_not_a_database_is_an_error(tmp_path: Path) -> None:
     path = tmp_path / "History"
     path.write_bytes(b"this is not sqlite" * 100)
     with pytest.raises(sqlite3.DatabaseError):
-        learn.navigation_hosts(path)
+        learn.navigation_hosts(path, since=EPOCH)
 
 
 def policy(**changes: object) -> sites.Policy:
@@ -377,7 +378,7 @@ def test_real_chromium_history_has_the_columns_the_query_reads(tmp_path: Path) -
     path = profile / "Default" / "History"
     if not path.is_file():
         pytest.skip("this Chromium wrote no history")
-    assert isinstance(learn.navigation_hosts(path), set)
+    assert isinstance(learn.navigation_hosts(path, since=EPOCH), set)
 
 
 # -- the pages a login submitted a form from -----------------------------------------------
@@ -406,7 +407,7 @@ def test_the_login_page_is_where_the_form_was_submitted_from(tmp_path: Path) -> 
             ("https://sitex.com/app", FORM_SUBMIT | CHAIN_START | CHAIN_END, 2),
         ],
     )
-    assert learn.login_pages(path, "https://sitex.com/") == ("sitex.com/login",)
+    assert learn.login_pages(path, "https://sitex.com/", since=EPOCH) == ("sitex.com/login",)
 
 
 def test_every_page_of_a_sign_in_flow_counts_but_not_the_pages_around_it(tmp_path: Path) -> None:
@@ -421,7 +422,7 @@ def test_every_page_of_a_sign_in_flow_counts_but_not_the_pages_around_it(tmp_pat
             ("https://sitex.com/app/", LINK, 5),
         ],
     )
-    assert learn.login_pages(path, "https://sitex.com/") == (
+    assert learn.login_pages(path, "https://sitex.com/", since=EPOCH) == (
         "login.okta.com/mfa",
         "login.okta.com/signin",
     )
@@ -440,7 +441,7 @@ def test_the_start_page_and_the_final_page_are_never_login_pages(tmp_path: Path)
         ],
     )
     # "/" held a form and so did "/app", the page the login ended on; neither can be a login page.
-    assert learn.login_pages(path, "https://sitex.com/") == ()
+    assert learn.login_pages(path, "https://sitex.com/", since=EPOCH) == ()
 
 
 def test_a_form_in_a_frame_is_not_a_login_page(tmp_path: Path) -> None:
@@ -453,7 +454,7 @@ def test_a_form_in_a_frame_is_not_a_login_page(tmp_path: Path) -> None:
             ("https://sitex.com/app", LINK, 3),
         ],
     )
-    assert learn.login_pages(path, "https://sitex.com/") == ()
+    assert learn.login_pages(path, "https://sitex.com/", since=EPOCH) == ()
 
 
 def test_pages_that_are_not_web_pages_are_ignored(tmp_path: Path) -> None:
@@ -465,12 +466,14 @@ def test_pages_that_are_not_web_pages_are_ignored(tmp_path: Path) -> None:
             ("https://sitex.com/app", FORM_SUBMIT, 2),
         ],
     )
-    assert learn.login_pages(path, "https://sitex.com/") == ()
+    assert learn.login_pages(path, "https://sitex.com/", since=EPOCH) == ()
 
 
 def test_no_history_means_no_login_pages(tmp_path: Path) -> None:
-    assert learn.login_pages(tmp_path / "missing", "https://sitex.com/") == ()
-    assert learn.login_pages(history_of_steps(tmp_path, []), "https://sitex.com/") == ()
+    assert learn.login_pages(tmp_path / "missing", "https://sitex.com/", since=EPOCH) == ()
+    assert (
+        learn.login_pages(history_of_steps(tmp_path, []), "https://sitex.com/", since=EPOCH) == ()
+    )
 
 
 def test_a_history_without_visit_origins_is_an_error(tmp_path: Path) -> None:
@@ -483,7 +486,7 @@ def test_a_history_without_visit_origins_is_an_error(tmp_path: Path) -> None:
     )
     database.close()
     with pytest.raises(sqlite3.DatabaseError):
-        learn.login_pages(path, "https://sitex.com/")
+        learn.login_pages(path, "https://sitex.com/", since=EPOCH)
 
 
 def test_merge_records_the_login_pages_and_keeps_old_ones_when_there_are_none() -> None:
@@ -513,9 +516,9 @@ FIXED = "the login's history could not be read"
 def unreadable(path: Path) -> learn.HistoryError:
     """Read ``path`` both ways and return the error, which both ways must raise alike."""
     with pytest.raises(learn.HistoryError) as first:
-        learn.navigation_hosts(path)
+        learn.navigation_hosts(path, since=EPOCH)
     with pytest.raises(learn.HistoryError) as second:
-        learn.login_pages(path, START)
+        learn.login_pages(path, START, since=EPOCH)
     assert str(first.value) == str(second.value)
     return first.value
 
@@ -635,7 +638,9 @@ def test_a_query_that_runs_too_long_is_stopped(
     )
     database.commit()
     database.close()
-    assert len(learn.navigation_hosts(path)) == 3000  # read in time under the real budget
+    assert (
+        len(learn.navigation_hosts(path, since=EPOCH)) == 3000
+    )  # read in time under the real budget
     monkeypatch.setattr(learn, "QUERY_SECONDS", -1.0)  # already spent
     assert str(unreadable(path)) == FIXED
 
@@ -666,7 +671,7 @@ def test_a_file_at_the_cap_is_read_and_one_byte_over_is_not(
     path = history(tmp_path, [("https://app.sitex.com/", TYPED)])
     size = path.stat().st_size
     monkeypatch.setattr(learn, "MAX_BYTES", size)
-    assert learn.navigation_hosts(path) == {"app.sitex.com"}
+    assert learn.navigation_hosts(path, since=EPOCH) == {"app.sitex.com"}
     monkeypatch.setattr(learn, "MAX_BYTES", size - 1)
     assert str(unreadable(path)) == FIXED
 
@@ -693,7 +698,7 @@ def test_a_link_in_place_of_the_history_is_not_followed(tmp_path: Path) -> None:
     real = history(tmp_path, [("https://app.sitex.com/", TYPED)])
     link = tmp_path / "Link"
     link.symlink_to(real)
-    assert learn.navigation_hosts(real) == {"app.sitex.com"}
+    assert learn.navigation_hosts(real, since=EPOCH) == {"app.sitex.com"}
     assert str(unreadable(link)) == FIXED
 
 
@@ -721,7 +726,7 @@ def test_a_side_file_over_the_cap_is_refused(
 
 
 def test_a_history_with_more_rows_than_the_limit_is_read_as_far_as_it_goes(tmp_path: Path) -> None:
-    assert str(learn.MAX_ROWS) in learn._QUERY  # noqa: SLF001 - the literal and the name agree
+    assert str(learn.MAX_ROWS) in learn._NAVIGATION  # noqa: SLF001 - the literal and the name agree
     assert str(learn.MAX_ROWS) in learn._FORM_ORIGINS  # noqa: SLF001
     path = tmp_path / "History"
     database = build(path, [])
@@ -737,12 +742,12 @@ def test_a_history_with_more_rows_than_the_limit_is_read_as_far_as_it_goes(tmp_p
     )
     database.commit()
     database.close()
-    assert len(learn.navigation_hosts(path)) == learn.MAX_ROWS
+    assert len(learn.navigation_hosts(path, since=EPOCH)) == learn.MAX_ROWS
 
 
 def test_a_very_long_address_is_cut_but_its_host_is_still_read(tmp_path: Path) -> None:
     path = history(tmp_path, [("https://long.example/" + "a" * 100_000, TYPED)])
-    assert learn.navigation_hosts(path) == {"long.example"}
+    assert learn.navigation_hosts(path, since=EPOCH) == {"long.example"}
 
 
 def test_the_authorizer_allows_only_reading_the_two_tables() -> None:
@@ -795,12 +800,96 @@ def test_a_history_a_page_wrote_still_gives_the_hosts_it_really_holds(tmp_path: 
     )
     assert path.with_name("History-wal").exists()
     try:
-        assert learn.navigation_hosts(path) == {"app.sitex.com", "login.okta.com"}
+        assert learn.navigation_hosts(path, since=EPOCH) == {"app.sitex.com", "login.okta.com"}
     finally:
         database.close()
 
 
 def test_a_history_that_vanishes_before_it_is_opened_is_unreadable(tmp_path: Path) -> None:
     with pytest.raises(learn.HistoryError) as error:
-        learn._query_history(tmp_path / "gone", "SELECT 1")  # noqa: SLF001
+        learn._query_history(tmp_path / "gone", ("SELECT 1", ()))  # noqa: SLF001
     assert str(error.value) == FIXED
+
+
+def test_chrome_time_counts_microseconds_since_1601() -> None:
+    # A visit time read from a real history: 2026-10-26 06:24:20.288301 UTC.
+    moment = datetime(2026, 10, 26, 6, 24, 20, 288301, tzinfo=UTC)
+    assert learn.chrome_time(moment) == 13_437_469_460_288_301
+    assert (
+        learn.chrome_time(moment.astimezone(timezone(timedelta(hours=5)))) == 13_437_469_460_288_301
+    )
+    assert learn.chrome_time(EPOCH) == 0
+
+
+def timed_history(tmp_path: Path, visits: list[tuple[str, int, datetime]]) -> Path:
+    """A history of ``(url, transition, when)`` visits, with the times Chromium would write."""
+    path = tmp_path / "History"
+    build(path, [(url, transition) for url, transition, _ in visits]).close()
+    with closing(sqlite3.connect(path)) as database:
+        for number, (_, _, when) in enumerate(visits, start=1):
+            database.execute(
+                "UPDATE visits SET visit_time = ? WHERE id = ?", (learn.chrome_time(when), number)
+            )
+        database.commit()
+    return path
+
+
+BEGAN = datetime(2026, 10, 26, 9, 0, 0, tzinfo=UTC)
+
+
+def test_only_the_pages_of_this_login_count(tmp_path: Path) -> None:
+    before = BEGAN - timedelta(days=3)
+    path = timed_history(
+        tmp_path,
+        [
+            ("https://evil.example/old", TYPED, before),
+            ("https://idp.sitex.com/earlier", TYPED, BEGAN - timedelta(microseconds=1)),
+            ("https://app.sitex.com/login", TYPED, BEGAN),
+            ("https://login.okta.test/auth", LINK, BEGAN + timedelta(seconds=3)),
+        ],
+    )
+    assert learn.navigation_hosts(path, since=BEGAN) == {"app.sitex.com", "login.okta.test"}
+    assert learn.navigation_hosts(path, since=before) == {
+        "evil.example",
+        "idp.sitex.com",
+        "app.sitex.com",
+        "login.okta.test",
+    }
+
+
+def test_a_host_the_person_removed_does_not_come_back_with_the_next_login(
+    tmp_path: Path,
+) -> None:
+    path = timed_history(
+        tmp_path,
+        [
+            ("https://evil.example/x", TYPED, BEGAN - timedelta(hours=2)),
+            ("https://app.sitex.com/login", TYPED, BEGAN + timedelta(seconds=1)),
+        ],
+    )
+    navigated = learn.navigation_hosts(path, since=BEGAN)
+    result = learn.classify(START, ["app.sitex.com"], navigated)
+    assert result.allow == ("sitex.com",)
+
+
+def test_the_login_pages_and_the_last_page_are_of_this_login_too(tmp_path: Path) -> None:
+    path = timed_history(
+        tmp_path,
+        [
+            ("https://sitex.com/", TYPED, BEGAN - timedelta(days=1)),
+            ("https://sitex.com/old-signin", LINK, BEGAN - timedelta(days=1)),
+            ("https://sitex.com/old-home", 7, BEGAN - timedelta(days=1)),
+            ("https://sitex.com/", TYPED, BEGAN + timedelta(seconds=1)),
+            ("https://sitex.com/signin", LINK, BEGAN + timedelta(seconds=2)),
+            ("https://sitex.com/app", 7, BEGAN + timedelta(seconds=3)),
+            ("https://sitex.com/dashboard", LINK, BEGAN + timedelta(seconds=4)),
+        ],
+    )
+    with closing(sqlite3.connect(path)) as database:
+        database.executemany("UPDATE visits SET from_visit = ? WHERE id = ?", [(2, 3), (5, 6)])
+        database.commit()
+    assert learn.login_pages(path, "https://sitex.com/", since=EPOCH) == (
+        "sitex.com/old-signin",
+        "sitex.com/signin",
+    )
+    assert learn.login_pages(path, "https://sitex.com/", since=BEGAN) == ("sitex.com/signin",)

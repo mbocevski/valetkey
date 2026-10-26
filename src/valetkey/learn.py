@@ -77,23 +77,37 @@ _COPY_CHUNK = 1 << 20
 _PROGRESS_STEP = 10_000
 _TABLES = frozenset({"urls", "visits"})
 
-# Core types 3 and 4 are the subframe loads.
-_QUERY = (
-    "SELECT u.url FROM visits AS v JOIN urls AS u ON u.id = v.url "
-    "WHERE (v.transition & 255) NOT IN (3, 4) LIMIT 100000"
-)
+_CHROME_EPOCH = datetime(1601, 1, 1, tzinfo=UTC)
 
+
+def chrome_time(moment: datetime) -> int:
+    """Return ``moment`` as Chromium writes a visit time: microseconds since 1601-01-01 UTC."""
+    delta = moment.astimezone(UTC) - _CHROME_EPOCH
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+# Core types 3 and 4 are the subframe loads. Every query takes the time the login began, as the
+# integer :func:`chrome_time` gives: a profile outlives its logins, and what it recorded before
+# is not what this login did.
+_NAVIGATION = (
+    "SELECT u.url FROM visits AS v JOIN urls AS u ON u.id = v.url "
+    "WHERE (v.transition & 255) NOT IN (3, 4) AND v.visit_time >= ? LIMIT 100000"
+)
 
 # A form submission is core type 7; the visit it came from is the page that held the form.
 _FORM_ORIGINS = (
     "SELECT p.url FROM visits AS v JOIN visits AS f ON f.id = v.from_visit "
     "JOIN urls AS p ON p.id = f.url "
-    "WHERE (v.transition & 255) = 7 AND (f.transition & 255) NOT IN (3, 4) LIMIT 100000"
+    "WHERE (v.transition & 255) = 7 AND (f.transition & 255) NOT IN (3, 4) "
+    "AND v.visit_time >= ? AND f.visit_time >= ? LIMIT 100000"
 )
 _LAST_PAGE = (
     "SELECT u.url FROM visits AS v JOIN urls AS u ON u.id = v.url "
-    "WHERE (v.transition & 255) NOT IN (3, 4) ORDER BY v.visit_time DESC, v.id DESC LIMIT 1"
+    "WHERE (v.transition & 255) NOT IN (3, 4) AND v.visit_time >= ? "
+    "ORDER BY v.visit_time DESC, v.id DESC LIMIT 1"
 )
+
+type Query = tuple[str, tuple[int, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,7 +211,7 @@ def _check_schema(database: sqlite3.Connection) -> None:
         raise HistoryError(message)
 
 
-def _query_history(history_path: Path, *queries: str) -> list[list[tuple[Any, ...]]]:
+def _query_history(history_path: Path, *queries: Query) -> list[list[tuple[Any, ...]]]:
     """Run ``queries`` on a copy of the history database and return their rows.
 
     The database is copied, with its ``-wal`` and ``-journal`` files, to a temporary directory
@@ -225,7 +239,7 @@ def _query_history(history_path: Path, *queries: str) -> list[list[tuple[Any, ..
         raise HistoryError(_UNREADABLE) from None
 
 
-def _read(copy: Path, queries: tuple[str, ...]) -> list[list[tuple[Any, ...]]]:
+def _read(copy: Path, queries: tuple[Query, ...]) -> list[list[tuple[Any, ...]]]:
     deadline = time.monotonic() + QUERY_SECONDS
     with contextlib.closing(sqlite3.connect(f"{copy.as_uri()}?mode=ro", uri=True)) as database:
         database.setconfig(sqlite3.SQLITE_DBCONFIG_DEFENSIVE, True)  # noqa: FBT003
@@ -237,14 +251,17 @@ def _read(copy: Path, queries: tuple[str, ...]) -> list[list[tuple[Any, ...]]]:
         return [
             [
                 (row[0][:MAX_URL] if isinstance(row[0], str) else row[0],)
-                for row in database.execute(query)
+                for row in database.execute(sql, params)
             ]
-            for query in queries
+            for sql, params in queries
         ]
 
 
-def navigation_hosts(history_path: Path) -> set[str]:
-    """Return the hosts of the top-level pages a profile's history recorded.
+def navigation_hosts(history_path: Path, *, since: datetime) -> set[str]:
+    """Return the hosts of the top-level pages a profile's history recorded since ``since``.
+
+    ``since`` is when the login began. The profile keeps its history from one login to the next,
+    so without it a host that the person removed would come back at the next login.
 
     A visit counts unless it is a subframe load, so each hop of a redirect chain counts. Only
     ``http`` and ``https`` pages count. A missing file gives an empty set: the profile has no
@@ -257,14 +274,14 @@ def navigation_hosts(history_path: Path) -> set[str]:
     if not history_path.is_file():
         return set()
     hosts: set[str] = set()
-    for (url,) in _query_history(history_path, _QUERY)[0]:
+    for (url,) in _query_history(history_path, (_NAVIGATION, (chrome_time(since),)))[0]:
         if urlsplit(url or "").scheme in {"http", "https"}:
             with contextlib.suppress(ValueError):
                 hosts.add(sites.host_of(url))
     return hosts
 
 
-def login_pages(history_path: Path, start_url: str) -> tuple[str, ...]:
+def login_pages(history_path: Path, start_url: str, *, since: datetime) -> tuple[str, ...]:
     """Return the pages a form was submitted from during a login, as ``host/path`` keys.
 
     These are the pages where credentials, or a second factor, were entered: the page a
@@ -274,7 +291,8 @@ def login_pages(history_path: Path, start_url: str) -> tuple[str, ...]:
 
     Two pages are left out. The start page, because a start URL that is not redirected ends on
     itself and must not look like a login page. And the page the login ended on (the last
-    top-level visit), which is where a signed-in person lands. A missing file gives ``()``.
+    top-level visit), which is where a signed-in person lands. Only visits since ``since``, when
+    the login began, count. A missing file gives ``()``.
 
     Raises:
         HistoryError: when the file is not a history database, or cannot be trusted or read.
@@ -282,7 +300,10 @@ def login_pages(history_path: Path, start_url: str) -> tuple[str, ...]:
     """
     if not history_path.is_file():
         return ()
-    origins, last = _query_history(history_path, _FORM_ORIGINS, _LAST_PAGE)
+    moment = chrome_time(since)
+    origins, last = _query_history(
+        history_path, (_FORM_ORIGINS, (moment, moment)), (_LAST_PAGE, (moment,))
+    )
     skipped = {sites.page_key(start_url), *(sites.page_key(url or "") for (url,) in last)}
     keys = {sites.page_key(url or "") for (url,) in origins}
     return tuple(sorted(key for key in keys - skipped if key is not None))

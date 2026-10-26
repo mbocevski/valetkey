@@ -33,7 +33,9 @@ A host is added to a site's policy only when a person says yes. Three things can
 
 - Logging in. The site's own domain is allowed, with its subdomains. Any other host the login
   window navigated to, such as a sign-in provider, is allowed as that exact host. A host the page
-  only loaded in the background is left out and listed as excluded.
+  only loaded in the background is left out and listed as excluded. Only this login counts: pages
+  the profile visited at an earlier login or session are not read again, so a host you denied does
+  not come back.
 - You, with `valetkey allow` and `valetkey deny`.
 - The agent's `browser_allow`, which only asks. You answer in the client's own interface or through
   the approval command, and no tool takes "the person said yes" from the agent. See

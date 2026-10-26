@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -21,7 +21,18 @@ from mcp import Client as McpClient
 from mcp_types import ElicitResult
 from proxy_stub import PageServer
 
-from valetkey import clicks, client, daemon, display, login, mcp_server, procs, sessions, sites
+from valetkey import (
+    clicks,
+    client,
+    daemon,
+    display,
+    learn,
+    login,
+    mcp_server,
+    procs,
+    sessions,
+    sites,
+)
 from valetkey.client import DaemonError
 from valetkey.proxy import SeenHost
 
@@ -937,15 +948,20 @@ def test_a_login_learns_a_policy_and_reports_it_once(roots: sites.Roots) -> None
     run(scenario())
 
 
-def make_history(path: Path, urls: list[str]) -> None:
+def make_history(path: Path, urls: list[str], *, after: timedelta = timedelta(seconds=5)) -> None:
+    """A history that visited ``urls`` ``after`` the login began (negative: before it)."""
+    visited = learn.chrome_time(NOW + after)
     database = sqlite3.connect(path)
     database.executescript(
         "CREATE TABLE urls(id INTEGER PRIMARY KEY, url TEXT);"
-        "CREATE TABLE visits(id INTEGER PRIMARY KEY, url INTEGER, transition INTEGER);"
+        "CREATE TABLE visits(id INTEGER PRIMARY KEY, url INTEGER, visit_time INTEGER,"
+        " transition INTEGER);"
     )
     for number, url in enumerate(urls, start=1):
         database.execute("INSERT INTO urls VALUES (?, ?)", (number, url))
-        database.execute("INSERT INTO visits(url, transition) VALUES (?, 1)", (number,))
+        database.execute(
+            "INSERT INTO visits(url, visit_time, transition) VALUES (?, ?, 1)", (number, visited)
+        )
     database.commit()
     database.close()
 
@@ -1034,6 +1050,55 @@ def test_login_errors_become_answers(roots: sites.Roots) -> None:
             assert info.value.code == "x11_only"
             rig.logins.fail = None
             assert (await c.call("login", target="newsite.test"))["window"] == "open"
+
+    run(scenario())
+
+
+def test_a_host_the_profile_visited_before_the_login_is_not_learned(roots: sites.Roots) -> None:
+    add_site(roots, "sitex", allow=("sitex.test",), excluded=("evil.example",))
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("login", target="sitex")
+            (window,) = rig.logins.windows
+            profile = roots.state / "profile"
+            history = profile / "Default" / "History"
+            history.parent.mkdir(parents=True)
+            make_history(history, ["https://sitex.test/signin"])
+            # An earlier login, or an earlier session, went through evil.example; the person has
+            # since denied it, and this login did not touch it.
+            with contextlib.closing(sqlite3.connect(history)) as database:
+                database.execute("INSERT INTO urls VALUES (2, 'https://evil.example/x')")
+                database.execute(
+                    "INSERT INTO visits(url, visit_time, transition) VALUES (2, ?, 1)",
+                    (learn.chrome_time(NOW - timedelta(days=2)),),
+                )
+                database.commit()
+            await window.close_window([SeenHost("sitex.test", 1)], profile)
+            await eventually(lambda: rig.daemon._sites["sitex"].kind == "idle")  # noqa: SLF001
+            policy = sites.load_policy(roots, "sitex")
+            assert policy.allow == ("sitex.test",)
+            assert policy.excluded == ("evil.example",)
+
+    run(scenario())
+
+
+def test_a_login_with_no_recorded_start_saves_nothing_rather_than_everything(
+    roots: sites.Roots,
+) -> None:
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("login", target="newsite.test")
+            (window,) = rig.logins.windows
+            rig.daemon._sites["newsite"].began = None  # noqa: SLF001
+            profile = roots.state / "profile"
+            (profile / "Default").mkdir(parents=True)
+            make_history(profile / "Default" / "History", ["https://newsite.test/signin"])
+            await window.close_window([], profile)
+            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            (entry,) = (await c.call("sites"))["sites"]
+            assert entry["summary"].startswith("The newsite login could not be saved")
+            assert not sites.policy_path(roots, "newsite").exists()
 
     run(scenario())
 
@@ -1795,7 +1860,7 @@ def test_a_login_records_where_forms_were_submitted_from(roots: sites.Roots) -> 
                 database.execute("INSERT INTO urls VALUES (?, ?)", (number, url))
                 database.execute(
                     "INSERT INTO visits VALUES (?, ?, ?, ?, ?)",
-                    (number, number, number, origin, transition),
+                    (number, number, learn.chrome_time(NOW) + number, origin, transition),
                 )
             database.commit()
             database.close()

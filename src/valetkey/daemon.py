@@ -94,6 +94,7 @@ sandbox's die-with-parent rule (see :mod:`valetkey.sessions`); a login does the 
 import asyncio
 import contextlib
 import fcntl
+import functools
 import json
 import logging
 import os
@@ -528,6 +529,9 @@ class _Site:
     start: str = ""
     summary: str | None = None
     since: datetime | None = None
+    began: datetime | None = None
+    """When the login window was asked for, before the browser started. What the login's history
+    holds from then on is what this login did."""
     host: str | None = None
     refused_hosts: dict[str, None] = field(default_factory=dict)
     """Hosts the proxy refused for this site because the policy did not allow them, in any
@@ -1165,6 +1169,7 @@ class Daemon:
                 _fail("login_in_progress", f"a login window for {site} is already open")
             state.kind = "login"
             state.start = start
+            state.began = self._now()
             try:
                 state.window, state.shown = await self._open_window(
                     state, site, start, existing.private_networks if existing else ()
@@ -1294,14 +1299,18 @@ class Daemon:
     def _finisher(self, state: _Site, start: str) -> Callable[[list[Any], Path], Awaitable[None]]:
         async def finish(seen: list[Any], profile: Path) -> None:
             try:
+                if state.began is None:
+                    message = "the time the login began was not recorded"
+                    raise RuntimeError(message)  # noqa: TRY301 - handled below, as any failure is
+                history = profile / "Default" / "History"
                 navigated = await asyncio.to_thread(
-                    learn.navigation_hosts, profile / "Default" / "History"
+                    functools.partial(learn.navigation_hosts, history, since=state.began)
                 )
                 classification = learn.classify(start, [h.host for h in seen], navigated)
                 pages: tuple[str, ...] = ()
                 with contextlib.suppress(sqlite3.DatabaseError):  # the extra is optional
                     pages = await asyncio.to_thread(
-                        learn.login_pages, profile / "Default" / "History", start
+                        functools.partial(learn.login_pages, history, start, since=state.began)
                     )
                 try:
                     existing: sites.Policy | None = await asyncio.to_thread(
