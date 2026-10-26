@@ -542,6 +542,51 @@ def test_start_leaves_a_fresh_private_incoming_folder(tmp_path: Path) -> None:
     assert paths.screenshots_dir.is_dir()
 
 
+def plant_records(paths: sessions.SessionPaths, outside: Path) -> None:
+    paths.screenshots_dir.mkdir(parents=True, exist_ok=True)
+    (paths.screenshots_dir / "fetch-a.har").write_text("{}", encoding="utf-8")
+    (paths.screenshots_dir / "fetch-b.har").write_text("{}", encoding="utf-8")
+    (paths.screenshots_dir / "fetch-link.har").symlink_to(outside / "keep.txt")
+    (paths.screenshots_dir / "fetch-dir.har").mkdir()
+    (paths.screenshots_dir / "shot.png").write_bytes(b"png")
+
+
+def test_a_record_left_by_a_crash_is_deleted_when_a_session_starts(tmp_path: Path) -> None:
+    roots = make_roots(tmp_path)
+    paths = sessions.session_paths(roots, "demo")
+    sites.ensure_downloads(roots, "demo")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    plant_records(paths, outside)
+    sessions._prepare(roots, paths)  # noqa: SLF001
+    assert sorted(p.name for p in paths.screenshots_dir.iterdir()) == [
+        "fetch-dir.har",
+        "fetch-link.har",
+        "shot.png",
+    ]  # only regular fetch-*.har files go; a link or a directory is left, and not followed
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_a_record_left_by_a_crash_is_deleted_when_a_session_closes(tmp_path: Path) -> None:
+    session = make_session(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    plant_records(session.paths, outside)
+    session.close()
+    assert sorted(p.name for p in session.paths.screenshots_dir.iterdir()) == [
+        "fetch-dir.har",
+        "fetch-link.har",
+        "shot.png",
+    ]
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_sweeping_a_directory_that_is_not_there_is_fine(tmp_path: Path) -> None:
+    sessions.sweep_records(tmp_path / "missing")
+
+
 @pytest.mark.parametrize("kind", ["file", "link", "missing"])
 def test_an_incoming_path_that_is_not_a_directory_is_replaced(tmp_path: Path, kind: str) -> None:
     roots = make_roots(tmp_path)

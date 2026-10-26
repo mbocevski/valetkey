@@ -401,6 +401,19 @@ def test_forget_asks_on_a_terminal(
     assert ("Nothing was deleted." in out) is not deleted
 
 
+def test_forget_deletes_a_record_a_crash_left_in_the_screenshots_folder(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed(roots)
+    shots = sites.downloads_path(roots, "sitex") / ".screenshots"
+    shots.mkdir(parents=True, exist_ok=True)
+    (shots / "fetch-left.har").write_text("{}", encoding="utf-8")
+    status, _, _ = run(capsys, "forget", "sitex", "--yes")
+    assert status == 0
+    assert not shots.exists()
+    assert not sites.downloads_path(roots, "sitex").exists()
+
+
 def test_forget_refuses_without_a_terminal(
     roots: sites.Roots, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -783,6 +783,7 @@ class Session:
         self._stop_holder()
         if self._thread is not None:
             self._thread.join(10)
+        sweep_records(self.paths.screenshots_dir)
         shutil.rmtree(self.paths.driver_dir, ignore_errors=True)
         shutil.rmtree(self.paths.directory / "chrome-policy", ignore_errors=True)
         for leftover in (self.paths.log_file, self.paths.config_file):
@@ -1107,6 +1108,20 @@ def _resolve_binary(binary: str) -> str:
     return resolved
 
 
+def sweep_records(directory: Path) -> None:
+    """Delete the ``fetch-*.har`` files in ``directory``, which hold a session's cookies.
+
+    A save deletes its own record, so one is only left when valetkey stopped in the middle of it.
+    Only regular files are removed, and nothing is followed.
+    """
+    with contextlib.suppress(OSError), os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.name.startswith("fetch-") and entry.name.endswith(".har"):
+                with contextlib.suppress(OSError):
+                    if entry.is_file(follow_symlinks=False):
+                        Path(entry.path).unlink()
+
+
 def _prepare(roots: sites.Roots, paths: SessionPaths) -> None:
     """Create the directories a session needs and clear what an earlier session left.
 
@@ -1120,6 +1135,7 @@ def _prepare(roots: sites.Roots, paths: SessionPaths) -> None:
     sites.ensure_downloads(roots, paths.site)
     _fresh_private_dir(paths.incoming_dir)
     paths.screenshots_dir.mkdir(mode=0o700, exist_ok=True)
+    sweep_records(paths.screenshots_dir)
     for directory in (paths.directory, paths.proxy_socket.parent, paths.driver_dir):
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     paths.config_file.write_text("{}\n")
