@@ -590,7 +590,15 @@ def test_an_icon_button_is_found_by_role_and_name(browser: Browser) -> None:
 
 @pytest.mark.integration
 @needs_everything
-def test_a_retry_happens_only_when_nothing_changed(browser: Browser) -> None:
+def test_a_retry_happens_only_when_nothing_changed(
+    browser: Browser, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The page reacts in milliseconds, so a half-second grace shows the same two things as the
+    # real two seconds: a click that does nothing is repeated, and one that shows "Saving" is
+    # waited on, not repeated. The slow page takes 1.3 s, so it is only done after the grace
+    # (with the real two seconds it would be done inside it and never use the longer wait).
+    monkeypatch.setattr(clicks, "GRACE_SECONDS", 0.5)
+    monkeypatch.setattr(clicks, "SETTLE_SECONDS", 2.5)
     flaky = verified_click(
         browser.session, Target("Flaky save", "button"), Expect("text_appears", "Flaky done")
     )

@@ -1484,7 +1484,11 @@ SCRIPT_PAGE = '<title>Captcha</title><p>sign in</p><script src="https://%s/x.js"
 
 
 async def with_real_daemon(
-    roots: sites.Roots, pages: dict[str, str], scenario: Callable[[McpClient], Awaitable[None]]
+    roots: sites.Roots,
+    pages: dict[str, str],
+    scenario: Callable[[McpClient], Awaitable[None]],
+    *,
+    startup_grace: float = daemon.STARTUP_GRACE,
 ) -> None:
     """Run ``scenario`` against a real daemon whose proxy reaches only a local page server."""
     from proxy_stub import PageServer  # noqa: PLC0415 - only the integration tests need it
@@ -1498,7 +1502,7 @@ async def with_real_daemon(
             return await asyncio.open_connection(*server.address)
 
         options = {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
-        service = daemon.Daemon(roots, proxy_options=options)
+        service = daemon.Daemon(roots, proxy_options=options, startup_grace=startup_grace)
         await service.start()
         try:
             params = StdioServerParameters(
@@ -1531,6 +1535,9 @@ def test_a_start_page_that_needs_www_google_com_shows_it_as_refused_on_the_first
 @needs_everything
 @pytest.mark.usefixtures("xdg")
 def test_a_page_that_needs_a_background_host_gets_a_hint_but_start_up_noise_does_not() -> None:
+    # Chrome's request to the updater comes within a second of the start; the grace is half of
+    # the real three seconds, which still leaves it out and keeps the later request in.
+    GRACE = 1.5  # noqa: N806 - a constant of this test
     roots = sites.roots_from_env()
     sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
     pages: dict[str, str] = {**PAGES, "/updater": SCRIPT_PAGE % "update.googleapis.com"}
@@ -1541,7 +1548,7 @@ def test_a_page_that_needs_a_background_host_gets_a_hint_but_start_up_noise_does
         assert "Background" not in opened
         soon = text_of(await mcp.call_tool("browser_snapshot", {"site": "demo"}))
         assert "Background" not in soon
-        await asyncio.sleep(daemon.STARTUP_GRACE + 0.5)
+        await asyncio.sleep(GRACE + 0.5)
         later = text_of(await mcp.call_tool("browser_snapshot", {"site": "demo"}))
         assert "Background" not in later
         # A page that asks for the same host later on is told about, quietly.
@@ -1559,7 +1566,7 @@ def test_a_page_that_needs_a_background_host_gets_a_hint_but_start_up_noise_does
         assert "Background" not in again
         await mcp.call_tool("browser_close", {"site": "demo"})
 
-    run(with_real_daemon(roots, pages, scenario))
+    run(with_real_daemon(roots, pages, scenario, startup_grace=GRACE))
 
 
 # -- asking the person -------------------------------------------------------------------------

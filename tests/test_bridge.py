@@ -721,19 +721,29 @@ def test_hold_gives_up_quietly_when_the_connection_ends_before_the_forward(
 def test_hold_complains_once_about_a_daemon_it_cannot_reach(
     roots: sites.Roots, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    printed: list[str] = []
+
     async def scenario() -> None:
         ended = asyncio.Event()
         with forwarded(roots):
             task = asyncio.ensure_future(
                 bridge.hold(RAND, roots, link=link_for(roots), ended=ended.wait, interval=0.01)
             )
-            await asyncio.sleep(1.5)
+            # It tries every 10 ms. Once the complaint is out, a third of a second more is thirty
+            # more tries, and none of them may complain again.
+            deadline = time.monotonic() + 10
+            while not printed or "valetkey bridge-hold:" not in "".join(printed):
+                assert time.monotonic() < deadline, printed
+                await asyncio.sleep(0.05)
+                printed.append(capsys.readouterr().err)
+            await asyncio.sleep(0.35)
+            printed.append(capsys.readouterr().err)
             ended.set()
             await asyncio.wait_for(task, 10)
 
     run(scenario())
-    err = capsys.readouterr().err
-    assert err.count("valetkey bridge-hold:") == 1
+    printed.append(capsys.readouterr().err)
+    assert "".join(printed).count("valetkey bridge-hold:") == 1
 
 
 def test_hold_stops_on_request(roots: sites.Roots) -> None:
