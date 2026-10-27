@@ -1910,6 +1910,14 @@ class Daemon:
             await window.cancel()
         if watcher is not None:
             await asyncio.gather(watcher, return_exceptions=True)
+        # Once the state is cleared the session and proxy are only in the hands of this call, so
+        # a cancellation (the daemon shutting down while a dead session is being ended, or a
+        # client that went away) must not stop it half way and leave the proxy's socket open.
+        # The shield lets it finish; a later ``_end`` waits for it on ``op_lock``.
+        await asyncio.shield(self._release(state, reason))
+
+    async def _release(self, state: _Site, reason: str | None) -> None:
+        """Close the site's session and proxy and forget them. See :meth:`_end`."""
         async with state.op_lock:
             session, proxy = state.session, state.proxy
             state.session = state.proxy = None

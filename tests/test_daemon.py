@@ -3199,6 +3199,43 @@ def test_a_login_window_is_left_alone_by_the_liveness_check(roots: sites.Roots) 
     run(scenario())
 
 
+def test_a_shutdown_while_a_dead_session_is_being_ended_still_closes_its_proxy(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The poller ends a dead session; shutting down cancels it between the browser and the proxy.
+
+    Without a shield the cancellation arrives while the browser is closing, the proxy is already
+    forgotten by the site and nothing closes it: its listening socket stays open until it is
+    collected, and the ResourceWarning lands on whichever test runs then.
+    """
+    add_site(roots)
+    started, release = threading.Event(), threading.Event()
+
+    async def scenario() -> tuple[Path, daemon.Daemon]:
+        async with serving(roots, poll_interval=0.02) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            first = rig.factory.made[0]
+            close = first.close
+
+            def slow_close() -> None:
+                started.set()
+                release.wait(10)
+                close()
+
+            monkeypatch.setattr(first, "close", slow_close)
+            monkeypatch.setattr(first, "is_alive", lambda: False)
+            await eventually(started.is_set)
+            asyncio.get_running_loop().call_later(0.3, release.set)
+            # Leaving the block shuts the daemon down while the poller is in `session.close`.
+            return session_socket(roots, "sitex"), rig.daemon
+        raise AssertionError  # pragma: no cover
+
+    socket_path, server = run(scenario())
+    assert not socket_path.exists()
+    assert server._sites["sitex"].proxy is None  # noqa: SLF001
+    assert server._sites["sitex"].kind == "idle"  # noqa: SLF001
+
+
 def test_a_failing_liveness_check_is_logged_and_the_next_one_runs(
     roots: sites.Roots, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
