@@ -28,6 +28,7 @@ from valetkey import (
     client,
     daemon,
     display,
+    download_ops,
     learn,
     login,
     mcp_server,
@@ -2699,10 +2700,10 @@ def test_only_the_first_unsaved_downloads_are_named_but_all_are_counted(
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("open", site="sitex")
-            rig.factory.made[0].attached = daemon.MAX_STARTED + 5
+            rig.factory.made[0].attached = download_ops.MAX_STARTED + 5
             result = await c.call("navigate", site="sitex", url="https://sitex.test/x")
-            assert result["downloads"]["unsaved"] == daemon.MAX_STARTED + 5
-            assert len(result["downloads"]["started"]) == daemon.MAX_STARTED
+            assert result["downloads"]["unsaved"] == download_ops.MAX_STARTED + 5
+            assert len(result["downloads"]["started"]) == download_ops.MAX_STARTED
 
     run(scenario())
 
@@ -2743,14 +2744,14 @@ def test_counting_attachments_never_fails_the_call(roots: sites.Roots) -> None:
             await c.call("open", site="sitex")
             state = rig.daemon.registry.sites["sitex"]
             session = rig.factory.made[0]
-            assert await rig.daemon._started(state) == []  # noqa: SLF001
+            assert await rig.daemon.downloads.started(state) == []
             session.attached = 3
-            assert len(await rig.daemon._started(state)) == 3  # noqa: SLF001
+            assert len(await rig.daemon.downloads.started(state)) == 3
 
             session.attach_error = sessions.AgentBrowserError("gone")
-            assert await rig.daemon._started(state) == []  # noqa: SLF001
+            assert await rig.daemon.downloads.started(state) == []
             await c.call("close", site="sitex")
-            assert await rig.daemon._started(state) == []  # noqa: SLF001
+            assert await rig.daemon.downloads.started(state) == []
 
     run(scenario())
 

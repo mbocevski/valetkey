@@ -157,6 +157,7 @@ from valetkey import (
 )
 from valetkey.approval_ops import Approvals, Notifier
 from valetkey.client import MAX_LINE_BYTES, DaemonError
+from valetkey.download_ops import Downloads
 from valetkey.protocol import (
     BrowserSession,
     LoginWindow,
@@ -201,8 +202,6 @@ RESOLVE_SECONDS = 10.0
 _MAX_NAMED_HOSTS = 5
 SNAPSHOT_LIMIT = 40_000
 """The most characters of a page's tree a snapshot answer holds; more is cut at a node."""
-MAX_STARTED = 10
-"""The most unsaved downloads a result names; the count is always complete."""
 SD_LISTEN_FDS_START = 3
 """The first file descriptor systemd passes to a socket-activated service."""
 STATES = ("idle", "login", "session")
@@ -374,11 +373,6 @@ def _refused_target(message: str, url: str | None, refused: Sequence[dict[str, A
     return host if any(entry["host"] == host for entry in refused) else None
 
 
-def _download_entry(item: downloads.Download) -> dict[str, Any]:
-    """Describe a download for a client. The page chose the name in the path, so it is untrusted."""
-    return {"path": untrusted(str(item.path)), "size": item.size, "mime": item.mime}
-
-
 def _closed_for_login(error: Exception) -> DaemonError:
     """Return ``error`` as the daemon would answer it, saying the running session was closed."""
     mapped = map_error(error)
@@ -478,8 +472,6 @@ class Daemon:
         self._startup_grace = startup_grace
         self._peer_uid = peer_uid
         self._now = now
-        self._download_settle = download_settle
-        self._download_wait = download_wait
         self._announcer = announcer or announce_session
         self._poll_interval = poll_interval
         self._idle_limit = (
@@ -488,6 +480,7 @@ class Daemon:
         self._idle_given = idle_limit is not None
         self._idle_clock = idle_clock
         self.registry = Registry(roots, now=now, idle_clock=idle_clock)
+        self.downloads = Downloads(self.registry, settle=download_settle, wait=download_wait)
         self.approvals = Approvals(
             self.registry,
             approve_timeout=approve_timeout,
@@ -516,7 +509,7 @@ class Daemon:
             "close": self._op_close,
             "reload_policy": self._op_reload_policy,
             "login": self._op_login,
-            "downloads": self._op_downloads,
+            "downloads": self.downloads.op_downloads,
             "allow_check": self.approvals.op_allow_check,
             "allow_apply": self.approvals.op_allow_apply,
             "allow_ask": self.approvals.op_allow_ask,
@@ -1482,7 +1475,7 @@ class Daemon:
         generation, known = connection.refs.get(state.name, (-1, {}))
         target = clicks.build_target(args, known if generation == state.generation else {})
         expect = clicks.parse_expectation(args.get("expect"))
-        seen = await self._seen_downloads(connection, state.name)
+        seen = await self.downloads.seen_downloads(connection, state.name)
         result = await self._session_op(
             connection,
             state,
@@ -1493,7 +1486,7 @@ class Daemon:
         result["attempts"] = done.attempts
         result["expect"] = done.expect.to_json() if done.expect else None
         result["outcome"] = done.outcome
-        result["downloads"] = await self._new_downloads(connection, state, seen)
+        result["downloads"] = await self.downloads.new_downloads(connection, state, seen)
         return result
 
     async def _op_save(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
@@ -1502,7 +1495,7 @@ class Daemon:
         if (ref is None) == (url is None):
             fail("bad_request", 'give either "ref" or "url", not both and not neither')
         wanted = string_arg(args, "ref" if ref is not None else "url")
-        seen = await self._seen_downloads(connection, state.name)
+        seen = await self.downloads.seen_downloads(connection, state.name)
 
         folder = sites.downloads_path(self.roots, state.name)
 
@@ -1528,7 +1521,7 @@ class Daemon:
 
         result = await self._session_op(connection, state, _watching(fetch))
         result["source"] = untrusted(result.pop("_value"))
-        found = await self._new_downloads(connection, state, seen)
+        found = await self.downloads.new_downloads(connection, state, seen)
         result["downloads"] = found
         if not (found["new"] or found["in_progress"] or found["unsaved"]):
             code = "not_saved"
@@ -1558,7 +1551,7 @@ class Daemon:
     async def _op_navigate(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         state = self.registry.state(self.registry.site_of(args))
         url = string_arg(args, "url")
-        seen = await self._seen_downloads(connection, state.name)
+        seen = await self.downloads.seen_downloads(connection, state.name)
         self.registry.skip_refusals_so_far(connection, state)
         try:
             result = await self._session_op(
@@ -1572,118 +1565,14 @@ class Daemon:
                     "page": {"title": untrusted("")},
                     "not_loaded": host,
                 }
-            return await self._navigation_that_downloaded(connection, state, seen, error)
+            return await self.downloads.navigation_that_downloaded(connection, state, seen, error)
         page: sessions.Page = result.pop("_value")
         result["url"] = page.url
         result["page"] = {"title": untrusted(page.title)}
-        result["downloads"] = await self._new_downloads(connection, state, seen, unprompted=True)
+        result["downloads"] = await self.downloads.new_downloads(
+            connection, state, seen, unprompted=True
+        )
         return result
-
-    async def _navigation_that_downloaded(
-        self,
-        connection: Connection,
-        state: Site,
-        seen: dict[str, downloads.Signature],
-        error: DaemonError,
-    ) -> dict[str, Any]:
-        """Turn the failure of a navigation that became a download into an answer.
-
-        A URL that answers with an attachment is not a page: the browser aborts the navigation
-        and starts a download. If a download did start, say so instead of reporting a failure;
-        otherwise the failure stands.
-        """
-        if error.code != "browser_error" or "ERR_ABORTED" not in error.message:
-            raise error
-        found = await self._new_downloads(connection, state, seen, self._download_settle * 4)
-        if not (found["new"] or found["in_progress"] or found["unsaved"]):
-            raise error
-        envelope = {k: error.details[k] for k in ("site", "contained", "url", "refused")}
-        return envelope | {
-            "page": {"title": untrusted("")},
-            "downloads": found,
-            "download_only": True,
-        }
-
-    async def _seen_downloads(
-        self, connection: Connection, site: str
-    ) -> dict[str, downloads.Signature]:
-        """Return the downloads this client already knows of, starting from what is there now."""
-        directory = sites.downloads_path(self.roots, site)
-        if site not in connection.seen_downloads:
-            connection.seen_downloads[site] = await asyncio.to_thread(downloads.snapshot, directory)
-        return connection.seen_downloads[site]
-
-    async def _new_downloads(
-        self,
-        connection: Connection,
-        state: Site,
-        seen: dict[str, downloads.Signature],
-        settle: float | None = None,
-        *,
-        unprompted: bool = False,
-    ) -> dict[str, Any]:
-        """Report the files that arrived since ``seen``, waiting a little for running ones.
-
-        Responses logged since the call began that said ``attachment`` are the downloads the
-        browser started. Any beyond the files that arrived and the ones still running are
-        counted as ``unsaved``: the browser started a download and nothing was written, as it
-        does when the file name is too long. Then ``started`` lists them (at most
-        :data:`MAX_STARTED`, untrusted), and ``by_page`` says the call was one that clicks nothing,
-        so the page started them itself.
-        """
-        site = state.name
-        paths = sessions.session_paths(self.roots, site)
-        found = await asyncio.to_thread(
-            downloads.collect,
-            paths.downloads_dir,
-            seen,
-            incoming=paths.incoming_dir,
-            settle=self._download_settle if settle is None else settle,
-            finish=self._download_wait,
-        )
-        connection.seen_downloads[site] = found.seen
-        started = await self._started(state)
-        report: dict[str, Any] = {
-            "new": [_download_entry(item) for item in found.new],
-            "in_progress": [_download_entry(item) for item in found.in_progress],
-            "unsaved": max(0, len(started) - len(found.new) - len(found.in_progress)),
-        }
-        if report["unsaved"]:
-            report["started"] = [
-                {"url": untrusted(item.url), "name": untrusted(item.name)}
-                for item in started[:MAX_STARTED]
-            ]
-            report["by_page"] = unprompted
-        return report
-
-    async def _started(self, state: Site) -> list[sessions.Attachment]:
-        """List the responses logged since the call began that the browser turns into downloads."""
-        session = state.session
-        if session is None:
-            return []
-        with contextlib.suppress(sessions.AgentBrowserError, sessions.SessionError):
-            return await asyncio.to_thread(session.started_downloads)
-        return []
-
-    async def _op_downloads(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
-        site = self.registry.site_of(args)
-        seen = await self._seen_downloads(connection, site)
-        paths = sessions.session_paths(self.roots, site)
-        found = await asyncio.to_thread(
-            downloads.collect,
-            paths.downloads_dir,
-            seen,
-            incoming=paths.incoming_dir,
-            finish=self._download_wait,
-        )
-        connection.seen_downloads[site] = found.seen
-        fresh = {item.name for item in found.new}
-        files = [_download_entry(item) | {"new": item.name in fresh} for item in found.everything]
-        return {
-            "site": site,
-            "files": files,
-            "in_progress": [_download_entry(item) for item in found.in_progress],
-        }
 
     async def _op_screenshot(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         state = self.registry.state(self.registry.site_of(args))
