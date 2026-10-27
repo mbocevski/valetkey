@@ -1,0 +1,150 @@
+- LayoutTable
+  - LayoutTableRow
+    - LayoutTableCell "item1 item2 | item3 | item4 | item5 | item6 | item7 | item8 item9"
+      - LayoutTable
+        - LayoutTableRow
+          - LayoutTableCell
+            - link [ref=e102]
+              - image
+          - LayoutTableCell "item1 item2 | item3 | item4 | item5 | item6 | item7 | item8"
+            - link "item1 item10" [ref=e103]
+            - link "item11" [ref=e104]
+            - StaticText " | "
+            - link "item3" [ref=e105]
+            - StaticText " | "
+            - link "item4" [ref=e106]
+            - StaticText " | "
+            - link "item5" [ref=e107]
+            - StaticText " | "
+            - link "item6" [ref=e108]
+            - StaticText " | "
+            - link "item7" [ref=e109]
+            - StaticText " | "
+            - link "item8" [ref=e110]
+          - LayoutTableCell "item9"
+            - link "item9" [ref=e111]
+  - LayoutTableRow
+  - LayoutTableRow
+    - LayoutTableCell
+      - table
+        - row
+          - cell "item12." [ref=e11]
+          - cell
+            - link [ref=e263]
+          - cell "item13 item11 item14 item15 item16, item17 item18, item19 item20 (item21.item22)" [ref=e12]
+            - link "item13 item11 item14 item15 item16, item17 item18, item19 item20" [ref=e112]
+            - StaticText " ("
+            - link "item21.item22" [ref=e113]
+            - StaticText ")"
+        - row
+          - cell
+          - cell "item23 item24 item25 item26 item27 item28 item29 | item30 | item31 item4" [ref=e13]
+            - StaticText "item23 item24"
+            - StaticText " item25 "
+            - link "item26" [ref=e114]
+            - link "item27 item28 item29" [ref=e264]
+            - StaticText "| "
+            - link "item30" [ref=e115]
+            - StaticText " | "
+            - link "item31 item4" [ref=e116]
+        - row
+        - row
+          - cell "item32." [ref=e14]
+          - cell
+            - link [ref=e265]
+          - cell "item33 item34 item35 item36 item37 item38 [item39] (item40.item22/item21)" [ref=e15]
+            - link "item33 item34 item35 item36 item37 item38 [item39]" [ref=e117]
+            - StaticText " ("
+            - link "item40.item22/item21" [ref=e118]
+            - StaticText ")"
+        - row
+          - cell
+          - cell "item41 item24 item25 item42 item27 item28 item29 | item30 | item43 item4" [ref=e16]
+            - StaticText "item41 item24"
+            - StaticText " item25 "
+            - link "item42" [ref=e119]
+            - link "item27 item28 item29" [ref=e266]
+            - StaticText "| "
+            - link "item30" [ref=e120]
+            - StaticText " | "
+            - link "item43 item4" [ref=e121]
+        - row
+        - row
+          - cell "item44." [ref=e17]
+          - cell
+            - link [ref=e267]
+          - cell "item45 item46 item47 item48 item49 item50 item51 item52 item53 (item54.item55)" [ref=e18]
+            - link "item45 item46 item47 item48 item49 item50 item51 item52 item53" [ref=e122]
+            - StaticText " ("
+            - link "item54.item55" [ref=e123]
+            - StaticText ")"
+        - row
+          - cell
+          - cell "item56 item24 item25 item57 item12 item58 item29 | item30 | item59 item4" [ref=e19]
+            - StaticText "item56 item24"
+            - StaticText " item25 "
+            - link "item57" [ref=e124]
+            - link "item12 item58 item29" [ref=e268]
+            - StaticText "| "
+            - link "item30" [ref=e125]
+            - StaticText " | "
+            - link "item59 item4" [ref=e126]
+        - row
+        - row
+          - cell "item60." [ref=e20]
+          - cell
+            - link [ref=e269]
+          - cell "item61 item62'item63 item64-item65 item66 item67 item68 item69 item70 item71 (item72.item22)" [ref=e21]
+            - link "item61 item62'item63 item64-item65 item66 item67 item68 item69 item70 item71" [ref=e127]
+            - StaticText " ("
+            - link "item72.item22" [ref=e128]
+            - StaticText ")"
+        - row
+          - cell
+          - cell "item73 item24 item25 item74 item75 item28 item29 | item30 | item76 item4" [ref=e22]
+            - StaticText "item73 item24"
+            - StaticText " item25 "
+            - link "item74" [ref=e129]
+            - link "item75 item28 item29" [ref=e270]
+            - StaticText "| "
+            - link "item30" [ref=e130]
+            - StaticText " | "
+            - link "item76 item4" [ref=e131]
+        - row
+        - row
+          - cell "item48." [ref=e23]
+          - cell
+            - link [ref=e271]
+          - cell "item77 item78 item79 item80 item81 item82 item68 item83 item84 (item85.item22)" [ref=e24]
+            - link "item77 item78 item79 item80 item81 item82 item68 item83 item84" [ref=e132]
+            - StaticText " ("
+            - link "item85.item22" [ref=e133]
+            - StaticText ")"
+        - row
+          - cell
+          - cell "item86 item24 item25 item85 item87 item28 item29 | item30 | item88 item4" [ref=e25]
+            - StaticText "item86 item24"
+            - StaticText " item25 "
+            - link "item85" [ref=e134]
+            - link "item87 item28 item29" [ref=e272]
+            - StaticText "| "
+            - link "item30" [ref=e135]
+            - StaticText " | "
+            - link "item88 item4" [ref=e136]
+        - row
+        - row
+          - cell "item89." [ref=e26]
+          - cell
+            - link [ref=e273]
+          - cell "item90-item91 item83 (item83 item12.item92, item32.item92, item44.item93, item44.item12, item94.) item68 item95-item91 item83 (item40.item22/item96)" [ref=e27]
+            - link "item90-item91 item83 (item83 item12.item92, item32.item92, item44.item93, item44.item12, item94.) item68 item95-item91 item83" [ref=e137]
+            - StaticText " ("
+            - link "item40.item22/item96" [ref=e138]
+            - StaticText ")"
+        - row
+          - cell
+          - cell "item97 item24 item25 item98 item60 item28 item29 | item30 | item48 item4" [ref=e28]
+            - StaticText "item97 item24"
+            - StaticText " item25 "
+            - link "item98" [ref=e139]
+            - link "item60 item28 item29" [ref=e274]

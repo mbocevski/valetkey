@@ -66,6 +66,8 @@ def test_a_snapshot_has_the_pages_text_and_its_references_work(short_dir: Path) 
                         "42.00",
                     ):
                         assert text in tree
+                    assert 'StaticText "Inbox"' not in tree  # it repeats the link's name
+                    assert 'link "Inbox" [ref=' in tree
                     short = await c.call("snapshot", site="demo", interactive=True)
                     assert "Signed in as tester." not in short["snapshot"]["text"]
                     assert 'link "Inbox"' in short["snapshot"]["text"]

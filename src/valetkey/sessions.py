@@ -951,8 +951,11 @@ class Session:
 
         With ``interactive`` (the default, which a click looks its target up in) only the
         elements one can act on are listed. Without it the whole tree is, with the page's text
-        in it: paragraphs, lists and tables. The references are the same kind either way.
+        in it: paragraphs, lists and tables. The references are the same kind either way. The
+        tree is agent-browser's own text; the daemon trims it (see :mod:`valetkey.treetrim`).
         """
+        # Not ``-c``: agent-browser's compact mode drops text with no reference above it, such as
+        # the second item of a list or a page's footer (0.39). The daemon trims the tree instead.
         return parse_snapshot(self._call("snapshot", *(["-i"] if interactive else [])))
 
     def outline(self) -> str:

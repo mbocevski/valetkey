@@ -1117,6 +1117,22 @@ def test_a_login_with_no_screen_leaves_the_running_session_alone(roots: sites.Ro
     run(scenario())
 
 
+def test_a_snapshot_is_trimmed_before_it_is_cut(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            rig.factory.made[
+                0
+            ].tree = '- main\n  - generic\n    - link "Home" [ref=e1]\n      - StaticText "Home"'
+            snap = await c.call("snapshot", site="sitex")
+            assert snap["snapshot"]["text"] == '- main\n - link "Home" [ref=e1]'
+            assert "cut" not in snap
+
+    run(scenario())
+
+
 def test_a_login_is_refused_without_the_public_suffix_list_but_a_known_site_opens(
     roots: sites.Roots, suffix_list: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

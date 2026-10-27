@@ -44,6 +44,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Changed
 
+- `browser_snapshot` is 15 to 40% shorter: it leaves out unnamed layout nodes and text that repeats its parent's name, and nests one space per level, keeping every reference and all other text.
 - A `browser_click` whose `expect` does not come true now takes one snapshot per check, with growing pauses, and at most 15 checks, so it starts far fewer browser programs in the same time.
 - The public suffix list (`publicsuffix-list`, or `publicsuffix` on Debian and Ubuntu) is now required; `valetkey doctor` checks it, and `valetkey allow` and `valetkey add` refuse a public suffix.
 - `browser_open` and `browser_navigate` label the page title as the title and tell the agent to call `browser_snapshot` to read the page.

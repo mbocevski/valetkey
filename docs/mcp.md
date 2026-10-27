@@ -62,8 +62,10 @@ when they were cut. Percent-encoded text is shown as it is, never decoded. When 
 `browser_open` and `browser_navigate` then give only its title, labelled as the title, with a line
 that says to call `browser_snapshot` to read the page. When none loaded (an expired login, a
 refused start page, or an address that only started a download), the title, `URL: (none)` and an
-empty list of refused hosts are left out. A snapshot of more than 40,000 characters is cut at the
-end of a line, with a note of how much was left out.
+empty list of refused hosts are left out. A snapshot leaves out unnamed layout nodes and text that
+repeats its parent's name, and nests one space per level; every reference and all other text
+stay. One of more than 40,000 characters is cut at the end of a line, with a note of how much was
+left out.
 
 When a page could not load because its host is refused, the first line says so and names the host
 and the site, as in `The page did not load: example.org is not allowed for sitex.` The refused

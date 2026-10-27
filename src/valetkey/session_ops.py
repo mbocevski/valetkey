@@ -25,6 +25,7 @@ from valetkey import (
     sandbox,
     sessions,
     sites,
+    treetrim,
 )
 from valetkey.client import DaemonError
 from valetkey.protocol import BrowserSession, fail, map_error, refused_entry, string_arg, untrusted
@@ -441,7 +442,7 @@ class Sessions:
                 for item in found
             ]
         result["url"] = snap.url
-        tree, left_out = cut_tree(snap.tree)
+        tree, left_out = cut_tree(treetrim.trim_tree(snap.tree))
         result["snapshot"] = untrusted(tree)
         if left_out is not None:
             result["cut"] = {"lines": left_out[0], "characters": left_out[1]}
