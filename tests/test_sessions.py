@@ -764,7 +764,7 @@ def test_the_session_has_no_eval_or_passthrough() -> None:
         "start", "is_alive", "watches_browser", "close", "open", "snapshot", "outline", "click",
         "fill", "press_enter",
         "current_url", "screenshot", "clear_requests", "started_downloads", "password_fields",
-        "resource_url", "images", "fetch", "look", "snapshot_delta", "title",
+        "resource_url", "images", "fetch", "look", "snapshot_delta", "title", "match_count",
     }  # fmt: skip
 
 
@@ -825,6 +825,23 @@ def test_a_selector_that_matches_nothing_says_so_in_plain_words(
     monkeypatch.setattr(session, "_call", broken)
     with pytest.raises(failure, match="Invalid selector"):
         session.snapshot(interactive=False, selector="div[")
+
+
+def test_the_matches_of_a_selector_are_counted_by_the_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = make_session(tmp_path)
+    asked: list[tuple[str, ...]] = []
+
+    def answer(*verb: str, timeout: float | None = None) -> dict[str, Any]:  # noqa: ARG001
+        asked.append(verb)
+        return {"count": 18}
+
+    monkeypatch.setattr(session, "_call", answer)
+    assert session.match_count("article") == 18
+    assert asked == [("get", "count", "article")]
+    monkeypatch.setattr(session, "_call", lambda *_v, **_k: {})
+    assert session.match_count("article") == 0
 
 
 def test_a_selector_that_starts_with_a_dash_never_reaches_agent_browser(tmp_path: Path) -> None:

@@ -968,6 +968,31 @@ def test_a_snapshot_can_be_scoped_and_says_so(short_dir: Path) -> None:
     run(scenario())
 
 
+def test_a_scope_with_several_matches_says_only_the_first_is_shown(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["snapshot"] = lambda a: (
+                ENVELOPE
+                | {"snapshot": {"untrusted": True, "text": '- article "Shoe" [ref=e2]'}}
+                | {"scope": a["selector"]}
+                | ({"matches": 18} if a["selector"] == "article" else {})
+            )
+            many = text_of(
+                await mcp.call_tool("browser_snapshot", {"site": "sitex", "selector": "article"})
+            )
+            assert (
+                "Scope: article (the first of 18 matches; use a selector for the element that "
+                "holds them all to see more)"
+            ) in many.splitlines()
+            one = text_of(
+                await mcp.call_tool("browser_snapshot", {"site": "sitex", "selector": "#list"})
+            )
+            assert "Scope: #list" in one.splitlines()
+            assert "matches" not in one
+
+    run(scenario())
+
+
 def test_a_later_part_of_a_tree_says_it_was_taken_again(short_dir: Path) -> None:
     async def scenario() -> None:
         async with connected(short_dir) as (mcp, fake, _bridge):

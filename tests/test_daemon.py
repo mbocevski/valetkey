@@ -264,12 +264,13 @@ class FakeSession:
         self.delta_fails: Exception | None = None
         self.parts: dict[str, tuple[str, dict[str, sessions.Ref]]] = {}
         """The tree and the references of the part of the page each selector matches."""
-        self.attached = 0
+        self.counts: dict[str, int] = {}
+        """How many elements each selector matches; one when it is not here."""
+        self.count_fails: Exception | None = None
+        self.attached = self.passwords = 0
         self.attach_names: list[str] | None = None
-        self.passwords = 0
         self.attach_error: Exception | None = None
-        self.active = 0
-        self.most_active = 0
+        self.active = self.most_active = 0
         self._lock = threading.Lock()
 
     def _use(self, *call: Any) -> None:  # noqa: ANN401 - whatever the call was
@@ -297,6 +298,12 @@ class FakeSession:
         if self.on_open is not None:
             self.on_open()
         return sessions.Page(url, f"Title of {url}")
+
+    def match_count(self, selector: str) -> int:
+        self._use("match_count", selector)
+        if self.count_fails is not None:
+            raise self.count_fails
+        return self.counts.get(selector, 1)
 
     def snapshot(
         self, *, interactive: bool = True, selector: str | None = None
@@ -1392,6 +1399,56 @@ def test_a_snapshot_can_be_scoped_to_one_part_of_the_page(roots: sites.Roots) ->
             assert asked == [("snapshot", False, "#form")]
             whole = await c.call("snapshot", site="sitex")
             assert "scope" not in whole
+
+    run(scenario())
+
+
+def test_a_selector_that_matches_several_elements_says_how_many(roots: sites.Roots) -> None:
+    add_site(roots)
+    card = ('- article "Shoe"', {"e2": sessions.Ref("link", "Shoe")})
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.parts["article"] = card
+            session.parts["#one"] = card
+            session.counts["article"] = 18
+            many = await c.call("snapshot", site="sitex", selector="article")
+            assert many["matches"] == 18
+            assert many["scope"] == "article"
+            one = await c.call("snapshot", site="sitex", selector="#one")
+            assert "matches" not in one  # a single match is the plain scope
+            assert one["scope"] == "#one"
+            counted = [call for call in session.calls if call[0] == "match_count"]
+            assert counted == [("match_count", "article"), ("match_count", "#one")]
+            await c.call("snapshot", site="sitex")
+            assert [call for call in session.calls if call[0] == "match_count"] == counted
+
+    run(scenario())
+
+
+def test_a_snapshot_goes_ahead_when_the_matches_cannot_be_counted(
+    roots: sites.Roots, caplog: pytest.LogCaptureFixture
+) -> None:
+    add_site(roots)
+    caplog.set_level("WARNING", logger="valetkey.daemon")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.parts["article"] = ('- article "Shoe"', {})
+            session.counts["article"] = 18
+            session.count_fails = sessions.AgentBrowserError("no count today")
+            result = await c.call("snapshot", site="sitex", selector="article")
+            assert result["scope"] == "article"
+            assert "matches" not in result
+            assert "counting the matches of a selector failed" in caplog.text
+            # A selector that matches nothing is still the snapshot's own error.
+            with pytest.raises(DaemonError) as info:
+                await c.call("snapshot", site="sitex", selector="#nope")
+            assert info.value.code == "browser_error"
 
     run(scenario())
 

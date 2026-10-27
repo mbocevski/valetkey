@@ -223,6 +223,20 @@ def _add_part_of_tree(result: dict[str, Any], tree: str, start_line: int) -> Non
         }
 
 
+def _count_matches(session: BrowserSession, selector: str) -> int | None:
+    """Count the elements ``selector`` matches, or ``None`` when that cannot be told.
+
+    A snapshot of a selector shows the first element it matches, so the agent is told when there
+    are more. The count is no reason to refuse the snapshot: a selector that is not valid fails
+    in the snapshot itself, with its own message.
+    """
+    try:
+        return session.match_count(selector)
+    except sessions.AgentBrowserError, sessions.SessionError, OSError:
+        logger.warning("counting the matches of a selector failed", exc_info=True)
+        return None
+
+
 def _start_line_arg(args: dict[str, Any]) -> int:
     """Return the ``start_line`` argument of a snapshot: the first line to read, 1 by default."""
     start = args.get("start_line", 1)
@@ -504,17 +518,19 @@ class Sessions:
 
         def look(
             session: BrowserSession,
-        ) -> tuple[sessions.SnapshotDelta | sessions.Snapshot, list[dict[str, Any]]]:
+        ) -> tuple[sessions.SnapshotDelta | sessions.Snapshot, list[dict[str, Any]], int | None]:
             pictures_found = session.images() if pictures else []
             if selector is not None:
                 # One part of the page is not the tree later deltas change, so it leaves the
                 # baseline alone.
-                return session.snapshot(interactive=interactive, selector=selector), pictures_found
+                matches = _count_matches(session, selector)
+                shown = session.snapshot(interactive=interactive, selector=selector)
+                return shown, pictures_found, matches
             # In full, so that it is the whole tree and the baseline later deltas change.
-            return session.snapshot_delta(interactive=interactive, full=True), pictures_found
+            return session.snapshot_delta(interactive=interactive, full=True), pictures_found, None
 
         result = await self.session_op(connection, state, look)
-        answer, found = result.pop("_value")
+        answer, found, matches = result.pop("_value")
         if selector is None:
             snap = cast("sessions.Snapshot", answer.snapshot)
             connection.views[state.name] = deltas.start(state.generation, interactive, answer)
@@ -531,6 +547,8 @@ class Sessions:
         known = connection.refs.get(state.name)
         if selector is not None:
             result["scope"] = selector
+            if matches is not None and matches > 1:
+                result["matches"] = matches  # a snapshot shows only the first of them
             if known is not None and known[0] == state.generation and known[2] == snap.url:
                 table = known[1] | table  # the earlier refs of this page stay usable
         # The table holds the refs of the whole tree, not only of the lines shown below.

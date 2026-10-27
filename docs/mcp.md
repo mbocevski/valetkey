@@ -125,7 +125,9 @@ list of hosts. You can start it with the hosts of another account using
 
 `browser_snapshot` takes a `selector`: a CSS selector of 1 to 500 characters, with no newline, that
 does not start with a dash. The tree is then only the part of the page under the first element it
-matches, and the result has a `Scope:` line after the URL lines. The references of that tree are
+matches, and the result has a `Scope:` line after the URL lines. When the selector matches more than
+one element, the line says "the first of N matches". A selector for the element that holds them all,
+such as a list or a table, shows more. The references of that tree are
 added to the ones the client already has for the page, so a reference from an earlier whole-page
 snapshot still works. A whole-page snapshot, or one of another page, starts the table again. A
 selector that matches nothing is a `browser_error`: "No element on the page matches the selector".

@@ -28,6 +28,8 @@ FORM = (
     b"<form id='prefs'><label>Name <input name='n'></label>"
     b"<button type='button' onclick=\"document.getElementById('r').textContent='Saved'\">"
     b"Save</button></form><p id='r'></p>"
+    b"<main id='list'><article><h2>One</h2></article><article><h2>Two</h2></article>"
+    b"<article><h2>Three</h2></article></main>"
 )
 PAGES = {
     "/": ({"Content-Type": "text/html"}, PAGE),
@@ -125,6 +127,13 @@ def test_a_snapshot_scoped_to_a_form_has_refs_that_can_be_clicked(short_dir: Pat
                     assert done["outcome"] == "met"
                     # The part did not move the baseline, so the click's change is a delta.
                     assert done["change"]["kind"] == "delta"
+                    many = await c.call("snapshot", site="demo", selector="article")
+                    assert many["matches"] == 3  # only the first is shown
+                    assert "One" in many["snapshot"]["text"]
+                    assert "Two" not in many["snapshot"]["text"]
+                    holder = await c.call("snapshot", site="demo", selector="#list")
+                    assert "matches" not in holder  # one element: the one that holds them all
+                    assert "Three" in holder["snapshot"]["text"]
                     with pytest.raises(client.DaemonError) as info:
                         await c.call("snapshot", site="demo", selector="#nothing-here")
                     assert info.value.code == "browser_error"

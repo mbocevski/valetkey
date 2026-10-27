@@ -1128,6 +1128,15 @@ class Session:
         """
         return int(self._call("get", "count", "input[type=password]").get("count") or 0)
 
+    def match_count(self, selector: str) -> int:
+        """Count the elements that the CSS ``selector`` matches on the page.
+
+        Raises:
+            AgentBrowserError: when the selector is not valid.
+
+        """
+        return int(self._call("get", "count", selector).get("count") or 0)
+
     def clear_requests(self) -> None:
         """Forget the network requests logged so far, so the next count starts from here."""
         self._call("network", "requests", "--clear")

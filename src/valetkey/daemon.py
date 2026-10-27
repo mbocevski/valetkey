@@ -21,7 +21,8 @@ profile.
   ``images``, the biggest pictures and videos on the page, each ``{kind, alt, url, width,
   height}`` with ``alt`` and ``url`` untrusted. With ``selector``, a CSS selector, the tree is
   only the part of the page under the first element it matches, the answer has ``scope`` (the
-  selector) and its references are added to the client's table for the page; a selector that
+  selector), ``matches`` (how many elements it matches, when more than one: only the first is
+  shown) and its references are added to the client's table for the page; a selector that
   matches nothing is a ``browser_error``.
 * ``save`` ``{ref | url}``: save what an address serves into the site's downloads directory,
   by the contained browser and its proxy, so only hosts the site may reach work. ``ref`` is an

@@ -54,6 +54,9 @@ class BrowserSession(Protocol):
     def password_fields(self) -> int:
         """Count the password fields on the page."""
 
+    def match_count(self, selector: str) -> int:
+        """Count the elements that the CSS ``selector`` matches."""
+
     def clear_requests(self) -> None:
         """Forget the logged network requests."""
 
