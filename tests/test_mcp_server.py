@@ -19,7 +19,7 @@ from mcp import Client as McpClient
 from mcp.client.stdio import StdioServerParameters
 from mcp_types import ElicitResult, ImageContent
 
-from valetkey import client, daemon, mcp_server, sessions, sites
+from valetkey import client, daemon, mcp_server, session_ops, sessions, sites
 from valetkey.client import DaemonError
 from valetkey.gateway import Gateway
 from valetkey.mcp_server import Bridge, build_server
@@ -1977,7 +1977,7 @@ async def with_real_daemon(
     pages: dict[str, str],
     scenario: Callable[[McpClient], Awaitable[None]],
     *,
-    startup_grace: float = daemon.STARTUP_GRACE,
+    startup_grace: float = session_ops.STARTUP_GRACE,
 ) -> None:
     """Run ``scenario`` against a real daemon whose proxy reaches only a local page server."""
     from proxy_stub import PageServer  # noqa: PLC0415 - only the integration tests need it

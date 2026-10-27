@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import leftovers
 import pytest
 
-from valetkey import daemon, notify, sites
+from valetkey import notify, session_ops, sites
 
 pytest_plugins = ["pytester", "require_integration"]
 
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterator
     from typing import Any
 
-_REAL_ANNOUNCE = daemon.announce_session
+_REAL_ANNOUNCE = session_ops.announce_session
 REAL_USER_SESSION = {
     name: os.environ[name]
     for name in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
@@ -155,7 +155,7 @@ def announcements(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     async def record(site: str) -> None:
         sent.append(site)
 
-    monkeypatch.setattr(daemon, "announce_session", record)
+    monkeypatch.setattr(session_ops, "announce_session", record)
     return sent
 
 
@@ -238,5 +238,5 @@ def no_real_session_bus(
 
 @pytest.fixture
 def real_announce() -> Callable[..., Coroutine[Any, Any, None]]:
-    """The real :func:`valetkey.daemon.announce_session`, which ``announcements`` replaces."""
+    """The real :func:`valetkey.session_ops.announce_session`, which ``announcements`` replaces."""
     return _REAL_ANNOUNCE

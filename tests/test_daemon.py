@@ -36,6 +36,7 @@ from valetkey import (
     procs,
     protocol,
     registry,
+    session_ops,
     sessions,
     sites,
 )
@@ -185,8 +186,8 @@ def test_peer_uid_reads_the_other_end() -> None:
 
 def test_make_private_dirs(short_dir: Path) -> None:
     target = short_dir / "a" / "b" / "c"
-    daemon.make_private_dirs(target)
-    daemon.make_private_dirs(target)
+    session_ops.make_private_dirs(target)
+    session_ops.make_private_dirs(target)
     for path in (target, target.parent, target.parent.parent):
         assert stat.S_IMODE(path.stat().st_mode) == 0o700
 
@@ -1205,12 +1206,12 @@ def test_a_login_that_is_cancelled_while_its_window_opens_leaves_the_site_idle(
 
 def test_cut_tree_keeps_whole_lines_and_counts_what_is_left() -> None:
     tree = "\n".join(f"- line {n}" for n in range(10))
-    assert daemon.cut_tree(tree) == (tree, None)
-    kept, left = daemon.cut_tree(tree, 30)
+    assert session_ops.cut_tree(tree) == (tree, None)
+    kept, left = session_ops.cut_tree(tree, 30)
     assert kept == "- line 0\n- line 1\n- line 2"
     assert left == (7, len(tree) - len(kept))
-    assert daemon.cut_tree(tree, len(tree)) == (tree, None)
-    assert daemon.cut_tree("x" * 50 + "\n- next", 20) == ("x" * 20, (1, 37))
+    assert session_ops.cut_tree(tree, len(tree)) == (tree, None)
+    assert session_ops.cut_tree("x" * 50 + "\n- next", 20) == ("x" * 20, (1, 37))
 
 
 def test_a_snapshot_is_cut_and_says_how_much_was_left_out(roots: sites.Roots) -> None:
@@ -1222,7 +1223,7 @@ def test_a_snapshot_is_cut_and_says_how_much_was_left_out(roots: sites.Roots) ->
             rig.factory.made[0].tree = "\n".join(f'- paragraph "{n:05}"' for n in range(5000))
             result = await c.call("snapshot", site="sitex")
             kept = result["snapshot"]["text"]
-            assert len(kept) <= daemon.SNAPSHOT_LIMIT
+            assert len(kept) <= session_ops.SNAPSHOT_LIMIT
             assert kept.endswith('"')  # a whole line, not cut in its middle
             assert result["cut"]["lines"] == 5000 - len(kept.split("\n"))
             rig.factory.made[0].tree = '- button "Go" [ref=e1]'
@@ -1965,7 +1966,7 @@ def test_a_listener_that_holds_the_path_is_left_alone(roots: sites.Roots) -> Non
 
     async def scenario() -> None:
         path = client.socket_path(roots)
-        daemon.make_private_dirs(path.parent)
+        session_ops.make_private_dirs(path.parent)
         accepted: list[int] = []
 
         async def stand_in(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -1998,7 +1999,7 @@ def test_a_listener_that_holds_the_path_is_left_alone(roots: sites.Roots) -> Non
 def test_a_failed_bind_gives_the_lock_back(roots: sites.Roots) -> None:
     async def scenario() -> None:
         path = client.socket_path(roots)
-        daemon.make_private_dirs(path)  # a directory where the socket should go
+        session_ops.make_private_dirs(path)  # a directory where the socket should go
         with pytest.raises(OSError, match="in use"):
             await daemon.Daemon(roots).start()
         path.rmdir()
@@ -2012,7 +2013,7 @@ def test_a_failed_bind_gives_the_lock_back(roots: sites.Roots) -> None:
 def test_a_stale_socket_file_is_replaced(roots: sites.Roots) -> None:
     async def scenario() -> None:
         path = client.socket_path(roots)
-        daemon.make_private_dirs(path.parent)
+        session_ops.make_private_dirs(path.parent)
         with socket.socket(socket.AF_UNIX) as stale:
             stale.bind(str(path))
         assert not await client.is_running(path)
@@ -2202,7 +2203,9 @@ def test_the_real_session_factory_passes_the_proxy_socket(
         return "session"
 
     monkeypatch.setattr(sessions.Session, "start", fake_start)
-    assert daemon.start_session(roots, "sitex", "https://x.test/", Path("/p.sock")) == "session"  # type: ignore[comparison-overlap]
+    assert (
+        session_ops.start_session(roots, "sitex", "https://x.test/", Path("/p.sock")) == "session"
+    )  # type: ignore[comparison-overlap]
     assert seen == [
         (
             (roots, "sitex", "https://x.test/"),
@@ -2549,7 +2552,7 @@ def put(path: Path, data: bytes) -> None:
 
 def downloads_dir(roots: sites.Roots, site: str = "sitex") -> Path:
     path = sites.downloads_path(roots, site)
-    daemon.make_private_dirs(path)
+    session_ops.make_private_dirs(path)
     sessions.session_paths(roots, site).incoming_dir.mkdir(exist_ok=True)
     return path
 
@@ -3252,7 +3255,7 @@ def table_reader(monkeypatch: pytest.MonkeyPatch) -> list[list[list[str]]]:
         handed.append([["chromium", f"--user-data-dir=/p{len(handed)}"]])
         return handed[-1]
 
-    monkeypatch.setattr(daemon.procs, "command_lines", read)
+    monkeypatch.setattr(procs, "command_lines", read)
     return handed
 
 
@@ -3270,10 +3273,10 @@ def test_the_process_table_is_read_once_per_check_however_many_sessions_watch(
                 await c.call("open", site=name)
             for session in rig.factory.made:
                 session.watching = True
-            await rig.daemon._check_sessions()  # noqa: SLF001
+            await rig.daemon.sessions.check_sessions()
             assert len(handed) == 1
             assert [session.tables for session in rig.factory.made] == [[handed[0]]] * 3
-            await rig.daemon._check_sessions()  # noqa: SLF001
+            await rig.daemon.sessions.check_sessions()
             assert len(handed) == 2
             assert all(session.tables[-1] is handed[1] for session in rig.factory.made)
 
@@ -3288,9 +3291,9 @@ def test_the_process_table_is_not_read_when_no_session_watches_its_browser(
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
-            await rig.daemon._check_sessions()  # noqa: SLF001  (no session yet)
+            await rig.daemon.sessions.check_sessions()
             await c.call("open", site="sitex")
-            await rig.daemon._check_sessions()  # noqa: SLF001
+            await rig.daemon.sessions.check_sessions()
             assert handed == []
             assert rig.factory.made[0].tables == [None]
 
@@ -3306,17 +3309,17 @@ def test_a_process_table_that_cannot_be_read_does_not_stop_the_check(
         message = "no /proc"
         raise OSError(message)
 
-    monkeypatch.setattr(daemon.procs, "command_lines", unreadable)
+    monkeypatch.setattr(procs, "command_lines", unreadable)
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("open", site="sitex")
             session = rig.factory.made[0]
             session.watching = True
-            await rig.daemon._check_sessions()  # noqa: SLF001
+            await rig.daemon.sessions.check_sessions()
             assert session.tables == [None]  # it was still asked, and left to read for itself
             session.alive = False
-            await rig.daemon._check_sessions()  # noqa: SLF001
+            await rig.daemon.sessions.check_sessions()
             assert session.closed == 1
 
     run(scenario())
@@ -3518,7 +3521,7 @@ def test_announce_kills_a_notification_that_hangs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level("INFO", logger="valetkey.daemon")
-    monkeypatch.setattr(daemon, "NOTIFY_TIMEOUT", 0.25)
+    monkeypatch.setattr(session_ops, "NOTIFY_TIMEOUT", 0.25)
     notifier = FakeNotifier(hang=True)
 
     async def spawn(*_args: Any, **_kwargs: Any) -> FakeNotifier:  # noqa: ANN401
@@ -3538,9 +3541,9 @@ def test_the_daemon_keeps_nothing_running_after_shutdown(roots: sites.Roots) -> 
             return rig.daemon
 
     server = run(scenario())
-    assert server._monitor is not None  # noqa: SLF001
-    assert server._monitor.cancelled()  # noqa: SLF001
-    assert not server._background  # noqa: SLF001
+    assert server.sessions.monitor is not None
+    assert server.sessions.monitor.cancelled()
+    assert not server.sessions.background
 
 
 def process_ids(profile: Path, *, program: str) -> list[int]:
@@ -3631,9 +3634,9 @@ def test_the_liveness_check_does_not_end_a_session_opened_since(roots: sites.Roo
             await c.call("open", site="sitex")
             state = rig.daemon.registry.state("sitex")
             current = rig.factory.made[0]
-            await rig.daemon._end_if_current(state, FakeSession())  # noqa: SLF001
+            await rig.daemon.sessions.end_if_current(state, FakeSession())
             assert (current.closed, state.kind) == (0, "session")
-            await rig.daemon._end_if_current(state, current)  # noqa: SLF001
+            await rig.daemon.sessions.end_if_current(state, current)
             assert (current.closed, state.kind) == (1, "idle")
 
     run(scenario())
@@ -5789,7 +5792,7 @@ IDLE = 15 * 60.0
 async def still_open(rig: Rig, ticks: Ticks, seconds: float) -> bool:
     """Move the clock to ``seconds`` and say whether the session survives a check."""
     ticks.at(seconds)
-    await rig.daemon._check_sessions()  # noqa: SLF001
+    await rig.daemon.sessions.check_sessions()
     return rig.daemon.registry.sites["sitex"].kind == "session"
 
 
@@ -5940,7 +5943,7 @@ def test_a_call_made_while_the_idle_close_runs_still_hears_that_the_session_was_
             session = rig.factory.made[0]
             session.close_gate = threading.Event()
             ticks.at(IDLE)
-            check = asyncio.ensure_future(rig.daemon._check_sessions())  # noqa: SLF001
+            check = asyncio.ensure_future(rig.daemon.sessions.check_sessions())
             await eventually(session.closing.is_set)
             call = asyncio.ensure_future(c.call("snapshot", site="sitex"))
             await asyncio.sleep(0.2)  # it is now waiting for the lock the close holds
@@ -6008,7 +6011,7 @@ def test_a_call_while_an_idle_session_is_going_away_is_told_it_was_idle(
 
             monkeypatch.setattr(first, "close", slow_close)
             ticks.at(IDLE)
-            check = asyncio.ensure_future(rig.daemon._check_sessions())  # noqa: SLF001
+            check = asyncio.ensure_future(rig.daemon.sessions.check_sessions())
             await eventually(started.is_set)
             assert rig.daemon.registry.sites["sitex"].idle_closed == 15
             release.set()
@@ -6049,7 +6052,7 @@ def test_the_idle_limit_comes_from_the_config_and_a_bad_one_stops_the_start(
         server = daemon.Daemon(roots, user_environment=dict)
         await server.start()
         try:
-            return server._idle_limit  # noqa: SLF001
+            return server.sessions.idle_limit
         finally:
             await server.shutdown()
 
@@ -6092,7 +6095,7 @@ def test_a_call_that_arrives_while_the_session_is_being_checked_keeps_it_open(
             state = rig.daemon.registry.sites["sitex"]
             ticks.at(IDLE)
             async with state.lock:
-                check = asyncio.ensure_future(rig.daemon._check_sessions())  # noqa: SLF001
+                check = asyncio.ensure_future(rig.daemon.sessions.check_sessions())
                 await asyncio.sleep(0.05)  # the check is waiting for the lock
                 rig.daemon.registry.touch("sitex")
             await check
