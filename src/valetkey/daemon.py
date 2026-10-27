@@ -1132,8 +1132,7 @@ class Daemon:
                 return
             minutes = max(1, round(limit / 60))
             logger.info("closing the %s session: unused for %d minutes", state.name, minutes)
-            await self._end(state, reason="idle")
-            state.idle_closed = minutes
+            await self._end(state, idle_minutes=minutes)
 
     async def _end_if_current(self, state: _Site, session: BrowserSession) -> None:
         """End the site's session if it is still ``session``, not one opened in the meantime."""
@@ -1899,12 +1898,16 @@ class Daemon:
         else:
             mark()
 
-    async def _end(self, state: _Site, *, reason: str | None = None) -> None:
+    async def _end(self, state: _Site, *, idle_minutes: int | None = None) -> None:
         """Stop whatever the site is doing and make it idle. The caller holds ``state.lock``.
 
-        ``reason`` goes in the ``session_ended`` event.
+        ``idle_minutes`` says the end is for lack of use: it is the reason in the
+        ``session_ended`` event, and the next call on the site is told so. That is recorded
+        before anything is closed, so a call that arrives while the session is going away, or
+        just after, is told the same.
         """
-        state.idle_closed = None
+        state.idle_closed = idle_minutes
+        reason = "idle" if idle_minutes is not None else None
         window, watcher = state.window, state.watcher
         if window is not None:
             await window.cancel()

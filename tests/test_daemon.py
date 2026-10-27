@@ -5823,6 +5823,42 @@ def test_the_next_call_after_an_idle_close_says_so_until_the_site_is_opened(
     run(scenario())
 
 
+def test_a_call_while_an_idle_session_is_going_away_is_told_it_was_idle(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reason is recorded before the browser closes, not after, so no call can miss it."""
+    add_site(roots)
+    ticks = Ticks()
+    started, release = threading.Event(), threading.Event()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            first = rig.factory.made[0]
+            close = first.close
+
+            def slow_close() -> None:
+                started.set()
+                release.wait(10)
+                close()
+
+            monkeypatch.setattr(first, "close", slow_close)
+            ticks.at(IDLE)
+            check = asyncio.ensure_future(rig.daemon._check_sessions())  # noqa: SLF001
+            await eventually(started.is_set)
+            assert rig.daemon._sites["sitex"].idle_closed == 15  # noqa: SLF001
+            release.set()
+            await check
+            with pytest.raises(DaemonError) as info:
+                await c.call("snapshot", site="sitex")
+            assert info.value.code == "session_idle"
+
+    run(scenario())
+
+
 def test_a_close_by_the_person_is_not_reported_as_idle(roots: sites.Roots) -> None:
     add_site(roots)
     ticks = Ticks()
