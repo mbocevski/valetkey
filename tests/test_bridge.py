@@ -514,12 +514,12 @@ def test_a_bridge_is_registered_and_forgotten_with_its_connection(roots: sites.R
                     listed = (await c.call("status"))["bridges"]
                     assert [entry["bridge"] for entry in listed] == [f"bridge-{RAND}"]
                     assert listed[0]["since"].endswith("Z")
-                    assert server.bridge_sockets() == [path]
+                    assert server.logins.bridge_sockets() == [path]
                     # Registering again on the same connection changes nothing.
                     again = await c.call("bridge_register", rand=RAND)
                     assert again["registered"] is False
                 # The connection is gone, and so is the bridge.
-                await until(lambda: server.bridge_sockets() == [])
+                await until(lambda: server.logins.bridge_sockets() == [])
                 gone = await anext(events)
                 assert (gone["event"], gone["bridge"]) == ("bridge_disconnected", f"bridge-{RAND}")
 
@@ -538,9 +538,9 @@ def test_a_bridge_name_belongs_to_the_connection_that_took_it(roots: sites.Roots
                     with pytest.raises(DaemonError) as info:
                         await second.call("bridge_register", rand=RAND)
                     assert info.value.code == "bridge_exists"
-                    assert len(server.bridge_sockets()) == 1
+                    assert len(server.logins.bridge_sockets()) == 1
                     # The one that is left is the first's, and it survives the second's end.
-                await until(lambda: server.bridge_sockets() == [])
+                await until(lambda: server.logins.bridge_sockets() == [])
 
     run(scenario())
 
@@ -556,7 +556,7 @@ def test_several_bridges_are_listed_oldest_first(roots: sites.Roots) -> None:
             ):
                 await c.call("bridge_register", rand=RAND)
                 await c.call("bridge_register", rand=other)
-                assert server.bridge_sockets() == [one, two]
+                assert server.logins.bridge_sockets() == [one, two]
 
     run(scenario())
 
@@ -613,7 +613,7 @@ def test_only_a_real_socket_of_the_user_in_the_runtime_directory_is_registered(
                 link.symlink_to(real)
                 assert await attempt(c, RAND) == "no_socket"  # a link to a socket
                 link.unlink()
-            assert server.bridge_sockets() == []
+            assert server.logins.bridge_sockets() == []
 
     run(scenario())
 
@@ -628,7 +628,7 @@ def test_a_socket_of_another_user_is_not_registered(
                 await client.Client.connect(client.socket_path(roots)) as c,
             ):
                 await c.call("status")  # the connection is accepted before the user changes
-                monkeypatch.setattr(server, "_uid", os.getuid() + 1)
+                monkeypatch.setattr(server.logins, "_uid", os.getuid() + 1)
                 with pytest.raises(DaemonError) as info:
                     await c.call("bridge_register", rand=RAND)
                 assert info.value.code == "no_socket"
@@ -660,16 +660,16 @@ def test_hold_registers_the_socket_and_removes_it_when_the_connection_ends(
             )
             path = sites.ensure_runtime(roots) / f"bridge-{RAND}.sock"
             await asyncio.sleep(0.2)  # the forward comes up a little after the command starts
-            assert server.bridge_sockets() == []
+            assert server.logins.bridge_sockets() == []
             listener = socket.socket(socket.AF_UNIX)
             listener.bind(str(path))
             listener.listen()
-            await until(lambda: server.bridge_sockets() == [path])
+            await until(lambda: server.logins.bridge_sockets() == [path])
             ended.set()  # ssh dropped
             assert await asyncio.wait_for(task, 10) == 0
             listener.close()
             assert not path.exists()
-            await until(lambda: server.bridge_sockets() == [])
+            await until(lambda: server.logins.bridge_sockets() == [])
 
     run(scenario())
 
@@ -686,7 +686,7 @@ def test_hold_registers_again_after_the_daemon_restarted(roots: sites.Roots) -> 
                 await asyncio.sleep(0.3)
             await asyncio.sleep(0.2)  # no daemon: it complains once and keeps trying
             async with serving(roots) as again:
-                await until(lambda: again.bridge_sockets() == [path])
+                await until(lambda: again.logins.bridge_sockets() == [path])
                 ended.set()
                 assert await asyncio.wait_for(task, 10) == 0
 

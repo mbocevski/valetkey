@@ -109,19 +109,21 @@ async def hold_a_bridge(
             )
         )
         try:
-            await until(registry.bridge_sockets, 60)
-            (socket_path,) = registry.bridge_sockets()
+            await until(registry.logins.bridge_sockets, 60)
+            (socket_path,) = registry.logins.bridge_sockets()
             deadline = time.monotonic() + HOLD_SECONDS
             while time.monotonic() < deadline:
                 # Still the same bridge, never dropped and made again.
-                assert registry.bridge_sockets() == [socket_path]
+                assert registry.logins.bridge_sockets() == [socket_path]
                 assert len(names) == 1
                 assert not task.done()
                 await asyncio.sleep(0.25)
         finally:
             stop.set()
             await asyncio.wait_for(task, 30)
-        await until(lambda: registry.bridge_sockets() == [])  # and it is forgotten when it ends
+        await until(
+            lambda: registry.logins.bridge_sockets() == []
+        )  # and it is forgotten when it ends
 
 
 @contextlib.asynccontextmanager

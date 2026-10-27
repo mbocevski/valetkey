@@ -31,6 +31,7 @@ from valetkey import (
     download_ops,
     learn,
     login,
+    login_ops,
     mcp_server,
     notify,
     procs,
@@ -1198,7 +1199,7 @@ def test_a_login_that_is_cancelled_while_its_window_opens_leaves_the_site_idle(
         async with serving(roots) as rig, await rig.connect() as c:
             rig.logins.fail = Stopped()
             with pytest.raises(Stopped):
-                await rig.daemon._op_login(registry.Connection(), {"target": "sitex"})  # noqa: SLF001
+                await rig.daemon.logins.op_login(registry.Connection(), {"target": "sitex"})
             assert (await c.call("status", site="sitex"))["state"] == "idle"
 
     run(scenario())
@@ -4568,7 +4569,7 @@ def test_a_login_for_a_host_that_does_not_resolve_privately_just_opens(
 def test_a_host_that_cannot_be_resolved_or_is_slow_does_not_stop_a_login(
     roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(daemon, "RESOLVE_SECONDS", 0.1)
+    monkeypatch.setattr(login_ops, "RESOLVE_SECONDS", 0.1)
 
     async def broken(_host: str, _port: int) -> list[str]:
         raise OSError
@@ -4624,9 +4625,9 @@ def test_a_login_with_no_private_refusals_has_no_note(roots: sites.Roots) -> Non
 
 
 def test_the_note_stands_alone_when_the_login_could_not_be_saved() -> None:
-    note = daemon._private_note(None, "sitex", ("a.test",))  # noqa: SLF001
+    note = login_ops._private_note(None, "sitex", ("a.test",))  # noqa: SLF001
     assert note.startswith("Refused because they are on a private network: a.test. Only")
-    assert daemon._private_note("Saved.", "sitex", ("a.test",)).startswith("Saved. Refused")  # noqa: SLF001
+    assert login_ops._private_note("Saved.", "sitex", ("a.test",)).startswith("Saved. Refused")  # noqa: SLF001
 
 
 # -- a login shown in a web browser --------------------------------------------------------
@@ -5161,7 +5162,7 @@ def test_a_host_with_a_port_is_never_taken_for_an_account(roots: sites.Roots) ->
         "Bad:work": False,
         "intranet:8080": False,
     }
-    assert {name: daemon.Daemon._names_a_site(name) for name in names} == names  # noqa: SLF001
+    assert {name: login_ops.Logins._names_a_site(name) for name in names} == names  # noqa: SLF001
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
