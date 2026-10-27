@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
-from valetkey import display, downloads, sites
+from valetkey import deltas, display, downloads, sites
 from valetkey.protocol import fail, refused_entry, string_arg
 from valetkey.proxy import NOT_ALLOWED, PRIVATE_ADDRESS, Proxy
 
@@ -93,6 +93,8 @@ class Connection:
     refs: dict[str, tuple[int, dict[str, tuple[str, str]]]] = field(default_factory=dict)
     """For each site, the session generation and the ``{ref: (role, name)}`` of the snapshot
     this client last received. A click by reference means the element it was in that snapshot."""
+    views: dict[str, deltas.View] = field(default_factory=dict)
+    """For each site, the tree this client last read in a snapshot, which a delta changes."""
     seen_downloads: dict[str, dict[str, downloads.Signature]] = field(default_factory=dict)
     """For each site, the finished downloads this client has already been told about."""
     bridges: set[str] = field(default_factory=set)

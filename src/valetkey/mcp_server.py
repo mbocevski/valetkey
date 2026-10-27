@@ -456,6 +456,29 @@ def listing_text(site: str, result: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def change_text(change: dict[str, Any] | None) -> str:
+    """Say what the page did after a click or typing step, or return ``""`` when it is unknown.
+
+    The lines of a change are the page's own text, so they are fenced as untrusted content.
+    """
+    if not change:
+        return ""
+    kind = change["kind"]
+    if kind == "unchanged":
+        return "The page did not change."
+    if kind == "delta":
+        parts = []
+        for label, key in (("Removed", "removed"), ("Added", "added")):
+            if lines := untrusted_text(change[key]):
+                parts.append(f"{label}:\n{lines}")
+        return f"Page changes (untrusted page data):\n{fence(chr(10).join(parts))}"
+    if kind == "large":
+        return "The page changed a lot. Call browser_snapshot to read it."
+    if kind == "changed":
+        return "The page changed. Call browser_snapshot to read it."
+    return page_title(untrusted_text(change["title"]))  # the address changed: a whole new page
+
+
 def click_text(result: dict[str, Any]) -> str:
     """Describe a verified click: what was clicked, and whether the expectation held.
 
@@ -486,6 +509,8 @@ def click_text(result: dict[str, Any]) -> str:
     ]
     if downloaded := downloads_text(result.get("downloads")):
         lines.append(downloaded)
+    if changed := change_text(result.get("change")):
+        lines.append(changed)
     return "\n".join(lines)
 
 
@@ -746,11 +771,14 @@ DESCRIPTIONS = {
         "name matches nothing or several elements, nothing is clicked. Say what should follow "
         "in expect (text_appears, text_gone or url_changes) and the result says whether it "
         "happened. Only a click with an expect is ever repeated, and only if the first changed "
-        "nothing. If the click starts a download, the new files are listed."
+        "nothing. If the click starts a download, the new files are listed. Once you have read "
+        "the page with browser_snapshot, the result also says what changed on it, so read that "
+        "before you take another snapshot."
     ),
     "browser_type": (
         "Replace the contents of a field, by its reference from the latest browser_snapshot. "
-        "With submit, press Enter afterwards."
+        "With submit, press Enter afterwards. Once you have read the page with browser_snapshot, "
+        "the result also says what changed on it, so read that before you take another snapshot."
     ),
     "browser_navigate": (
         "Go to a URL in the site's browser. Only hosts the site allows will load; a refused "
@@ -1188,7 +1216,12 @@ class _Tools:
         submit: Annotated[bool, Field(description="Press Enter after typing.")] = False,
     ) -> str:
         result = await self._ask("type", site=site, ref=ref, text=text, submit=submit)
-        return envelope_text(result) + ("\nDone. Pressed Enter." if submit else "\nDone.")
+        done = "Done. Pressed Enter." if submit else "Done."
+        return "\n".join(
+            part
+            for part in (envelope_text(result), done, change_text(result.get("change")))
+            if part
+        )
 
     async def browser_navigate(
         self, site: SITE, url: Annotated[str, Field(description="An http or https URL.")]

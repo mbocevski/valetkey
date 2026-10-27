@@ -88,6 +88,17 @@ Set the time with `session_idle_minutes` in `$XDG_CONFIG_HOME/valetkey/config.js
 way to turn the limit off. `valetkey status` shows how long each session has been idle and when it
 will close. `valetkey watch` reports the close as `session_ended` with `"reason": "idle"`.
 
+## What a click or typing step returns
+
+Once the agent has read a page with `browser_snapshot`, the result of `browser_click` and
+`browser_type` ends by saying what the step changed on it, so the agent need not read the page
+again. It says that the page did not change, or gives the lines that were taken out and put in,
+fenced as untrusted page data. That can be a menu that opened or an error that appeared. When the
+changed lines come to more than 4,000 characters, it says the page changed a lot. A step that took
+the browser to another page returns that page's title and says to call `browser_snapshot`. A
+reference that appears in the changed lines can be clicked at once. With no snapshot to compare
+to, or after another client has taken one, the result says only that the page changed, or nothing.
+
 ## Hints for the client
 
 Each tool carries the standard MCP hints, so a client can decide what to ask you about.

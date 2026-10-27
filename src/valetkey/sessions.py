@@ -172,6 +172,45 @@ class Ref:
 
 
 @dataclass(frozen=True, slots=True)
+class RefChange:
+    """One change to the references of a page, as a ``snapshot --delta`` answer lists it."""
+
+    op: str
+    """``add``, ``remove`` or ``replace``."""
+    ref: str
+    """The reference without its ``@``, such as ``e63``."""
+    role: str = ""
+    name: str = ""
+    field: str = ""
+    """With ``replace``: which of ``name`` and ``role`` changed."""
+    value: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotDelta:
+    """The answer of ``snapshot --delta``: the page again, nothing new, or what changed.
+
+    ``kind`` is ``full`` (the whole tree: the first one, a new address, or too much changed),
+    ``unchanged`` or ``delta``. A delta replaces ``delete_count`` lines of the previous tree from
+    line ``start_line`` (counting from zero) with ``lines``, and holds the reference changes.
+    ``revision`` counts the answers of one tab; a delta applies to ``base_revision``.
+    """
+
+    kind: str
+    url: str
+    revision: int
+    base_revision: int | None = None
+    snapshot: Snapshot | None = None
+    tree: str = ""
+    """With ``full``: the tree as agent-browser wrote it, which the line numbers of later deltas
+    count in."""
+    changes: tuple[RefChange, ...] = ()
+    start_line: int = 0
+    delete_count: int = 0
+    lines: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Attachment:
     """A response the browser turns into a download: its address and the name it suggests."""
 
@@ -412,9 +451,9 @@ def holder_script(paths: SessionPaths, binary: str, open_command: list[str], run
     )
 
 
-OWN_FLAGS = frozenset({"-i", "--clear", "--content"})
-"""The only option-like arguments valetkey itself passes after a verb (``snapshot -i``,
-``network requests --clear``, ``network har start --content all``)."""
+OWN_FLAGS = frozenset({"-i", "--clear", "--content", "--delta", "--full"})
+"""The only option-like arguments valetkey itself passes after a verb (``snapshot -i --delta
+--full``, ``network requests --clear``, ``network har start --content all``)."""
 
 
 def call_command(
@@ -482,6 +521,58 @@ def parse_response(text: str) -> dict[str, Any]:
 def parse_page(data: dict[str, Any]) -> Page:
     """Build a :class:`Page` from the data of ``open``."""
     return Page(url=str(data.get("url", "")), title=str(data.get("title", "")))
+
+
+def _whole(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def parse_snapshot_delta(data: dict[str, Any]) -> SnapshotDelta:
+    """Build a :class:`SnapshotDelta` from the data of ``snapshot --delta``.
+
+    Raises:
+        AgentBrowserError: when the answer is not of the form agent-browser documents.
+
+    """
+    inner = data.get("snapshot")
+    kind = inner.get("kind") if isinstance(inner, dict) else None
+    if not isinstance(inner, dict) or kind not in {"full", "unchanged", "delta"}:
+        message = "agent-browser answered a snapshot with something it does not document"
+        raise AgentBrowserError(message)
+    url = str(data.get("origin", ""))
+    revision = _whole(inner.get("revision"))
+    base = inner.get("baseRevision")
+    base_revision = _whole(base) if base is not None else None
+    if kind == "full":
+        tree = str(inner.get("tree", ""))
+        whole = parse_snapshot({"origin": url, "snapshot": tree, "refs": inner.get("refs")})
+        return SnapshotDelta(kind, url, revision, snapshot=whole, tree=tree)
+    if kind == "unchanged":
+        return SnapshotDelta(kind, url, revision, base_revision)
+    change = inner.get("treeChange")
+    change = change if isinstance(change, dict) else {}
+    lines = change.get("lines")
+    return SnapshotDelta(
+        kind,
+        url,
+        revision,
+        base_revision,
+        changes=tuple(
+            RefChange(
+                op=str(item.get("op", "")),
+                ref=str(item.get("ref", "")).removeprefix("@"),
+                role=str((item.get("node") or {}).get("role", "")),
+                name=str((item.get("node") or {}).get("name", "")),
+                field=str(item.get("field", "")),
+                value=str(item.get("value", "")),
+            )
+            for item in inner.get("changes") or []
+            if isinstance(item, dict)
+        ),
+        start_line=_whole(change.get("startLine")),
+        delete_count=_whole(change.get("deleteCount")),
+        lines=tuple(str(line) for line in lines) if isinstance(lines, list) else (),
+    )
 
 
 def parse_snapshot(data: dict[str, Any]) -> Snapshot:
@@ -957,6 +1048,21 @@ class Session:
         # Not ``-c``: agent-browser's compact mode drops text with no reference above it, such as
         # the second item of a list or a page's footer (0.39). The daemon trims the tree instead.
         return parse_snapshot(self._call("snapshot", *(["-i"] if interactive else [])))
+
+    def snapshot_delta(self, *, interactive: bool, full: bool = False) -> SnapshotDelta:
+        """Return what changed in the page's tree since the last answer of this kind.
+
+        agent-browser keeps one baseline for the tab, so asking with other options than the
+        last time returns the whole tree. With ``full`` it always does, and the answer becomes
+        the new baseline. The tree is the interactive one or the whole one, as in
+        :meth:`snapshot`.
+        """
+        flags = [*(["-i"] if interactive else []), "--delta", *(["--full"] if full else [])]
+        return parse_snapshot_delta(self._call("snapshot", *flags))
+
+    def title(self) -> str:
+        """Return the title of the page."""
+        return str(self._call("get", "title").get("title", ""))
 
     def outline(self) -> str:
         """Return the whole accessibility tree as text: every node, with names and page text.

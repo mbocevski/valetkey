@@ -8,6 +8,7 @@ first (:meth:`Sessions.end`).
 """
 
 import asyncio
+import functools
 import itertools
 import logging
 import shutil
@@ -19,6 +20,7 @@ from valetkey import (
     approvals,
     clicks,
     cookies,
+    deltas,
     downloads,
     expiry,
     procs,
@@ -57,6 +59,11 @@ NOTIFY_TIMEOUT = 5.0
 
 SNAPSHOT_LIMIT = 40_000
 """The most characters of a page's tree a snapshot answer holds; more is cut at a node."""
+
+
+DELTA_LIMIT = 4_000
+"""The most characters of changed lines (removed and added) a click or typing step reports.
+Past it the answer says the page changed a lot, and the agent takes a snapshot."""
 
 
 type SessionFactory = Callable[[sites.Roots, str, str, Path], BrowserSession]
@@ -431,11 +438,17 @@ class Sessions:
         if not isinstance(interactive, bool):
             fail("bad_request", '"interactive" must be true or false')
 
-        def look(session: BrowserSession) -> tuple[sessions.Snapshot, list[dict[str, Any]]]:
-            return session.snapshot(interactive=interactive), session.images() if pictures else []
+        def look(
+            session: BrowserSession,
+        ) -> tuple[sessions.SnapshotDelta, list[dict[str, Any]]]:
+            # In full, so that it is the whole tree and the baseline later deltas change.
+            answer = session.snapshot_delta(interactive=interactive, full=True)
+            return answer, session.images() if pictures else []
 
         result = await self.session_op(connection, state, look)
-        snap, found = result.pop("_value")
+        answer, found = result.pop("_value")
+        snap = cast("sessions.Snapshot", answer.snapshot)
+        connection.views[state.name] = deltas.start(state.generation, interactive, answer)
         if pictures:
             result["images"] = [
                 item | {"alt": untrusted(item["alt"]), "url": untrusted(item["url"])}
@@ -471,7 +484,46 @@ class Sessions:
         result["expect"] = done.expect.to_json() if done.expect else None
         result["outcome"] = done.outcome
         result["downloads"] = await self.downloads.new_downloads(connection, state, seen)
+        await self.add_page_change(connection, state, result)
         return result
+
+    async def add_page_change(
+        self, connection: Connection, state: Site, result: dict[str, Any]
+    ) -> None:
+        """Put in ``result`` what the page did since this client last read it, if it can be told.
+
+        That takes a snapshot this client has read of the live session (see
+        :func:`valetkey.deltas.follow`). It asks for the same kind of tree as that snapshot did,
+        so it is a delta. A failure here is no failure of the click: the answer goes without it.
+        """
+        view = connection.views.get(state.name)
+        if view is None or view.generation != state.generation:
+            return
+        try:
+            async with state.op_lock:
+                session = state.session
+                if (
+                    state.kind != "session"
+                    or session is None
+                    or state.generation != view.generation
+                ):
+                    return
+                answer = await asyncio.to_thread(
+                    functools.partial(session.snapshot_delta, interactive=view.interactive)
+                )
+                title = await asyncio.to_thread(session.title) if answer.kind == "full" else ""
+        except sessions.AgentBrowserError, sessions.SessionError, OSError:
+            logger.warning("reading what changed on the %s page failed", state.name, exc_info=True)
+            return
+        table = connection.refs.get(state.name, (state.generation, {}))[1]
+        change = deltas.follow(view, answer, table, DELTA_LIMIT)
+        connection.refs[state.name] = (state.generation, table)
+        if change["kind"] == "delta":
+            change["removed"] = untrusted("\n".join(change["removed"]))
+            change["added"] = untrusted("\n".join(change["added"]))
+        if change["kind"] == "full":
+            change["title"] = untrusted(title)
+        result["change"] = change
 
     async def op_save(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         """Answer ``save``: save what an address serves into the site's downloads directory."""
@@ -532,6 +584,7 @@ class Sessions:
         result.pop("_value")
         result["done"] = True
         result["submitted"] = submit
+        await self.add_page_change(connection, state, result)
         return result
 
     async def op_navigate(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:

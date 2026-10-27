@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import delta_answers as recorded
 import pytest
 from environment import unusable_reason
 from proxy_stub import PageServer, ProxyStub, host_of_request
@@ -754,7 +755,7 @@ def test_the_session_has_no_eval_or_passthrough() -> None:
         "start", "is_alive", "watches_browser", "close", "open", "snapshot", "outline", "click",
         "fill", "press_enter",
         "current_url", "screenshot", "clear_requests", "started_downloads", "password_fields",
-        "resource_url", "images", "fetch", "look",
+        "resource_url", "images", "fetch", "look", "snapshot_delta", "title",
     }  # fmt: skip
 
 
@@ -1915,3 +1916,46 @@ def test_started_downloads_name_each_by_its_header_or_its_address(
         sessions.Attachment("http://s.test/b/", "b"),
         sessions.Attachment("", "a.pdf"),
     ]
+
+
+def test_snapshot_delta_asks_agent_browser_for_a_delta_in_the_tree_it_is_told(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = FakeRun(answer(recorded.UNCHANGED))
+    monkeypatch.setattr(sessions.subprocess, "run", run)
+    session = make_session(tmp_path)
+    assert session.snapshot_delta(interactive=True).kind == "unchanged"
+    session.snapshot_delta(interactive=False)
+    monkeypatch.setattr(sessions.subprocess, "run", FakeRun(answer(recorded.FULL)))
+    whole = session.snapshot_delta(interactive=True, full=True)
+    assert whole.kind == "full"
+    assert [argv[2:] for argv, _ in run.calls] == [
+        ["snapshot", "-i", "--delta"],
+        ["snapshot", "--delta"],
+    ]
+    for _, env in run.calls:
+        assert set(env) == CALL_ENV
+
+
+def test_snapshot_delta_in_full_is_asked_with_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = FakeRun(answer(recorded.FULL))
+    monkeypatch.setattr(sessions.subprocess, "run", run)
+    session = make_session(tmp_path)
+    session.snapshot_delta(interactive=False, full=True)
+    session.snapshot_delta(interactive=True, full=True)
+    assert [argv[2:] for argv, _ in run.calls] == [
+        ["snapshot", "--delta", "--full"],
+        ["snapshot", "-i", "--delta", "--full"],
+    ]
+
+
+def test_title_reads_the_title_of_the_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run = FakeRun(answer({"title": "Shop"}))
+    monkeypatch.setattr(sessions.subprocess, "run", run)
+    session = make_session(tmp_path)
+    assert session.title() == "Shop"
+    assert [argv[2:] for argv, _ in run.calls] == [["get", "title"]]
+    monkeypatch.setattr(sessions.subprocess, "run", FakeRun(answer({})))
+    assert session.title() == ""

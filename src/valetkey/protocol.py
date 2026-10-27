@@ -34,6 +34,12 @@ class BrowserSession(Protocol):
     def snapshot(self, *, interactive: bool = True) -> sessions.Snapshot:
         """Return the page's interactive elements, or with ``interactive`` false its whole tree."""
 
+    def snapshot_delta(self, *, interactive: bool, full: bool = False) -> sessions.SnapshotDelta:
+        """Return what changed in the page's tree since the last answer, or the whole tree."""
+
+    def title(self) -> str:
+        """Return the title of the page."""
+
     def look(self) -> tuple[str, str]:
         """Return the page's URL and its whole accessibility tree as text."""
 

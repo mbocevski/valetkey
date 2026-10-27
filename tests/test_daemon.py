@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import contextlib
+import copy
 import json
 import os
 import signal
@@ -15,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import delta_answers as recorded
 import pytest
 from cookie_jar import cookie, jar
 from environment import unusable_reason
@@ -27,6 +29,7 @@ from valetkey import (
     clicks,
     client,
     daemon,
+    deltas,
     display,
     download_ops,
     learn,
@@ -250,6 +253,15 @@ class FakeSession:
         """The process table each liveness check was given."""
         self.tree = '- button "Go" [ref=e1]'
         """The text of the snapshot."""
+        self.answers: list[sessions.SnapshotDelta] = []
+        """What the next delta snapshots answer, first first; after them: unchanged."""
+        self.revision = 0
+        self.elements = {"e1": sessions.Ref("button", "Go")}
+        """The references of the snapshot."""
+        self.delta_calls: list[tuple[bool, bool]] = []
+        """The ``(interactive, full)`` of each snapshot asked for as a delta."""
+        self.page_title = "A page"
+        self.delta_fails: Exception | None = None
         self.attached = 0
         self.attach_names: list[str] | None = None
         self.passwords = 0
@@ -286,7 +298,25 @@ class FakeSession:
 
     def snapshot(self, *, interactive: bool = True) -> sessions.Snapshot:
         self._use("snapshot", interactive)
-        return sessions.Snapshot(self.url, self.tree, {"e1": sessions.Ref("button", "Go")})
+        return sessions.Snapshot(self.url, self.tree, dict(self.elements))
+
+    def snapshot_delta(self, *, interactive: bool, full: bool = False) -> sessions.SnapshotDelta:
+        self._use("snapshot_delta", interactive, full)
+        self.delta_calls.append((interactive, full))
+        if self.delta_fails is not None:
+            raise self.delta_fails
+        self.revision += 1
+        if full:
+            whole = sessions.Snapshot(self.url, self.tree, dict(self.elements))
+            return sessions.SnapshotDelta(
+                "full", self.url, self.revision, snapshot=whole, tree=self.tree
+            )
+        if self.answers:
+            return self.answers.pop(0)
+        return sessions.SnapshotDelta("unchanged", self.url, self.revision, self.revision - 1)
+
+    def title(self) -> str:
+        return self.page_title
 
     def outline(self) -> str:
         texts = [f'- StaticText "{text}"' for text in [f"page at {self.url}", *self.texts]]
@@ -564,7 +594,8 @@ def test_a_session_from_open_to_close(roots: sites.Roots) -> None:
             assert status["url"] == "https://sitex.test/two"
             assert "_value" not in status
             assert [call[0] for call in session.calls if call[0] != "clear_requests"] == [
-                "snapshot", "open", "snapshot", "click", "fill", "screenshot", "screenshot",
+                "snapshot_delta", "open", "snapshot", "click", "snapshot_delta",
+                "fill", "snapshot_delta", "screenshot", "screenshot",
             ]  # fmt: skip
             assert ("fill", "e2", "hello") in session.calls
             closed = await c.call("close", site="sitex")
@@ -1260,8 +1291,227 @@ def test_the_whole_tree_is_asked_for_unless_interactive_is_set(roots: sites.Root
             await c.call("open", site="sitex")
             await c.call("snapshot", site="sitex")
             await c.call("snapshot", site="sitex", interactive=True)
-            asked = [call for call in rig.factory.made[0].calls if call[0] == "snapshot"]
-            assert asked == [("snapshot", False), ("snapshot", True)]
+            asked = rig.factory.made[0].delta_calls
+            assert asked == [(False, True), (True, True)]  # in full: the whole tree, a new baseline
+
+    run(scenario())
+
+
+# -- what changed on the page after a click or a typing step ------------------------------
+
+
+def delta_answer(data: dict[str, Any]) -> sessions.SnapshotDelta:
+    return sessions.parse_snapshot_delta(copy.deepcopy(data))
+
+
+async def opened_and_read(
+    rig: Rig,
+    c: Any,  # noqa: ANN401
+    *,
+    interactive: bool = True,
+    tree: str | None = None,
+) -> FakeSession:
+    """Open the site and take a snapshot of it, which is what lets a click be followed."""
+    await c.call("open", site="sitex")
+    session = rig.factory.made[0]
+    if tree is not None:
+        session.tree = tree
+    await c.call("snapshot", site="sitex", interactive=interactive)
+    return session
+
+
+def test_a_click_before_any_snapshot_reports_no_change(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            result = await c.call("click", site="sitex", text="Go")
+            assert "change" not in result
+            assert rig.factory.made[0].delta_calls == []
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("interactive", [True, False])
+def test_a_click_asks_for_the_same_kind_of_tree_as_the_last_snapshot(
+    roots: sites.Roots,
+    interactive: bool,  # noqa: FBT001
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            session = await opened_and_read(rig, c, interactive=interactive)
+            result = await c.call("click", site="sitex", text="Go")
+            assert result["change"] == {"kind": "unchanged"}
+            await c.call("type", site="sitex", ref="e1", text="hi")
+            assert session.delta_calls == [
+                (interactive, True),
+                (interactive, False),
+                (interactive, False),
+            ]
+
+    run(scenario())
+
+
+def test_each_kind_of_answer_gives_its_change(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            session = await opened_and_read(rig, c, tree=recorded.FULL["snapshot"]["tree"])
+            session.answers[:] = [delta_answer(recorded.ADDED), delta_answer(recorded.REMOVED)]
+            added = (await c.call("click", site="sitex", text="Go"))["change"]
+            assert added == {
+                "kind": "delta",
+                "removed": {"untrusted": True, "text": ""},
+                "added": {"untrusted": True, "text": '- link "New link" [ref=e63]'},
+            }
+            removed = (await c.call("click", site="sitex", text="Go"))["change"]
+            assert removed["removed"] == {"untrusted": True, "text": '- link "Item 0" [ref=e3]'}
+            session.answers[:] = [
+                sessions.SnapshotDelta("full", "https://sitex.test/new", 9, tree="- x")
+            ]
+            session.page_title = "The new page"
+            full = (await c.call("click", site="sitex", text="Go"))["change"]
+            assert full == {"kind": "full", "title": {"untrusted": True, "text": "The new page"}}
+
+    run(scenario())
+
+
+def test_changes_over_the_limit_are_reported_as_a_lot(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            session = await opened_and_read(rig, c)
+            big = sessions.SnapshotDelta(
+                "delta",
+                "https://sitex.test/",
+                2,
+                1,
+                start_line=1,
+                lines=tuple(f'- link "Link number {n}" [ref=e{n}]' for n in range(200)),
+            )
+            assert len("\n".join(big.lines)) > session_ops.DELTA_LIMIT
+            session.answers[:] = [big]
+            result = await c.call("click", site="sitex", text="Go")
+            assert result["change"] == {"kind": "large"}
+
+    run(scenario())
+
+
+def test_a_reference_a_delta_added_can_be_clicked_with_no_new_snapshot(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            session = await opened_and_read(rig, c)
+            added = delta_answer(recorded.ADDED)
+            session.answers[:] = [
+                sessions.SnapshotDelta(
+                    "delta", added.url, 2, 1, changes=added.changes, lines=added.lines, start_line=1
+                )
+            ]
+            await c.call("click", site="sitex", text="Go")
+            with pytest.raises(DaemonError) as info:
+                await c.call("click", site="sitex", ref="e7")
+            assert info.value.code == "unknown_ref"  # a reference nobody listed
+            session.elements = {"e63": sessions.Ref("link", "New link"), **session.elements}
+            clicked = await c.call("click", site="sitex", ref="e63")
+            assert clicked["clicked"] == {
+                "role": "link",
+                "name": {"untrusted": True, "text": "New link"},
+            }
+
+    run(scenario())
+
+
+def test_a_snapshot_by_another_client_means_this_client_is_told_only_that_the_page_changed(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c, await rig.connect() as other:
+            session = await opened_and_read(rig, c)
+            await other.call("snapshot", site="sitex")  # moves the baseline on
+            added = delta_answer(recorded.ADDED)
+            session.answers[:] = [
+                sessions.SnapshotDelta("delta", added.url, 3, 2, lines=added.lines)
+            ]
+            result = await c.call("click", site="sitex", text="Go")
+            assert result["change"] == {"kind": "changed"}
+
+    run(scenario())
+
+
+def test_a_session_that_ended_meanwhile_leaves_the_change_out(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            session = await opened_and_read(rig, c)
+            state = rig.daemon.registry.state("sitex")
+            connection = registry.Connection()
+            connection.views["sitex"] = deltas.View(
+                state.generation, interactive=True, revision=1, lines=["- x"]
+            )
+            await c.call("close", site="sitex")
+            result: dict[str, Any] = {}
+            await rig.daemon.sessions.add_page_change(connection, state, result)
+            assert result == {}
+            assert session.delta_calls == [(True, True)]
+
+    run(scenario())
+
+
+def test_a_new_session_forgets_the_old_snapshot(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await opened_and_read(rig, c)
+            await c.call("close", site="sitex")
+            await c.call("open", site="sitex")
+            result = await c.call("click", site="sitex", text="Go")
+            assert "change" not in result  # nothing was read of this session yet
+
+    run(scenario())
+
+
+def test_a_delta_that_cannot_be_read_does_not_fail_the_click_or_the_typing(
+    roots: sites.Roots, caplog: pytest.LogCaptureFixture
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            session = await opened_and_read(rig, c)
+            session.delta_fails = sessions.AgentBrowserError("no baseline")
+            clicked = await c.call("click", site="sitex", text="Go")
+            typed = await c.call("type", site="sitex", ref="e1", text="x")
+            assert "change" not in clicked
+            assert "change" not in typed
+            assert clicked["outcome"] == "unchecked"
+            assert typed["done"] is True
+
+    run(scenario())
+    assert "reading what changed on the sitex page failed" in caplog.text
+
+
+def test_a_click_that_fails_reports_no_change(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            session = await opened_and_read(rig, c)
+            with pytest.raises(DaemonError):
+                await c.call("click", site="sitex", ref="e42")  # never listed
+            assert session.delta_calls == [(True, True)]
 
     run(scenario())
 
