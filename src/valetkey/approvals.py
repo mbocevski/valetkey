@@ -108,9 +108,11 @@ def validate_host(value: object) -> str:
     if sites.is_ip_literal(host) or not sites.is_plausible_host(host):
         message = "give a host name, not an IP address or anything else"
         raise ValueError(message)
-    if "." not in host or host in sites.TWO_LEVEL_SUFFIXES:
+    if "." not in host:
         message = "that is a whole domain suffix, not a host; ask for one exact host"
         raise ValueError(message)
+    if sites.is_public_suffix(host):
+        raise ValueError(sites.SUFFIX_ALLOW_MESSAGE.format(host=host))
     return host
 
 

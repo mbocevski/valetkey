@@ -14,6 +14,7 @@ from valetkey.sites import (
     PolicyError,
     Roots,
     RuntimeDirUnavailableError,
+    SuffixList,
     account_name,
     allows,
     choose_site_name,
@@ -24,6 +25,7 @@ from valetkey.sites import (
     host_matches,
     host_of,
     is_plausible_host,
+    is_public_suffix,
     known_sites,
     listed_name,
     load_policy,
@@ -238,7 +240,7 @@ def test_site_name_for_cuts_a_long_label() -> None:
 
 def test_site_name_for_takes_custom_suffixes() -> None:
     assert site_name_for("app.sitex.example.com") == "example"
-    assert site_name_for("app.sitex.example.com", frozenset({"example.com"})) == "sitex"
+    assert site_name_for("app.sitex.example.com", SuffixList.parse("com\nexample.com")) == "sitex"
 
 
 @pytest.mark.parametrize("value", ["", "   ", "http://", "https:///path", "http://[::1", "a b.com"])
@@ -704,8 +706,139 @@ def test_invalid_utf8_is_a_policy_error(roots: Roots) -> None:
         load_policy(roots, "sitex")
 
 
+LIST = SuffixList.parse(
+    """\
+// comment
+com
+uk
+co.uk
+il
+co.il
+*.ck
+!www.ck
+ck
+github.io
+\u0431\u0433
+"""
+)
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("myapp.github.io", "myapp.github.io"),
+        ("a.b.myapp.github.io", "myapp.github.io"),
+        ("shop.co.il", "shop.co.il"),
+        ("www.sitex.co.uk", "sitex.co.uk"),
+        ("sitex.com", "sitex.com"),
+        ("a.b.sitex.com.", "sitex.com"),
+        ("github.io", "github.io"),
+        ("co.uk", "co.uk"),
+        ("localhost", "localhost"),
+        ("10.0.0.1", "10.0.0.1"),
+        ("sitex.unlisted", "sitex.unlisted"),
+        ("a.sitex.unlisted", "sitex.unlisted"),
+        ("a.b.ck", "a.b.ck"),
+        ("x.a.b.ck", "a.b.ck"),
+        ("b.ck", "b.ck"),
+        ("www.ck", "www.ck"),
+        ("sub.www.ck", "www.ck"),
+        ("shop.xn--90ae", "shop.xn--90ae"),
+    ],
+)
+def test_registrable_domain_follows_the_list(host: str, expected: str) -> None:
+    assert registrable_domain(host, LIST) == expected
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("github.io", True),
+        ("co.uk", True),
+        ("com", True),
+        ("b.ck", True),
+        ("www.ck", False),
+        ("myapp.github.io", False),
+        ("sitex.com", False),
+        ("localhost", False),
+        ("10.0.0.1", False),
+        ("github.io.", True),
+        ("xn--90ae", True),
+    ],
+)
+def test_is_public_suffix_names_only_what_the_list_names(host: str, expected: bool) -> None:  # noqa: FBT001
+    assert is_public_suffix(host, LIST) is expected
+
+
+def test_choose_site_name_gives_sites_under_a_shared_suffix_names_of_their_own(
+    roots: Roots,
+) -> None:
+    first = choose_site_name(roots, "https://myapp.github.io/")
+    assert first == "myapp"
+    save_policy(roots, policy(first, start="https://myapp.github.io/", allow=("myapp.github.io",)))
+    assert choose_site_name(roots, "https://myapp.github.io/") == "myapp"
+    assert choose_site_name(roots, "https://evil.github.io/") == "evil"
+    assert site_name_for("https://shop.co.il/") == "shop"
+
+
+def test_a_rule_that_cannot_be_written_as_a_host_is_left_out() -> None:
+    parsed = SuffixList.parse("com\na..b\n*.c..d\n")
+    assert parsed == SuffixList(rules=frozenset({"com"}))
+
+
+def test_the_system_list_is_read_once_and_kept(suffix_list: Path) -> None:
+    first = sites.system_suffixes()
+    suffix_list.write_text("com\n", encoding="utf-8")
+    assert sites.system_suffixes() is first
+    assert registrable_domain("myapp.github.io") == "myapp.github.io"
+
+
+@pytest.mark.parametrize("text", [None, "", "// only a comment\n", "\xff"])
+def test_a_missing_or_empty_list_is_an_error_not_a_guess(
+    suffix_list: Path, monkeypatch: pytest.MonkeyPatch, text: str | None
+) -> None:
+    if text is None:
+        monkeypatch.setattr(sites, "PUBLIC_SUFFIX_LIST", suffix_list.parent / "absent.dat")
+    else:
+        monkeypatch.setattr(sites, "PUBLIC_SUFFIX_LIST", suffix_list.parent / "odd.dat")
+        (suffix_list.parent / "odd.dat").write_bytes(text.encode("latin-1"))
+    with pytest.raises(sites.SuffixListError, match="install publicsuffix-list"):
+        registrable_domain("sitex.com")
+    with pytest.raises(sites.SuffixListError, match="install publicsuffix-list"):
+        is_public_suffix("sitex.com")
+
+
+def test_a_list_that_appears_later_is_used(
+    suffix_list: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    later = suffix_list.parent / "later.dat"
+    monkeypatch.setattr(sites, "PUBLIC_SUFFIX_LIST", later)
+    with pytest.raises(sites.SuffixListError):
+        registrable_domain("sitex.com")
+    later.write_text("com\n", encoding="utf-8")
+    assert registrable_domain("a.sitex.com") == "sitex.com"
+
+
+def test_loading_a_policy_ignores_an_allowed_public_suffix(roots: Roots) -> None:
+    save_policy(roots, policy("sitex", allow=("github.io", "sitex.com", "myapp.github.io")))
+    loaded = load_policy(roots, "sitex")
+    assert loaded.allow == ("sitex.com", "myapp.github.io")
+    assert loaded.ignored == ("github.io",)
+    assert not allows(loaded, "victim.github.io")
+    assert "ignored" not in policy_path(roots, "sitex").read_text(encoding="utf-8")
+
+
+def test_a_policy_still_loads_whole_when_there_is_no_list(
+    roots: Roots, suffix_list: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_policy(roots, policy("sitex", allow=("github.io",)))
+    monkeypatch.setattr(sites, "PUBLIC_SUFFIX_LIST", suffix_list.parent / "absent.dat")
+    loaded = load_policy(roots, "sitex")
+    assert (loaded.allow, loaded.ignored) == (("github.io",), ())
+
+
 def test_module_exports_are_importable() -> None:
-    assert {"co.uk", "com.au"} <= sites.TWO_LEVEL_SUFFIXES
+    assert not hasattr(sites, "TWO_LEVEL_SUFFIXES")
 
 
 @pytest.mark.parametrize(

@@ -307,6 +307,10 @@ opens it can type into the login window. The table prints it under the table,
 with the ssh command that makes it reachable. --json leaves it out unless
 --show-links is given, so a script that logs its input does not keep it.
 
+A saved site that lists a public suffix such as github.io is named below the
+table, because valetkey ignores that entry: log in again to relearn the site's
+hosts.
+
 Parameters:
   --json: Print JSON instead of a table. [default: False]
   --show-links: With --json, also print the link of a login shown in a web

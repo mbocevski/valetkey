@@ -31,7 +31,9 @@ The SSH and GPG agents, the Docker socket, the session bus and the rest of your 
 
 A host is added to a site's policy only when a person says yes. Three things can change a policy:
 
-- Logging in. The site's own domain is allowed, with its subdomains. So is every other host the
+- Logging in. The site's own domain is allowed, with its subdomains. The public suffix list from
+  your distribution decides what the domain is: a login at `myapp.github.io` allows that host, never
+  all of `github.io`. Without the list, logins are refused. So is every other host the
   login used, such as a sign-in provider and its CDN, unless it looks like ads or tracking (see
   [what a login allows](#what-a-login-allows)). Only this login counts: pages the profile visited at
   an earlier login or session are not read again.

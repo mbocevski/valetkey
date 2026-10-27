@@ -89,7 +89,8 @@ can tell it from anything the daemon says itself.
 ``unknown_site``, ``ambiguous_account``, ``unknown_ref``, ``target_not_found``,
 ``target_ambiguous``, ``login_in_progress``, ``private_address``, ``bridge_exists``, ``no_socket``,
 ``no_session``, ``session_idle``, ``session_ended``, ``session_failed``,
-``browser_error``, ``no_display``, ``x11_only``, ``bad_policy`` and ``internal``.
+``browser_error``, ``no_display``, ``x11_only``, ``bad_policy``, ``setup_error`` (the public
+suffix list is missing) and ``internal``.
 
 **Liveness.** A task polls every session twice a second. A session whose browser has been
 killed (the holder or Chrome itself) is ended and reported within about a second, instead of the
@@ -205,6 +206,7 @@ _ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
     (sessions.AgentBrowserError, "browser_error"),
     (sessions.SessionError, "session_failed"),
     (sites.PolicyError, "bad_policy"),
+    (sites.SuffixListError, "setup_error"),
     (sites.AmbiguousAccountError, "ambiguous_account"),
     (ValueError, "bad_request"),
 )
@@ -1514,6 +1516,7 @@ class Daemon:
         account = args.get("account")
         if account is not None and not isinstance(account, str):
             _fail("bad_request", '"account" must be a string')
+        await asyncio.to_thread(sites.system_suffixes)  # no list, no login: see SuffixListError
         site, start = await self._login_target(target, account)
         existing = await self._existing_policy(site)
         await self._refuse_private_start(site, start, existing)

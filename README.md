@@ -44,6 +44,7 @@ valetkey doctor
 - Python 3.14 or newer, and [uv](https://docs.astral.sh/uv/)
 - [bubblewrap](https://github.com/containers/bubblewrap)
 - Chromium
+- `publicsuffix-list` (`publicsuffix` on Debian and Ubuntu)
 - [agent-browser](https://github.com/vercel-labs/agent-browser) 0.39 or newer, tested with 0.39.4
 - A Wayland desktop, to log in (or a bridge or a browser view, for a server: see Remote logins)
 

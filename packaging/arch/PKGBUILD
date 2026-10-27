@@ -28,6 +28,7 @@ depends=(
   'chromium'
   'glibc'
   'libgcc'
+  'publicsuffix-list'
   'python>=3.14'
   'python<3.15'
 )

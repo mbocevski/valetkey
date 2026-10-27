@@ -1102,6 +1102,38 @@ def test_a_login_with_no_screen_leaves_the_running_session_alone(roots: sites.Ro
     run(scenario())
 
 
+def test_a_login_is_refused_without_the_public_suffix_list_but_a_known_site_opens(
+    roots: sites.Roots, suffix_list: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_site(roots)
+    monkeypatch.setattr(sites, "PUBLIC_SUFFIX_LIST", suffix_list.parent / "absent.dat")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            for target in ("sitex", "https://other.example.com/"):
+                with pytest.raises(DaemonError) as info:
+                    await c.call("login", target=target)
+                assert info.value.code == "setup_error"
+                assert info.value.message == sites.MISSING_LIST_MESSAGE
+            assert rig.logins.windows == []
+            await c.call("open", site="sitex")
+            assert (await c.call("status", site="sitex"))["state"] == "session"
+
+    run(scenario())
+
+
+def test_a_session_does_not_reach_a_public_suffix_that_a_policy_lists(roots: sites.Roots) -> None:
+    add_site(roots, allow=("sitex.test", "github.io"))
+
+    async def scenario() -> None:
+        async with serving(roots) as _rig, await _rig.connect() as c:
+            await c.call("open", site="sitex")
+            reloaded = await c.call("reload_policy", site="sitex")
+            assert reloaded["allow"] == ["sitex.test"]
+
+    run(scenario())
+
+
 def test_a_login_on_a_laptop_or_in_a_browser_closes_the_session_though_there_is_no_screen(
     roots: sites.Roots,
 ) -> None:

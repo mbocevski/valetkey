@@ -191,8 +191,22 @@ def test_ip_start_url_is_covered_only_by_itself() -> None:
 def test_two_level_suffixes_and_custom_suffixes() -> None:
     result = learn.classify("https://app.sitex.co.uk/", ["x.sitex.co.uk", "other.co.uk"], [])
     assert result == learn.Classification(allow=("other.co.uk", "sitex.co.uk"), excluded=())
-    custom = learn.classify("https://app.sitex.test.example/", [], [], suffixes=frozenset())
+    custom = learn.classify(
+        "https://app.sitex.test.example/", [], [], suffixes=sites.SuffixList.parse("example")
+    )
     assert custom.allow == ("test.example",)
+
+
+def test_a_login_on_a_shared_suffix_allows_only_its_own_host() -> None:
+    result = learn.classify(
+        "https://myapp.github.io/", ["cdn.jsdelivr.net", "myapp.github.io", "x.myapp.github.io"], []
+    )
+    assert result.allow == ("cdn.jsdelivr.net", "myapp.github.io")
+    assert sites.host_matches("myapp.github.io", result.allow)
+    assert not sites.host_matches("github.io", result.allow)
+    assert not sites.host_matches("victim.github.io", result.allow)
+    assert learn.same_owner("shop.myapp.github.io", "myapp.github.io")
+    assert not learn.same_owner("other.github.io", "myapp.github.io")
 
 
 def test_a_host_under_an_allowed_provider_is_not_listed_apart() -> None:

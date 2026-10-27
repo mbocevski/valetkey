@@ -45,6 +45,7 @@ Changes that affect users of valetkey. The format follows
 ### Changed
 
 - A `browser_click` whose `expect` does not come true now takes one snapshot per check, with growing pauses, and at most 15 checks, so it starts far fewer browser programs in the same time.
+- The public suffix list (`publicsuffix-list`, or `publicsuffix` on Debian and Ubuntu) is now required; `valetkey doctor` checks it, and `valetkey allow` and `valetkey add` refuse a public suffix.
 - `browser_open` and `browser_navigate` label the page title as the title and tell the agent to call `browser_snapshot` to read the page.
 - A login leaves out the ad and tracking hosts of Peter Lowe's list, kept in the package, and more of those a page loads; after an upgrade, restart your MCP client.
 - A policy file without a `denied` list keeps its excluded hosts as left out, and the next login builds that list again.
@@ -61,6 +62,7 @@ Changes that affect users of valetkey. The format follows
 ### Fixed
 
 - `browser_screenshot` reads the picture only if it is a plain file of at most 20 MB, so a browser that swapped it for a link to another file cannot make the server return that file.
+- A login at `myapp.github.io` or under `co.il` no longer allows the whole suffix or shares a profile with other sites under it; logins are refused without the public suffix list.
 - `browser_open` and `browser_navigate` leave out the title block, `URL: (none)` and an empty refused list when no page loaded: an expired login, a refused start page or a URL that only started a download.
 - `valetkey bridge` now stays connected through a real `ssh`: it gave ssh `/dev/null` as input, which ended the remote side at once, so the server never kept the bridge.
 - `browser_snapshot` now includes the page's text, such as paragraphs, lists and tables, cuts a very long page with a note saying so, and takes `interactive` for the short list of elements to act on.

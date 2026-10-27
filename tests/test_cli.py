@@ -179,6 +179,45 @@ def test_allow_adds_a_host(roots: sites.Roots, capsys: pytest.CaptureFixture[str
     assert sites.load_policy(roots, "sitex").allow == ("sitex.com", "login.okta.com")
 
 
+def test_allow_refuses_a_public_suffix(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    status, out, err = run(capsys, "allow", "sitex", "github.io")
+    assert (status, out) == (1, "")
+    assert err == (
+        "valetkey: github.io is a public suffix shared by many unrelated sites. "
+        "Allow the full host name instead.\n"
+    )
+    assert sites.load_policy(roots, "sitex").allow == ("sitex.com",)
+    assert run(capsys, "allow", "sitex", "myapp.github.io")[0] == 0
+
+
+def test_add_refuses_a_start_page_that_is_a_public_suffix(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    status, out, err = run(capsys, "add", "pages", "https://github.io/")
+    assert (status, out) == (1, "")
+    assert err == (
+        "valetkey: github.io is a public suffix shared by many unrelated sites. "
+        "Allow the full host name instead.\n"
+    )
+    assert sites.known_sites(roots) == []
+    assert run(capsys, "add", "pages", "https://myapp.github.io/")[0] == 0
+
+
+def test_allow_says_when_the_public_suffix_list_is_missing(
+    roots: sites.Roots,
+    capsys: pytest.CaptureFixture[str],
+    suffix_list: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_site(roots)
+    monkeypatch.setattr(sites, "PUBLIC_SUFFIX_LIST", suffix_list.parent / "absent.dat")
+    status, _, err = run(capsys, "allow", "sitex", "cdn.sitex.com")
+    assert (status, err) == (1, f"valetkey: {sites.MISSING_LIST_MESSAGE}\n")
+
+
 def test_allow_is_idempotent(roots: sites.Roots, capsys: pytest.CaptureFixture[str]) -> None:
     make_site(roots)
     before = sites.policy_path(roots, "sitex").stat().st_mtime_ns
@@ -949,8 +988,9 @@ def results(fake: FakeSystem) -> dict[str, tuple[str, str]]:
     return {c.name: (c.status, c.detail) for c in cli.run_checks(fake.system())}
 
 
-def test_doctor_all_good(tmp_path: Path) -> None:
+def test_doctor_all_good(tmp_path: Path, suffix_list: Path) -> None:
     fake = FakeSystem(tmp_path)
+    modified = datetime.fromtimestamp(suffix_list.stat().st_mtime, UTC)
     assert results(fake) == {
         "bwrap": ("ok", "bwrap 0.13.1"),
         "namespaces": ("ok", "unprivileged user namespaces work"),
@@ -960,6 +1000,7 @@ def test_doctor_all_good(tmp_path: Path) -> None:
         "display": ("ok", "Wayland display /run/user/1000/wayland-1"),
         "security-context": ("ok", "the Wayland compositor restricts the login window"),
         "seccomp": ("ok", "the sandbox refuses 30 system calls a browser has no use for"),
+        "suffix-list": ("ok", f"public suffix list: {suffix_list}, modified {modified:%Y-%m-%d}"),
         "units": ("info", "systemd units not installed; run `valetkey install-units`"),
         "socket": ("info", "valetkeyd.socket is inactive"),
     }
@@ -1204,6 +1245,7 @@ def test_doctor_json_shape(
         "display",
         "security-context",
         "seccomp",
+        "suffix-list",
         "units",
         "socket",
     ]
@@ -1348,6 +1390,47 @@ def connect_to(monkeypatch: pytest.MonkeyPatch, connection: FakeConnection | Bas
 
 def not_running() -> cli.client.DaemonError:
     return cli.client.DaemonError("not_running", "valetkeyd is not running (/x: missing)")
+
+
+def suffix_warning(entry: str) -> str:
+    return (
+        f"sitex lists {entry}, a public suffix, so valetkey ignores it: "
+        "log in again to relearn its hosts."
+    )
+
+
+def test_status_names_a_site_that_lists_a_public_suffix(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_site(roots, allow=("sitex.com", "github.io"))
+    sites.policy_path(roots, "broken").parent.joinpath("broken.json").write_text(
+        "{", encoding="utf-8"
+    )
+    connect_to(monkeypatch, not_running())
+    status, out, _ = run(capsys, "status")
+    assert status == 0
+    assert out.splitlines() == [
+        "valetkeyd is not running",
+        "warn: " + suffix_warning("github.io"),
+    ]
+    connect_to(monkeypatch, FakeConnection(status=ACTIVITY))
+    assert "warn: sitex lists github.io" in run(capsys, "status")[1]
+    connect_to(monkeypatch, FakeConnection(status=ACTIVITY))
+    assert "warn" not in run(capsys, "status", "--json")[1]
+
+
+def test_doctor_fails_without_the_public_suffix_list_and_warns_of_a_suffix(
+    tmp_path: Path, suffix_list: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeSystem(tmp_path)
+    sites.save_policy(
+        fake.roots, sites.Policy("sitex", "https://sitex.com/", ("sitex.com", "co.uk"))
+    )
+    warned = results(fake)
+    assert warned["policy"] == ("warn", suffix_warning("co.uk"))
+    monkeypatch.setattr(sites, "PUBLIC_SUFFIX_LIST", suffix_list.parent / "absent.dat")
+    assert results(fake)["suffix-list"] == ("fail", sites.MISSING_LIST_MESSAGE)
+    assert cli.run_checks(fake.system())
 
 
 def test_status_prints_a_table(

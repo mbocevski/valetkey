@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path  # the command-line framework reads the annotation at runtime
 from typing import TYPE_CHECKING, Annotated, Any
@@ -172,6 +173,34 @@ def _host(value: str) -> str:
         return sites.host_of(value)
     except ValueError as error:
         raise CommandError(str(error)) from error
+
+
+def _refuse_suffix(host: str) -> None:
+    """Raise when ``host`` is a public suffix, which no site may be allowed whole."""
+    try:
+        if sites.is_public_suffix(host):
+            raise CommandError(sites.SUFFIX_ALLOW_MESSAGE.format(host=host))
+    except sites.SuffixListError as error:
+        raise CommandError(str(error)) from error
+
+
+def suffix_warnings(roots: sites.Roots) -> list[str]:
+    """Return a line for each entry of a saved site that is a public suffix.
+
+    Loading a policy ignores such an entry, so the site is limited to what remains.
+    """
+    found: list[str] = []
+    for name in sites.known_sites(roots):
+        try:
+            policy = sites.load_policy(roots, name)
+        except OSError, sites.PolicyError:
+            continue
+        found.extend(
+            f"{name} lists {entry}, a public suffix, so valetkey ignores it: "
+            "log in again to relearn its hosts."
+            for entry in policy.ignored
+        )
+    return found
 
 
 def _learned(policy: sites.Policy) -> str | None:
@@ -416,6 +445,7 @@ def _new_site(  # noqa: PLR0913 - one thing each: the name, the start, the range
         host = sites.host_of(start)
     except ValueError as error:
         raise CommandError(str(error)) from error
+    _refuse_suffix(host)
     allow, excluded, denied = (host,), (), ()
     if copy_from is not None:
         source = _load(roots, copy_from)
@@ -499,6 +529,7 @@ def allow(site: str, host: str | None = None, *, network: PrivateNetwork = None)
         policy = _load(roots, site)
         site = policy.site
         name = _host(str(host))
+        _refuse_suffix(name)
         changed, added, removed = sites.allow_host(policy, name)
         if not (added or removed):
             changed = None
@@ -1176,6 +1207,25 @@ def check_seccomp(system: System) -> Check:
     return Check("seccomp", "warn", detail)
 
 
+def check_suffix_list(_system: System) -> Check:
+    """Check that the public suffix list is installed, which logins need to name a site."""
+    try:
+        sites.system_suffixes()
+        modified = datetime.fromtimestamp(sites.PUBLIC_SUFFIX_LIST.stat().st_mtime, UTC)
+    except sites.SuffixListError, OSError:
+        return Check("suffix-list", "fail", sites.MISSING_LIST_MESSAGE)
+    return Check(
+        "suffix-list",
+        "ok",
+        f"public suffix list: {sites.PUBLIC_SUFFIX_LIST}, modified {modified:%Y-%m-%d}",
+    )
+
+
+def check_policies(system: System) -> list[Check]:
+    """Warn about each saved site that lists a public suffix."""
+    return [Check("policy", "warn", text) for text in suffix_warnings(system.roots)]
+
+
 def check_config(system: System) -> list[Check]:
     """Check ``config.json``, if there is one: it names a program, so it must be safe to trust."""
     try:
@@ -1221,6 +1271,8 @@ def run_checks(system: System) -> list[Check]:
         *check_security_context(system),
         *check_remote_login(system),
         check_seccomp(system),
+        check_suffix_list(system),
+        *check_policies(system),
         *check_config(system),
         *check_units(system),
     ]
@@ -1330,7 +1382,18 @@ def show_status(
     type into the login window. The table prints it under the table, with the ssh command that
     makes it reachable. --json leaves it out unless --show-links is given, so a script that
     logs its input does not keep it.
+
+    A saved site that lists a public suffix such as `github.io` is named below the table, because
+    valetkey ignores that entry: log in again to relearn the site's hosts.
     """
+    code = _show_activity(as_json=as_json, show_links=show_links)
+    if not as_json:
+        for text in suffix_warnings(sites.roots_from_env()):
+            _say(f"warn: {text}")
+    return code
+
+
+def _show_activity(*, as_json: bool, show_links: bool) -> int:
     try:
         activity = asyncio.run(_daemon_status(links=show_links or not as_json))
     except client.DaemonError as error:

@@ -45,6 +45,54 @@ def runtime_base() -> Iterator[str]:
     shutil.rmtree(directory, ignore_errors=True)
 
 
+SUFFIX_LIST = """\
+// A small public suffix list for the tests: the real one is never read.
+// ===BEGIN ICANN DOMAINS===
+com
+org
+net
+eu
+se
+io
+uk
+ac.uk
+co.uk
+gov.uk
+ltd.uk
+me.uk
+org.uk
+plc.uk
+au
+com.au
+edu.au
+gov.au
+net.au
+org.au
+nz
+co.nz
+jp
+co.jp
+il
+co.il
+pl
+com.pl
+// ===BEGIN PRIVATE DOMAINS===
+github.io
+herokuapp.com
+s3.amazonaws.com
+"""
+"""The list every test sees, so none depends on the one installed on the machine."""
+
+
+@pytest.fixture(autouse=True)
+def suffix_list(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Point valetkey at a small public suffix list of the tests' own."""
+    path = tmp_path_factory.mktemp("suffixes") / "list.dat"
+    path.write_text(SUFFIX_LIST, encoding="utf-8")
+    monkeypatch.setattr(sites, "PUBLIC_SUFFIX_LIST", path)
+    return path
+
+
 @pytest.fixture(autouse=True)
 def runtime_dir(monkeypatch: pytest.MonkeyPatch, runtime_base: str) -> None:
     """Give every test a ``$XDG_RUNTIME_DIR`` of its own.

@@ -86,40 +86,102 @@ NEVER_ALLOWED_ADDRESSES = tuple(
 ranges a site may list, and a page that reaches one can read the machine's credentials, so they
 are refused whatever is listed."""
 
-# Suffixes made of two labels under which people register their own name (``example.co.uk``).
-# This is a small stand-in for the public suffix list: a host under any other suffix is taken to
-# have a one-label suffix. Pass your own set to the functions that take ``suffixes`` to replace it.
-TWO_LEVEL_SUFFIXES: frozenset[str] = frozenset(
-    {
-        "ac.uk",
-        "co.uk",
-        "gov.uk",
-        "ltd.uk",
-        "me.uk",
-        "org.uk",
-        "plc.uk",
-        "com.au",
-        "edu.au",
-        "gov.au",
-        "net.au",
-        "org.au",
-        "co.nz",
-        "net.nz",
-        "org.nz",
-        "co.jp",
-        "ne.jp",
-        "or.jp",
-        "co.in",
-        "co.kr",
-        "co.za",
-        "com.br",
-        "com.cn",
-        "com.hk",
-        "com.mx",
-        "com.sg",
-        "com.tr",
-    }
+PUBLIC_SUFFIX_LIST = Path("/usr/share/publicsuffix/public_suffix_list.dat")
+"""The public suffix list, from the distribution's package (``publicsuffix-list`` on Arch and
+Fedora, ``publicsuffix`` on Debian and Ubuntu). valetkey ships no copy of it."""
+MISSING_LIST_MESSAGE = (
+    "The public suffix list is missing: install publicsuffix-list (Arch, Fedora) "
+    "or publicsuffix (Debian, Ubuntu)."
 )
+
+
+class SuffixListError(RuntimeError):
+    """The public suffix list is missing or unreadable, so no registrable domain can be told."""
+
+
+@dataclass(frozen=True, slots=True)
+class SuffixList:
+    """The rules of a public suffix list: what is shared, and so never one site's own.
+
+    ``rules`` are the plain suffixes (``co.uk``, ``github.io``), ``wildcards`` the parents of
+    ``*.`` rules (``ck`` for ``*.ck``) and ``exceptions`` the ``!`` rules (``www.ck``).
+    """
+
+    rules: frozenset[str] = frozenset()
+    wildcards: frozenset[str] = frozenset()
+    exceptions: frozenset[str] = frozenset()
+
+    @classmethod
+    def parse(cls, text: str) -> SuffixList:
+        """Read the list format: one rule a line, ``//`` comments, ``*`` and ``!`` rules.
+
+        Both sections of the list count. A rule written in Unicode is kept in its ``xn--`` form,
+        which is how hosts are written here; one that cannot be converted is left out.
+        """
+        rules: set[str] = set()
+        wildcards: set[str] = set()
+        exceptions: set[str] = set()
+        for line in text.splitlines():
+            rule = line.split(maxsplit=1)[0].lower() if line.strip() else ""
+            if not rule or rule.startswith("//"):
+                continue
+            kind = rules
+            if rule.startswith("!"):
+                kind, rule = exceptions, rule[1:]
+            elif rule.startswith("*."):
+                kind, rule = wildcards, rule[2:]
+            try:
+                kind.add(rule.encode("idna").decode("ascii"))
+            except UnicodeError:
+                continue
+        return cls(frozenset(rules), frozenset(wildcards), frozenset(exceptions))
+
+    def _suffix_labels(self, labels: list[str]) -> int:
+        """Return how many trailing labels of ``labels`` are the public suffix."""
+        longest = 1  # the default rule: an unlisted last label is a suffix
+        for start in range(len(labels)):
+            candidate = ".".join(labels[start:])
+            if candidate in self.exceptions:
+                return len(labels) - start - 1
+            parent = ".".join(labels[start + 1 :])
+            if candidate in self.rules or (parent and parent in self.wildcards):
+                longest = max(longest, len(labels) - start)
+        return longest
+
+    def registrable(self, host: str) -> str:
+        """Return ``host`` cut to one label above its public suffix, or whole if it has none."""
+        labels = host.split(".")
+        keep = self._suffix_labels(labels) + 1
+        return host if keep > len(labels) else ".".join(labels[-keep:])
+
+    def is_suffix(self, host: str) -> bool:
+        """Tell whether ``host`` is itself a public suffix that the list names."""
+        if host in self.exceptions:
+            return False
+        parent = host.partition(".")[2]
+        return host in self.rules or (bool(parent) and parent in self.wildcards)
+
+
+@lru_cache(maxsize=4)
+def _read_suffixes(path: Path) -> SuffixList:
+    try:
+        parsed = SuffixList.parse(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as error:
+        raise SuffixListError(MISSING_LIST_MESSAGE) from error
+    if not parsed.rules:
+        raise SuffixListError(MISSING_LIST_MESSAGE)
+    return parsed
+
+
+def system_suffixes() -> SuffixList:
+    """Return the system's public suffix list, read once per process.
+
+    Raises:
+        SuffixListError: when the file is missing, unreadable or has no rules. There is no
+            built-in list to fall back on, because a guess could allow a whole shared suffix.
+
+    """
+    return _read_suffixes(PUBLIC_SUFFIX_LIST)
 
 
 class PolicyError(ValueError):
@@ -287,18 +349,37 @@ def is_page_key(value: str) -> bool:
     )
 
 
-def registrable_domain(host: str, suffixes: frozenset[str] = TWO_LEVEL_SUFFIXES) -> str:
+def registrable_domain(host: str, suffixes: SuffixList | None = None) -> str:
     """Return the part of ``host`` a person registers: ``app.sitex.co.uk`` gives ``sitex.co.uk``.
 
-    The rule is the last two labels, or the last three when those two form one of ``suffixes``.
-    A single label or an IP address comes back unchanged.
+    The rule is one label above the public suffix, so ``myapp.github.io`` stays whole: no one
+    owns ``github.io``. ``suffixes`` is the system's list unless given. A single label, a public
+    suffix on its own and an IP address come back unchanged.
+
+    Raises:
+        SuffixListError: when ``suffixes`` is not given and the system has no list.
+
     """
     host = normalize_host(host)
     if is_ip_literal(host):
         return host
-    labels = host.split(".")
-    keep = 3 if ".".join(labels[-2:]) in suffixes else 2
-    return ".".join(labels[-keep:])
+    return (suffixes or system_suffixes()).registrable(host)
+
+
+def is_public_suffix(host: str, suffixes: SuffixList | None = None) -> bool:
+    """Tell whether ``host`` is a public suffix such as ``co.uk`` or ``github.io``.
+
+    Raises:
+        SuffixListError: when ``suffixes`` is not given and the system has no list.
+
+    """
+    host = normalize_host(host)
+    return not is_ip_literal(host) and (suffixes or system_suffixes()).is_suffix(host)
+
+
+SUFFIX_ALLOW_MESSAGE = (
+    "{host} is a public suffix shared by many unrelated sites. Allow the full host name instead."
+)
 
 
 def validate_site_name(name: str) -> str:
@@ -422,7 +503,7 @@ def resolve_account(roots: Roots, name: str) -> str:
     return accounts[0] if accounts else name
 
 
-def site_name_for(value: str, suffixes: frozenset[str] = TWO_LEVEL_SUFFIXES) -> str:
+def site_name_for(value: str, suffixes: SuffixList | None = None) -> str:
     """Derive a site name from a host or URL: the first label of its registrable domain.
 
     ``sitex.com`` and ``https://app.sitex.com/login`` give ``sitex``, and ``app.sitex.co.uk``
@@ -439,9 +520,7 @@ def site_name_for(value: str, suffixes: frozenset[str] = TWO_LEVEL_SUFFIXES) -> 
     return validate_site_name(domain.split(".")[0][:_DERIVED_LABEL_LENGTH].rstrip("-"))
 
 
-def choose_site_name(
-    roots: Roots, value: str, suffixes: frozenset[str] = TWO_LEVEL_SUFFIXES
-) -> str:
+def choose_site_name(roots: Roots, value: str, suffixes: SuffixList | None = None) -> str:
     """Pick the site name for the host or URL in ``value``, avoiding other sites on disk.
 
     Start from :func:`site_name_for`. A name is free when no account of it has a policy file or a
@@ -475,7 +554,7 @@ def _accounts_on_disk(roots: Roots, site: str) -> list[str]:
     return sorted(names)
 
 
-def _site_domain(roots: Roots, accounts: list[str], suffixes: frozenset[str]) -> str | None:
+def _site_domain(roots: Roots, accounts: list[str], suffixes: SuffixList | None) -> str | None:
     """Return the registrable domain of the first of ``accounts`` whose policy can be read."""
     for name in accounts:
         try:
@@ -588,6 +667,9 @@ class Policy:
     ``private_networks`` are the address ranges (``10.20.0.0/16``) in which a host the site
     allows may resolve although they are private, see :func:`private_network`. Only the person
     sets them. It is optional too.
+    ``ignored`` are the ``allow`` entries that :func:`load_policy` dropped because each is a
+    public suffix (``github.io``), which would let the site reach every unrelated host under
+    it. It is never written to the file.
 
     Construction validates every field and raises ``ValueError`` on a bad one.
     """
@@ -601,6 +683,7 @@ class Policy:
     private_networks: tuple[str, ...] = ()
     denied: tuple[str, ...] = ()
     login_cookies: tuple[str, ...] = ()
+    ignored: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate the fields."""
@@ -789,7 +872,7 @@ def allows(policy: Policy, host: str) -> bool:
     )
 
 
-def load_policy(roots: Roots, site: str) -> Policy:
+def load_policy(roots: Roots, site: str, suffixes: SuffixList | None = None) -> Policy:
     """Read and validate ``site``'s policy file.
 
     The file must be a JSON object with the keys ``site``, ``start``, ``allow``, ``excluded``
@@ -797,7 +880,9 @@ def load_policy(roots: Roots, site: str) -> Policy:
     ``private_networks``. A
     file without ``denied`` is one from before it existed: it has none, and its ``excluded``
     entries stay what a login left out, built again by the next login. Missing keys and
-    unknown keys are both errors, and ``site`` must equal the file name.
+    unknown keys are both errors, and ``site`` must equal the file name. An ``allow`` entry that
+    is a public suffix is left out and named in ``ignored``; with no suffix list on the machine
+    the entries are kept, since the policy was written down before and its session must open.
 
     Raises:
         FileNotFoundError: when the site has no policy file.
@@ -820,10 +905,12 @@ def load_policy(roots: Roots, site: str) -> Policy:
         if data["site"] != site:
             msg = f"site is {data['site']!r} but the file is named for {site!r}"
             raise PolicyError(msg)
+        allow, ignored = _split_suffixes(_hosts(data, "allow"), suffixes)
         return Policy(
             site=_text(data, "site"),
             start=_text(data, "start"),
-            allow=_hosts(data, "allow"),
+            allow=allow,
+            ignored=ignored,
             excluded=_hosts(data, "excluded"),
             denied=_hosts(data, "denied") if "denied" in data else (),
             learned=_learned(data["learned"]),
@@ -836,6 +923,18 @@ def load_policy(roots: Roots, site: str) -> Policy:
     except ValueError as exc:
         msg = f"{path}: {exc}"
         raise PolicyError(msg) from exc
+
+
+def _split_suffixes(
+    allow: tuple[str, ...], suffixes: SuffixList | None
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the ``allow`` entries that are not public suffixes, and those that are."""
+    try:
+        found = suffixes or system_suffixes()
+    except SuffixListError:
+        return allow, ()
+    ignored = tuple(entry for entry in allow if is_public_suffix(entry, found))
+    return tuple(entry for entry in allow if entry not in ignored), ignored
 
 
 def _text(data: dict[str, Any], key: str) -> str:

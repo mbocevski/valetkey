@@ -37,7 +37,8 @@ systemctl --user enable --now valetkeyd.socket
 
 `uv tool install .` builds valetkey and its dependencies into a private environment of its own.
 Install bubblewrap, Chromium and agent-browser with your system's package manager, or from the
-agent-browser releases.
+agent-browser releases. Install the public suffix list too: `publicsuffix-list` on Arch and
+Fedora, `publicsuffix` on Debian and Ubuntu. The Arch package depends on it.
 
 ## The systemd units
 
@@ -71,11 +72,12 @@ name it: `valetkey forget sitex:work`.
 ## Check the setup
 
 `valetkey doctor` prints one line per check. It fails when bubblewrap, user namespaces, Chromium,
-agent-browser or the runtime directory are not usable, when someone else can write `config.json`,
-and when the browser view is switched on without the tools it needs. A missing Wayland display is
-a warning, because only logging in needs one, and so are a compositor that cannot restrict the
-login window and a sandbox that cannot refuse system calls. See [Troubleshooting](troubleshooting.md)
-when a check fails.
+agent-browser, the public suffix list or the runtime directory are not usable. It also fails when
+someone else can write `config.json`, and when the browser view is switched on without the tools
+it needs. A missing Wayland display is a warning, because only logging in needs one, and so are a
+compositor that cannot restrict the login window and a sandbox that cannot refuse system calls. So
+is a saved site that lists a public suffix, which valetkey ignores: log in again to relearn its
+hosts. See [Troubleshooting](troubleshooting.md) when a check fails.
 
 ## Upgrade and remove
 

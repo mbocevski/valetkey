@@ -437,7 +437,7 @@ MIN_OWNER_LABEL = 3
 ``x.org``) is too easy for someone else to register under another suffix."""
 
 
-def same_owner(host: str, domain: str, suffixes: frozenset[str] = sites.TWO_LEVEL_SUFFIXES) -> bool:
+def same_owner(host: str, domain: str, suffixes: sites.SuffixList | None = None) -> bool:
     """Tell whether ``host`` belongs to whoever owns the registrable ``domain``.
 
     That is so when the registrable domain of ``host`` is ``domain``, or when it has the same
@@ -460,7 +460,7 @@ def classify(
     seen_hosts: Iterable[str],
     shown_hosts: Iterable[str],
     passed_hosts: Iterable[str] = (),
-    suffixes: frozenset[str] = sites.TWO_LEVEL_SUFFIXES,
+    suffixes: sites.SuffixList | None = None,
 ) -> Classification:
     """Sort the hosts a login reached into ``allow`` and ``excluded``.
 
