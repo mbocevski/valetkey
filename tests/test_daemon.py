@@ -219,6 +219,10 @@ class FakeSession:
         self.calls: list[tuple[Any, ...]] = []
         self.fail: BaseException | None = None
         self.close_error: Exception | None = None
+        self.close_gate: threading.Event | None = None
+        """When set, ``close`` waits for this event, so a test can hold a close open."""
+        self.closing = threading.Event()
+        """Set when ``close`` has started."""
         self.texts: list[str] = []
         self.on_click: Callable[[], None] | None = None
         self.on_open: Callable[[], None] | None = None
@@ -342,6 +346,9 @@ class FakeSession:
     def close(self) -> None:
         self.closed += 1
         self.alive = False
+        self.closing.set()
+        if self.close_gate is not None:
+            self.close_gate.wait(10)
         if self.close_error is not None:
             raise self.close_error
 
@@ -5910,6 +5917,34 @@ def test_an_idle_session_ends_with_the_reason_and_a_finished_download_is_kept(
         run(scenario())
     lines = [r.getMessage() for r in caplog.records if "unused for" in r.getMessage()]
     assert lines == ["closing the sitex session: unused for 15 minutes"]
+
+
+def test_a_call_made_while_the_idle_close_runs_still_hears_that_the_session_was_idle(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    ticks = Ticks()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.close_gate = threading.Event()
+            ticks.at(IDLE)
+            check = asyncio.ensure_future(rig.daemon._check_sessions())  # noqa: SLF001
+            await eventually(session.closing.is_set)
+            call = asyncio.ensure_future(c.call("snapshot", site="sitex"))
+            await asyncio.sleep(0.2)  # it is now waiting for the lock the close holds
+            session.close_gate.set()
+            await check
+            with pytest.raises(DaemonError) as info:
+                await call
+            assert info.value.code == "session_idle"
+
+    run(scenario())
 
 
 def test_the_next_call_after_an_idle_close_says_so_until_the_site_is_opened(
