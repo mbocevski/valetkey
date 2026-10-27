@@ -31,6 +31,7 @@ from valetkey import (
     learn,
     login,
     mcp_server,
+    notify,
     procs,
     protocol,
     registry,
@@ -4135,7 +4136,7 @@ def test_the_real_notifier_is_the_default(
         seen.append(question.host)
         return "yes"
 
-    monkeypatch.setattr(daemon.notify, "ask", fake)
+    monkeypatch.setattr(notify, "ask", fake)
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
