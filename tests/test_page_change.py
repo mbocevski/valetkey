@@ -24,8 +24,15 @@ PAGE = (
     b"'<ul><li><a href=/orders>Orders</a></li><li><a href=/settings>Settings</a></li></ul>'\">"
     b"Menu</button><div id=menu></div><a href='/other'>Other</a>"
 )
+NAV_PAGE = (
+    b"<title>Shop</title><nav><button onclick=\"document.getElementById('menu').innerHTML = "
+    b"'<ul><li><a href=/orders>Orders</a></li><li><a href=/settings>Settings</a></li></ul>'\">"
+    b"Account</button><div id=menu></div></nav><h1>Shop</h1>"
+    + b"".join(b"<p>Row %d <a href=/row%d>Item %d</a></p>" % (n, n, n) for n in range(60))
+)
 PAGES = {
     "/": ({"Content-Type": "text/html"}, PAGE),
+    "/nav": ({"Content-Type": "text/html"}, NAV_PAGE),
     "/orders": ({"Content-Type": "text/html"}, b"<title>Your orders</title><h1>Orders</h1>"),
     "/other": ({"Content-Type": "text/html"}, b"<title>Other page</title><h1>Other</h1>"),
 }
@@ -58,8 +65,9 @@ def test_a_click_says_what_changed_and_its_new_references_work(short_dir: Path) 
             try:
                 async with await client.Client.connect(client.socket_path(roots)) as c:
                     await c.call("open", site="demo")
-                    # No snapshot yet: nothing to compare with.
-                    assert "change" not in await c.call("click", site="demo", text="Menu")
+                    # No snapshot yet: a baseline is taken for the click, and the change is told.
+                    first = await c.call("click", site="demo", text="Menu")
+                    assert first["change"]["kind"] == "delta"
                     await c.call("navigate", site="demo", url="http://site.test/")
                     await c.call("snapshot", site="demo", interactive=True)
                     opened = (await c.call("click", site="demo", text="Menu"))["change"]
@@ -80,6 +88,48 @@ def test_a_click_says_what_changed_and_its_new_references_work(short_dir: Path) 
                     again = await c.call("click", site="demo", text="Other")
                     assert again["change"]["kind"] == "full"
                     assert again["change"]["title"]["text"] == "Other page"
+            finally:
+                await server.shutdown()
+
+    run(scenario())
+
+
+@pytest.mark.integration
+@needs_everything
+def test_a_click_after_a_snapshot_of_only_the_nav_still_says_what_changed(short_dir: Path) -> None:
+    runtime = short_dir / "rt"
+    runtime.mkdir(mode=0o700)
+    roots = sites.Roots(short_dir / "cfg", short_dir / "state", runtime)
+    sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
+
+    async def resolve(_host: str, _port: int) -> list[str]:
+        return ["127.0.0.1"]
+
+    async def scenario() -> None:
+        with PageServer({}, files=PAGES) as pages:
+
+            async def connect(_address: str, _port: int) -> Any:  # noqa: ANN401
+                return await asyncio.open_connection(*pages.address)
+
+            options = {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
+            server = daemon.Daemon(roots, proxy_options=options)
+            await server.start()
+            try:
+                async with await client.Client.connect(client.socket_path(roots)) as c:
+                    await c.call("open", site="demo")
+                    await c.call("navigate", site="demo", url="http://site.test/nav")
+                    scoped = await c.call("snapshot", site="demo", selector="nav")
+                    assert scoped["scope"] == "nav"
+                    assert "Item 3" not in scoped["snapshot"]["text"]
+                    opened = (await c.call("click", site="demo", text="Account"))["change"]
+                    assert opened["kind"] == "delta"
+                    added = opened["added"]["text"]
+                    assert 'link "Orders"' in added
+                    assert 'link "Settings"' in added
+                    ref = re.search(r'link "Orders" \[ref=(e\d+)\]', added)
+                    assert ref is not None
+                    went = await c.call("click", site="demo", ref=ref.group(1))
+                    assert went["url"].endswith("/orders")
             finally:
                 await server.shutdown()
 

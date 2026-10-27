@@ -95,6 +95,8 @@ class Connection:
     client received of the page at ``url``, and that ``url``. A click by reference means the
     element it was in those snapshots. A snapshot of one part of the page adds to the table when
     the page is the same, and a snapshot of the whole page or of another page replaces it."""
+    snapshot_kinds: dict[str, bool] = field(default_factory=dict)
+    """For each site, whether this client's last snapshot asked for the interactive tree."""
     views: dict[str, deltas.View] = field(default_factory=dict)
     """For each site, the tree this client last read in a snapshot, which a delta changes."""
     seen_downloads: dict[str, dict[str, downloads.Signature]] = field(default_factory=dict)

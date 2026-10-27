@@ -505,8 +505,9 @@ def click_text(result: dict[str, Any]) -> str:
         envelope_text(result),
         f"Clicked: a {clicked['role']}, named:",
         page_content(untrusted_text(clicked["name"])),
-        verdict,
     ]
+    if not (outcome == "unchecked" and result.get("change")):
+        lines.append(verdict)  # a reported change says what the click did, so it replaces this
     if downloaded := downloads_text(result.get("downloads")):
         lines.append(downloaded)
     if changed := change_text(result.get("change")):

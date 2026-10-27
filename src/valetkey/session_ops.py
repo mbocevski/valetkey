@@ -14,7 +14,7 @@ import logging
 import shutil
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urldefrag, urljoin, urlsplit
 
 from valetkey import (
     approvals,
@@ -515,6 +515,7 @@ class Sessions:
 
         selector = _selector_arg(args)
         start_line = _start_line_arg(args)
+        connection.snapshot_kinds[state.name] = interactive
 
         def look(
             session: BrowserSession,
@@ -563,6 +564,7 @@ class Sessions:
         target = clicks.build_target(args, known if generation == state.generation else {})
         expect = clicks.parse_expectation(args.get("expect"))
         seen = await self.downloads.seen_downloads(connection, state.name)
+        await self.ensure_view(connection, state)
         result = await self.session_op(
             connection,
             state,
@@ -576,6 +578,37 @@ class Sessions:
         result["downloads"] = await self.downloads.new_downloads(connection, state, seen)
         await self.add_page_change(connection, state, result)
         return result
+
+    async def ensure_view(self, connection: Connection, state: Site) -> None:
+        """Make sure the step about to be taken can be followed, as far as it can be.
+
+        What a step changed is told from a baseline of the page (see :mod:`valetkey.deltas`). A
+        snapshot of one part of the page leaves the baseline alone, and an agent may take none
+        at all, so when this client has no view of the page the browser is on, the whole tree is
+        taken now and kept, and not returned. The tree is the kind of the client's last snapshot,
+        or the whole one. A failure here is logged and leaves the step as it was, with no change.
+        """
+        view = connection.views.get(state.name)
+        try:
+            async with state.op_lock:
+                session = state.session
+                if state.kind != "session" or session is None:
+                    return
+                url = await asyncio.to_thread(session.current_url)
+                if (
+                    view is not None
+                    and view.generation == state.generation
+                    and urldefrag(view.url).url == urldefrag(url).url
+                ):
+                    return
+                interactive = connection.snapshot_kinds.get(state.name, False)
+                answer = await asyncio.to_thread(
+                    functools.partial(session.snapshot_delta, interactive=interactive, full=True)
+                )
+        except sessions.AgentBrowserError, sessions.SessionError, OSError:
+            logger.warning("taking a baseline of the %s page failed", state.name, exc_info=True)
+            return
+        connection.views[state.name] = deltas.start(state.generation, interactive, answer)
 
     async def add_page_change(
         self, connection: Connection, state: Site, result: dict[str, Any]
@@ -672,6 +705,7 @@ class Sessions:
             if submit:
                 session.press_enter()
 
+        await self.ensure_view(connection, state)
         result = await self.session_op(connection, state, fill)
         result.pop("_value")
         result["done"] = True

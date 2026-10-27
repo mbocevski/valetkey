@@ -32,11 +32,13 @@ class View:
     revision: int
     lines: list[str] | None
     """The tree's lines, or ``None`` once the client is out of step with the baseline."""
+    url: str = ""
+    """The address of the page the tree is of, as agent-browser last reported it."""
 
 
 def start(generation: int, interactive: bool, answer: sessions.SnapshotDelta) -> View:  # noqa: FBT001
     """Begin a view at a whole tree: the answer of a snapshot asked for in full."""
-    return View(generation, interactive, answer.revision, answer.tree.split("\n"))
+    return View(generation, interactive, answer.revision, answer.tree.split("\n"), answer.url)
 
 
 def _apply_refs(refs: dict[str, tuple[str, str]], changes: tuple[sessions.RefChange, ...]) -> None:
@@ -72,7 +74,7 @@ def follow(
     if answer.kind == "unchanged":
         return {"kind": "unchanged"}
     if answer.kind == "full":
-        view.lines = answer.tree.split("\n")
+        view.lines, view.url = answer.tree.split("\n"), answer.url
         return {"kind": "full"}
     start = answer.start_line
     if (

@@ -585,6 +585,26 @@ def test_change_text_is_empty_when_nothing_is_known_and_fences_a_hostile_line() 
     assert text.endswith("\n````")
 
 
+def test_a_reported_change_replaces_the_line_about_no_expectation(short_dir: Path) -> None:
+    said = "No expectation was given, so nothing says the click had an effect."
+
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            for kind in ("unchanged", "delta"):
+                change, text = CHANGE_TEXT[kind]
+                fake.handlers["click"] = click_answer(change=change)
+                clicked = text_of(
+                    await mcp.call_tool("browser_click", {"site": "sitex", "ref": "e3"})
+                )
+                assert said not in clicked
+                assert clicked.endswith(text)
+            fake.handlers["click"] = click_answer()
+            unknown = text_of(await mcp.call_tool("browser_click", {"site": "sitex", "ref": "e3"}))
+            assert said in unknown  # nothing is known of what the click did
+
+    run(scenario())
+
+
 def test_a_click_and_a_typing_step_end_with_what_changed(short_dir: Path) -> None:
     async def scenario() -> None:
         async with connected(short_dir) as (mcp, fake, _bridge):

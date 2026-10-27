@@ -67,6 +67,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- A click or typing step says what changed on the page even after a snapshot of only one part, or none. The line about no expectation is left out when it does.
 - `browser_screenshot` reads the picture only if it is a plain file of at most 20 MB, so a browser that swapped it for a link to another file cannot make the server return that file.
 - A login at `myapp.github.io` or under `co.il` no longer allows the whole suffix or shares a profile with other sites under it; logins are refused without the public suffix list.
 - `browser_open` and `browser_navigate` leave out the title block, `URL: (none)` and an empty refused list when no page loaded: an expired login, a refused start page or a URL that only started a download.

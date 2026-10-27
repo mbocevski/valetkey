@@ -611,7 +611,7 @@ def test_a_session_from_open_to_close(roots: sites.Roots) -> None:
             assert status["url"] == "https://sitex.test/two"
             assert "_value" not in status
             assert [call[0] for call in session.calls if call[0] != "clear_requests"] == [
-                "snapshot_delta", "open", "snapshot", "click", "snapshot_delta",
+                "snapshot_delta", "open", "snapshot_delta", "snapshot", "click", "snapshot_delta",
                 "fill", "snapshot_delta", "screenshot", "screenshot",
             ]  # fmt: skip
             assert ("fill", "e2", "hello") in session.calls
@@ -806,7 +806,7 @@ def test_two_clients_share_one_session_and_never_interleave(roots: sites.Roots) 
                 two.call("snapshot", site="sitex"),
             )
             assert session.most_active == 1
-            assert len(session.calls) == 4
+            assert len(session.calls) >= 4  # the three snapshots, the typing and what follows it
 
     run(scenario())
 
@@ -1552,15 +1552,24 @@ async def opened_and_read(
     return session
 
 
-def test_a_click_before_any_snapshot_reports_no_change(roots: sites.Roots) -> None:
+def test_a_click_with_no_snapshot_before_it_still_reports_the_change(roots: sites.Roots) -> None:
     add_site(roots)
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            added = delta_answer(recorded.ADDED)
+            session.answers[:] = [
+                sessions.SnapshotDelta(
+                    "delta", added.url, 2, 1, changes=added.changes, lines=added.lines, start_line=1
+                )
+            ]
             result = await c.call("click", site="sitex", text="Go")
-            assert "change" not in result
-            assert rig.factory.made[0].delta_calls == []
+            assert result["change"]["kind"] == "delta"
+            # A whole tree was taken first, silently, and kept: it is the baseline of the change.
+            assert session.delta_calls == [(False, True), (False, False)]
+            assert "snapshot" not in result
 
     run(scenario())
 
@@ -1681,6 +1690,93 @@ def test_a_snapshot_by_another_client_means_this_client_is_told_only_that_the_pa
     run(scenario())
 
 
+def test_a_snapshot_of_one_part_leaves_the_baseline_to_a_whole_tree_taken_by_the_click(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.parts["nav"] = ('- button "Go" [ref=e1]', {"e1": sessions.Ref("button", "Go")})
+            await c.call("snapshot", site="sitex", selector="nav", interactive=True)
+            assert session.delta_calls == []  # the scoped snapshot took no baseline
+            added = delta_answer(recorded.ADDED)
+            session.answers[:] = [
+                sessions.SnapshotDelta(
+                    "delta", added.url, 2, 1, changes=added.changes, lines=added.lines, start_line=1
+                )
+            ]
+            result = await c.call("click", site="sitex", text="Go")
+            assert result["change"]["added"] == {
+                "untrusted": True,
+                "text": '- link "New link" [ref=e63]',
+            }
+            assert session.delta_calls == [(True, True), (True, False)]  # the last snapshot's kind
+            await c.call("click", site="sitex", text="Go")
+            assert len(session.delta_calls) == 3  # the same page: no second baseline
+
+    run(scenario())
+
+
+def test_a_click_after_the_browser_moved_to_another_page_takes_a_new_baseline(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            session = await opened_and_read(rig, c)
+            await c.call("navigate", site="sitex", url="https://sitex.test/elsewhere")
+            await c.call("click", site="sitex", text="Go")
+            assert session.delta_calls == [(True, True), (True, True), (True, False)]
+            session.url += "#section"  # a fragment is the same page
+            await c.call("click", site="sitex", text="Go")
+            assert len(session.delta_calls) == 4
+
+    run(scenario())
+
+
+def test_a_click_or_typing_on_a_site_with_no_session_asks_for_no_baseline(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            for call in (
+                c.call("click", site="sitex", text="Go"),
+                c.call("type", site="sitex", ref="e1", text="x"),
+            ):
+                with pytest.raises(DaemonError) as info:
+                    await call
+                assert info.value.code == "no_session"
+            assert rig.factory.made == []
+
+    run(scenario())
+
+
+def test_a_baseline_that_cannot_be_taken_does_not_fail_the_click_or_the_typing(
+    roots: sites.Roots, caplog: pytest.LogCaptureFixture
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.delta_fails = sessions.AgentBrowserError("the browser is busy")
+            clicked = await c.call("click", site="sitex", text="Go")
+            typed = await c.call("type", site="sitex", ref="e1", text="x")
+            assert "change" not in clicked
+            assert "change" not in typed
+            assert (clicked["outcome"], typed["done"]) == ("unchecked", True)
+
+    run(scenario())
+    assert "taking a baseline of the sitex page failed" in caplog.text
+
+
 def test_a_session_that_ended_meanwhile_leaves_the_change_out(roots: sites.Roots) -> None:
     add_site(roots)
 
@@ -1701,16 +1797,18 @@ def test_a_session_that_ended_meanwhile_leaves_the_change_out(roots: sites.Roots
     run(scenario())
 
 
-def test_a_new_session_forgets_the_old_snapshot(roots: sites.Roots) -> None:
+def test_a_new_session_is_followed_from_a_baseline_of_its_own(roots: sites.Roots) -> None:
     add_site(roots)
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
-            await opened_and_read(rig, c)
+            await opened_and_read(rig, c, interactive=True)
             await c.call("close", site="sitex")
             await c.call("open", site="sitex")
             result = await c.call("click", site="sitex", text="Go")
-            assert "change" not in result  # nothing was read of this session yet
+            assert result["change"] == {"kind": "unchanged"}
+            # The old session's view is not used: a new tree was taken, of the kind last asked for.
+            assert rig.factory.made[1].delta_calls == [(True, True), (True, False)]
 
     run(scenario())
 
@@ -3037,7 +3135,8 @@ def test_type_can_press_enter(roots: sites.Roots) -> None:
             plain = await c.call("type", site="sitex", ref="e1", text="a")
             sent = await c.call("type", site="sitex", ref="e1", text="b", submit=True)
             assert (plain["submitted"], sent["submitted"]) == (False, True)
-            assert [call[0] for call in session.calls] == ["fill", "fill", "press_enter"]
+            acts = [call[0] for call in session.calls if call[0] in {"fill", "press_enter"}]
+            assert acts == ["fill", "fill", "press_enter"]
             with pytest.raises(DaemonError) as info:
                 await c.call("type", site="sitex", ref="e1", text="c", submit="yes")
             assert info.value.code == "bad_request"
