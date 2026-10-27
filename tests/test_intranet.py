@@ -129,4 +129,4 @@ def test_a_site_on_a_private_network_from_add_to_a_loaded_page(
 
 def server_logins(server: daemon.Daemon) -> list[str]:
     """The sites with a login window open, read from the daemon's own bookkeeping."""
-    return [name for name, state in server._sites.items() if state.kind == "login"]  # noqa: SLF001
+    return [name for name, state in server.registry.sites.items() if state.kind == "login"]

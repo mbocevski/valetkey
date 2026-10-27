@@ -234,4 +234,4 @@ def test_browser_login_goes_to_a_connected_bridge_and_the_login_completes(
 
 def _logins(service: daemon.Daemon) -> list[str]:
     """The sites with a login window open, read from the daemon's own bookkeeping."""
-    return [name for name, state in service._sites.items() if state.kind == "login"]  # noqa: SLF001
+    return [name for name, state in service.registry.sites.items() if state.kind == "login"]

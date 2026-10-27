@@ -33,6 +33,7 @@ from valetkey import (
     mcp_server,
     procs,
     protocol,
+    registry,
     sessions,
     sites,
 )
@@ -999,7 +1000,7 @@ def test_a_login_learns_a_policy_and_reports_it_once(roots: sites.Roots) -> None
             history.parent.mkdir(parents=True)
             make_history(history, ["https://newsite.test/signin", "https://login.okta.test/auth"])
             await window.close_window(seen, profile)
-            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["newsite"].kind == "idle")
             policy = sites.load_policy(roots, "newsite")
             assert policy.start == "https://newsite.test/signin"
             assert policy.allow == ("login.okta.test", "newsite.test")
@@ -1054,7 +1055,7 @@ def test_a_login_merges_into_an_existing_policy(roots: sites.Roots) -> None:
             (window,) = rig.logins.windows
             assert window.start == "https://sitex.test/"
             await window.close_window([SeenHost("cdn.other.test", 1)], roots.state / "p")
-            await eventually(lambda: rig.daemon._sites["sitex"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["sitex"].kind == "idle")
             policy = sites.load_policy(roots, "sitex")
             assert policy.allow == ("approved.test", "cdn.other.test", "sitex.test")
             assert policy.excluded == ()
@@ -1194,7 +1195,7 @@ def test_a_login_that_is_cancelled_while_its_window_opens_leaves_the_site_idle(
         async with serving(roots) as rig, await rig.connect() as c:
             rig.logins.fail = Stopped()
             with pytest.raises(Stopped):
-                await rig.daemon._op_login(daemon._Connection(), {"target": "sitex"})  # noqa: SLF001
+                await rig.daemon._op_login(registry.Connection(), {"target": "sitex"})  # noqa: SLF001
             assert (await c.call("status", site="sitex"))["state"] == "idle"
 
     run(scenario())
@@ -1313,7 +1314,7 @@ def test_a_host_the_profile_visited_before_the_login_is_not_learned(roots: sites
                 )
                 database.commit()
             await window.close_window([SeenHost("sitex.test", 1)], profile)
-            await eventually(lambda: rig.daemon._sites["sitex"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["sitex"].kind == "idle")
             policy = sites.load_policy(roots, "sitex")
             assert policy.allow == ("sitex.test",)
             assert policy.denied == ("evil.example",)
@@ -1328,12 +1329,12 @@ def test_a_login_with_no_recorded_start_saves_nothing_rather_than_everything(
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("login", target="newsite.test")
             (window,) = rig.logins.windows
-            rig.daemon._sites["newsite"].began = None  # noqa: SLF001
+            rig.daemon.registry.sites["newsite"].began = None
             profile = roots.state / "profile"
             (profile / "Default").mkdir(parents=True)
             make_history(profile / "Default" / "History", ["https://newsite.test/signin"])
             await window.close_window([], profile)
-            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["newsite"].kind == "idle")
             (entry,) = (await c.call("sites"))["sites"]
             assert entry["summary"].startswith("The newsite login could not be saved")
             assert not sites.policy_path(roots, "newsite").exists()
@@ -1360,7 +1361,7 @@ def test_a_login_allows_what_it_used_except_trackers_and_names_it(roots: sites.R
                 database.commit()
             seen = [SeenHost("newsite.test", 5), SeenHost("static.idpcdn.test", 1)]
             await window.close_window(seen, profile)
-            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["newsite"].kind == "idle")
             policy = sites.load_policy(roots, "newsite")
             assert policy.allow == ("login.okta.test", "newsite.test", "static.idpcdn.test")
             assert policy.excluded == ("tracker.test",)
@@ -1398,7 +1399,7 @@ def test_a_login_allows_the_cdn_hosts_of_the_site_and_counts_the_trackers(
                 )
             ]
             await window.close_window(seen, profile)
-            await eventually(lambda: rig.daemon._sites["shop"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["shop"].kind == "idle")
             policy = sites.load_policy(roots, "shop")
             assert policy.allow == (
                 "cdn.shop.example",
@@ -1671,7 +1672,7 @@ def test_a_hostile_history_gives_a_fixed_phrase_and_never_its_own_text(
             profile = roots.state / "p"
             hostile_history(profile)
             await window.close_window([], profile)
-            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["newsite"].kind == "idle")
             (entry,) = (await c.call("sites"))["sites"]
             assert entry["summary"] == (
                 "The newsite login could not be saved: the login's history could not be read."
@@ -1696,7 +1697,7 @@ def test_the_text_of_a_hostile_history_is_in_no_tool_result(roots: sites.Roots) 
                     profile = roots.state / "p"
                     hostile_history(profile)
                     await window.close_window([], profile)
-                    await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+                    await eventually(lambda: rig.daemon.registry.sites["newsite"].kind == "idle")
                     shown = await mcp.call_tool("browser_sites", {})
                     return "\n".join(p.text for p in shown.content if p.type == "text")
             finally:
@@ -1723,7 +1724,7 @@ def test_any_other_failure_to_save_keeps_its_text_out_of_the_summary(
             profile = roots.state / "p"
             (profile / "Default").mkdir(parents=True)
             await window.close_window([], profile)
-            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["newsite"].kind == "idle")
             (entry,) = (await c.call("sites"))["sites"]
             assert entry["summary"] == (
                 "The newsite login could not be saved. The daemon's log says why."
@@ -1741,7 +1742,7 @@ def test_a_login_that_cannot_be_saved_says_so(roots: sites.Roots) -> None:
             (profile / "Default").mkdir(parents=True)
             (profile / "Default" / "History").write_bytes(b"this is not a database" * 100)
             await window.close_window([], profile)
-            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["newsite"].kind == "idle")
             (entry,) = (await c.call("sites"))["sites"]
             assert "could not be saved" in entry["summary"]
             assert not sites.policy_path(roots, "newsite").exists()
@@ -1763,7 +1764,7 @@ def test_a_login_whose_window_fails_frees_the_site(
     async def scenario() -> None:
         async with serving(roots, login_starter=starter) as rig, await rig.connect() as c:
             await c.call("login", target="newsite.test")
-            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["newsite"].kind == "idle")
 
     run(scenario())
     assert "login for newsite failed" in caplog.text
@@ -2408,7 +2409,7 @@ def test_a_login_records_where_forms_were_submitted_from(roots: sites.Roots) -> 
             database.commit()
             database.close()
             await window.close_window([SeenHost("newsite.test", 3)], profile)
-            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["newsite"].kind == "idle")
             assert sites.load_policy(roots, "newsite").login_pages == ("newsite.test/login",)
 
     run(scenario())
@@ -2739,7 +2740,7 @@ def test_counting_attachments_never_fails_the_call(roots: sites.Roots) -> None:
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("open", site="sitex")
-            state = rig.daemon._sites["sitex"]  # noqa: SLF001
+            state = rig.daemon.registry.sites["sitex"]
             session = rig.factory.made[0]
             assert await rig.daemon._started(state) == []  # noqa: SLF001
             session.attached = 3
@@ -2895,7 +2896,7 @@ def test_status_during_a_login(roots: sites.Roots) -> None:
                 "contained": True,
             }
             await rig.logins.windows[0].cancel()
-            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["newsite"].kind == "idle")
 
     run(scenario())
 
@@ -2908,7 +2909,7 @@ def test_two_calls_that_find_the_browser_dead_end_it_once(roots: sites.Roots) ->
             await one.call("open", site="sitex")
             session = rig.factory.made[0]
             session.alive = False
-            state = rig.daemon._sites["sitex"]  # noqa: SLF001
+            state = rig.daemon.registry.sites["sitex"]
             async with state.lock:  # both calls find the dead browser, then queue up
                 calls = [
                     asyncio.ensure_future(one.call("snapshot", site="sitex")),
@@ -3101,10 +3102,10 @@ def test_status_names_the_host_and_never_the_address(roots: sites.Roots) -> None
 
 
 def test_a_page_without_a_host_has_none() -> None:
-    assert daemon._host_of("about:blank") is None  # noqa: SLF001
-    assert daemon._host_of("data:text/html,hi") is None  # noqa: SLF001
-    assert daemon._host_of("http://bad_host/") is None  # noqa: SLF001
-    assert daemon._host_of("https://App.Sitex.test:8443/x?y=1") == "app.sitex.test"  # noqa: SLF001
+    assert registry.host_of("about:blank") is None
+    assert registry.host_of("data:text/html,hi") is None
+    assert registry.host_of("http://bad_host/") is None
+    assert registry.host_of("https://App.Sitex.test:8443/x?y=1") == "app.sitex.test"
 
 
 def test_watch_sends_a_snapshot_and_then_every_change(roots: sites.Roots) -> None:
@@ -3145,10 +3146,10 @@ def test_watch_is_removed_when_the_client_leaves(roots: sites.Roots) -> None:
         async with serving(roots) as rig, await rig.connect() as c, await rig.connect() as w:
             stream = w.watch()
             await next_event(stream)
-            assert len(rig.daemon._watchers) == 1  # noqa: SLF001
+            assert len(rig.daemon.registry.watchers) == 1
             await stream.aclose()
             await w.close()
-            await eventually(lambda: not rig.daemon._watchers)  # noqa: SLF001
+            await eventually(lambda: not rig.daemon.registry.watchers)
             await c.call("open", site="sitex")  # nobody is told; nothing fails
 
     run(scenario())
@@ -3178,18 +3179,18 @@ def test_every_watcher_gets_every_event(roots: sites.Roots) -> None:
 def test_a_watcher_that_falls_too_far_behind_is_disconnected(
     roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(daemon, "WATCH_QUEUE", 2)
+    monkeypatch.setattr(registry, "WATCH_QUEUE", 2)
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as w:
             stream = w.watch()
             await next_event(stream)
             for _ in range(3):  # no await between them: the stream cannot keep up
-                rig.daemon._emit("session_started", "sitex")  # noqa: SLF001
+                rig.daemon.registry.emit("session_started", "sitex")
             with pytest.raises(DaemonError) as info:
                 await drain(stream)
             assert info.value.code == "connection_lost"
-            assert not rig.daemon._watchers  # noqa: SLF001
+            assert not rig.daemon.registry.watchers
 
     run(scenario())
 
@@ -3365,8 +3366,8 @@ def test_a_shutdown_while_a_dead_session_is_being_ended_still_closes_its_proxy(
 
     socket_path, server = run(scenario())
     assert not socket_path.exists()
-    assert server._sites["sitex"].proxy is None  # noqa: SLF001
-    assert server._sites["sitex"].kind == "idle"  # noqa: SLF001
+    assert server.registry.sites["sitex"].proxy is None
+    assert server.registry.sites["sitex"].kind == "idle"
 
 
 def test_a_failing_liveness_check_is_logged_and_the_next_one_runs(
@@ -3626,7 +3627,7 @@ def test_the_liveness_check_does_not_end_a_session_opened_since(roots: sites.Roo
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
             await c.call("open", site="sitex")
-            state = rig.daemon._state("sitex")  # noqa: SLF001
+            state = rig.daemon.registry.state("sitex")
             current = rig.factory.made[0]
             await rig.daemon._end_if_current(state, FakeSession())  # noqa: SLF001
             assert (current.closed, state.kind) == (0, "session")
@@ -4201,7 +4202,7 @@ def test_the_hosts_a_site_was_refused_are_bounded(
     roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     add_site(roots)
-    monkeypatch.setattr(daemon, "MAX_REFUSED_HOSTS", 2)
+    monkeypatch.setattr(registry, "MAX_REFUSED_HOSTS", 2)
 
     async def scenario() -> None:
         async with serving(roots) as rig, await rig.connect() as c:
@@ -5060,7 +5061,7 @@ def test_a_login_adds_an_account_that_starts_where_the_site_does(roots: sites.Ro
             (window,) = rig.logins.windows
             assert (window.site, window.start) == ("sitex:work", "https://sitex.test/")
             await window.close_window([SeenHost("cdn.other.test", 1)], roots.state / "p")
-            await eventually(lambda: rig.daemon._sites["sitex:work"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["sitex:work"].kind == "idle")
             assert sites.load_policy(roots, "sitex:work").allow == ("cdn.other.test", "sitex.test")
             assert sites.load_policy(roots, "sitex").excluded == ()
             assert (await c.call("login", target="sitex:work"))["site"] == "sitex:work"
@@ -5652,7 +5653,7 @@ def test_a_login_records_the_cookies_that_look_like_its_sign_in(roots: sites.Roo
             )
             seen = [SeenHost("newsite.test", 5), SeenHost("login.okta.test", 1)]
             await window.close_window(seen, profile)
-            await eventually(lambda: rig.daemon._sites["newsite"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["newsite"].kind == "idle")
             policy = sites.load_policy(roots, "newsite")
             assert policy.login_cookies == ("app.newsite.test sessionid",)
 
@@ -5671,7 +5672,7 @@ def test_a_later_login_that_finds_no_cookie_replaces_the_list_and_the_site_opens
             profile = roots.state / "profile"
             jar(profile)  # a readable database with nothing that looks like a sign-in
             await window.close_window([SeenHost("sitex.test", 1)], profile)
-            await eventually(lambda: rig.daemon._sites["sitex"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["sitex"].kind == "idle")
             assert sites.load_policy(roots, "sitex").login_cookies == ()
             answer = await c.call("open", site="sitex")
             assert "login_expired" not in answer
@@ -5693,7 +5694,7 @@ def test_a_later_login_that_cannot_read_the_cookies_keeps_the_ones_before(
             (profile / "Default").mkdir(parents=True)
             (profile / "Default" / "Cookies").write_bytes(b"not a database")
             await window.close_window([SeenHost("sitex.test", 1)], profile)
-            await eventually(lambda: rig.daemon._sites["sitex"].kind == "idle")  # noqa: SLF001
+            await eventually(lambda: rig.daemon.registry.sites["sitex"].kind == "idle")
             assert sites.load_policy(roots, "sitex").login_cookies == ("sitex.test session",)
 
     run(scenario())
@@ -5787,7 +5788,7 @@ async def still_open(rig: Rig, ticks: Ticks, seconds: float) -> bool:
     """Move the clock to ``seconds`` and say whether the session survives a check."""
     ticks.at(seconds)
     await rig.daemon._check_sessions()  # noqa: SLF001
-    return rig.daemon._sites["sitex"].kind == "session"  # noqa: SLF001
+    return rig.daemon.registry.sites["sitex"].kind == "session"
 
 
 def test_a_session_closes_when_it_has_been_idle_for_the_limit(roots: sites.Roots) -> None:
@@ -5837,7 +5838,7 @@ def test_a_call_that_is_still_running_keeps_the_session_open(roots: sites.Roots)
             await rig.connect() as c,
         ):
             await c.call("open", site="sitex")
-            state = rig.daemon._sites["sitex"]  # noqa: SLF001
+            state = rig.daemon.registry.sites["sitex"]
             async with state.op_lock:
                 assert await still_open(rig, ticks, 3 * IDLE)
             # Seen busy at 3 * IDLE, so the time counts from there.
@@ -5857,7 +5858,7 @@ def test_a_question_waiting_for_the_person_keeps_the_session_open(roots: sites.R
             await rig.connect() as c,
         ):
             await c.call("open", site="sitex")
-            state = rig.daemon._sites["sitex"]  # noqa: SLF001
+            state = rig.daemon.registry.sites["sitex"]
             async with state.ask_lock:
                 assert await still_open(rig, ticks, 3 * IDLE)
             assert not await still_open(rig, ticks, 4 * IDLE)
@@ -6007,7 +6008,7 @@ def test_a_call_while_an_idle_session_is_going_away_is_told_it_was_idle(
             ticks.at(IDLE)
             check = asyncio.ensure_future(rig.daemon._check_sessions())  # noqa: SLF001
             await eventually(started.is_set)
-            assert rig.daemon._sites["sitex"].idle_closed == 15  # noqa: SLF001
+            assert rig.daemon.registry.sites["sitex"].idle_closed == 15
             release.set()
             await check
             with pytest.raises(DaemonError) as info:
@@ -6086,12 +6087,12 @@ def test_a_call_that_arrives_while_the_session_is_being_checked_keeps_it_open(
             await rig.connect() as c,
         ):
             await c.call("open", site="sitex")
-            state = rig.daemon._sites["sitex"]  # noqa: SLF001
+            state = rig.daemon.registry.sites["sitex"]
             ticks.at(IDLE)
             async with state.lock:
                 check = asyncio.ensure_future(rig.daemon._check_sessions())  # noqa: SLF001
                 await asyncio.sleep(0.05)  # the check is waiting for the lock
-                rig.daemon._touch("sitex")  # noqa: SLF001
+                rig.daemon.registry.touch("sitex")
             await check
             assert state.kind == "session"
 

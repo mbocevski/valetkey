@@ -122,7 +122,7 @@ def folder_of(roots: sites.Roots) -> Path:
 
 
 def only_tab_left(server: daemon.Daemon) -> list[dict[str, Any]]:
-    live = server._sites["demo"].session  # noqa: SLF001 - what the browser really has open
+    live = server.registry.sites["demo"].session
     assert isinstance(live, sessions.Session)
     return live._call("tab", "list")["tabs"]  # noqa: SLF001
 

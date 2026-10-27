@@ -83,7 +83,9 @@ def test_a_login_expires_when_its_cookie_is_gone_and_a_working_one_never_looks_e
                 await wait_for(
                     lambda: sites.policy_path(roots, name).exists(), "the login was not saved"
                 )
-                await wait_for(lambda: server._sites[name].kind == "idle", "still logging in")  # noqa: SLF001
+                await wait_for(
+                    lambda: server.registry.sites[name].kind == "idle", "still logging in"
+                )
                 policy = sites.load_policy(roots, name)
                 assert policy.login_pages == ("site.test/login",)
                 assert policy.login_cookies == ("site.test session",)

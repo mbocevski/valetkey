@@ -134,8 +134,7 @@ import sqlite3
 import stat
 import struct
 import time
-from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -174,13 +173,21 @@ from valetkey.protocol import (
     untrusted,
 )
 from valetkey.proxy import (
-    NOT_ALLOWED,
-    PRIVATE_ADDRESS,
     Mode,
     Proxy,
     address_refusal,
     private_address_allowed,
     system_resolver,
+)
+from valetkey.registry import (
+    NEWEST,
+    TIME_FORMAT,
+    Connection,
+    Registry,
+    Site,
+    Watcher,
+    host_of,
+    remember_refusals,
 )
 
 if TYPE_CHECKING:
@@ -192,8 +199,6 @@ _BRIDGE_RAND = re.compile(r"[A-Za-z0-9]{8,64}")
 RESOLVE_SECONDS = 10.0
 """The longest to wait for the start host of a login to resolve."""
 _MAX_NAMED_HOSTS = 5
-MAX_REFUSED_HOSTS = 2000
-"""How many refused hosts are remembered per site."""
 SNAPSHOT_LIMIT = 40_000
 """The most characters of a page's tree a snapshot answer holds; more is cut at a node."""
 MAX_STARTED = 10
@@ -201,18 +206,13 @@ MAX_STARTED = 10
 SD_LISTEN_FDS_START = 3
 """The first file descriptor systemd passes to a socket-activated service."""
 STATES = ("idle", "login", "session")
-WATCH_QUEUE = 1000
-"""Events a `watch` client may fall behind by. A client further behind is disconnected."""
 POLL_INTERVAL = 0.5
 """Seconds between checks that each session's browser still runs."""
 NOTIFY_TIMEOUT = 5.0
 """Seconds `notify-send` gets before it is killed."""
-_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _ACTIVATION_VARIABLES = ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES")
-_NEWEST = 2**62
 STARTUP_GRACE = 3.0
 """Seconds after a session starts during which its background refusals are not reported."""
-"""A cursor beyond any refusal, to ask the proxy where its history ends."""
 
 
 class AlreadyRunningError(RuntimeError):
@@ -403,23 +403,10 @@ def _refused_target(message: str, url: str | None, refused: Sequence[dict[str, A
     which says nothing of the host. It was the host's refusal when the proxy refused exactly that
     host. Any other failure, or a refusal of some other host, is not this.
     """
-    host = _host_of(url) if url else None
+    host = host_of(url) if url else None
     if host is None or "ERR_TUNNEL_CONNECTION_FAILED" not in message:
         return None
     return host if any(entry["host"] == host for entry in refused) else None
-
-
-def _remember_refusals(state: _Site, proxy: Proxy) -> None:
-    """Note the hosts ``proxy`` refused for the policy, so they can be asked about later."""
-    for refusal in proxy.refused_since(0)[0]:
-        if refusal.reason == NOT_ALLOWED and len(state.refused_hosts) < MAX_REFUSED_HOSTS:
-            state.refused_hosts[refusal.host] = None
-        if (
-            refusal.reason == PRIVATE_ADDRESS
-            and refusal.seq > state.address_floor
-            and len(state.address_hosts) < MAX_REFUSED_HOSTS
-        ):
-            state.address_hosts[refusal.host] = None
 
 
 def _download_entry(item: downloads.Download) -> dict[str, Any]:
@@ -465,77 +452,6 @@ def make_private_dirs(path: Path) -> None:
     for directory in reversed([d for d in missing if not d.exists()]):
         directory.mkdir(mode=0o700, exist_ok=True)
         directory.chmod(0o700)
-
-
-# -- the registry ----------------------------------------------------------------------------
-
-
-@dataclass(eq=False)
-class _Site:
-    """Everything the daemon holds for one site."""
-
-    name: str
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    op_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    kind: str = "idle"
-    session: BrowserSession | None = None
-    proxy: Proxy | None = None
-    window: LoginWindow | None = None
-    shown: display.Display | None = None
-    route: str = "local"
-    """Where the login window opened: ``local``, ``bridge`` or ``novnc``."""
-    watcher: asyncio.Task[None] | None = None
-    generation: int = 0
-    quiet_floor: int | None = None
-    """Newest background refusal of the start-up burst; ``None`` while the burst is going on."""
-    start: str = ""
-    summary: str | None = None
-    since: datetime | None = None
-    began: datetime | None = None
-    """When the login window was asked for, before the browser started. What the login's history
-    holds from then on is what this login did."""
-    host: str | None = None
-    refused_hosts: dict[str, None] = field(default_factory=dict)
-    """Hosts the proxy refused for this site because the policy did not allow them, in any
-    session since the daemon started. Only these can be asked about."""
-    address_hosts: dict[str, None] = field(default_factory=dict)
-    """Hosts the proxy refused for the private address they resolve to, since the policy was
-    last loaded. Only the person can do something about those."""
-    address_floor: int = 0
-    """Refusals up to this number of the live proxy predate the last reload of the policy."""
-    denied_hosts: set[str] = field(default_factory=set)
-    kept_hosts: set[str] = field(default_factory=set)
-    """Hosts the person was asked to deny and said no to, until the daemon restarts."""
-    """Hosts the approval command said no to, so the agent is not allowed to ask again."""
-    ask_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    """One question at a time per site."""
-    last_used: float = 0.0
-    """When a client last used the site, on the daemon's idle clock."""
-    idle_closed: int | None = None
-    """How many minutes unused ended the last session, until the site is opened or closed."""
-
-
-@dataclass(eq=False)
-class _Watcher:
-    """One `watch` connection: the events it has not been sent yet."""
-
-    queue: asyncio.Queue[dict[str, Any] | None] = field(
-        default_factory=lambda: asyncio.Queue(maxsize=WATCH_QUEUE)
-    )
-
-
-@dataclass(eq=False)
-class _Connection:
-    """One client connection. Refusal cursors and the last snapshot are kept here, per site."""
-
-    cursors: dict[str, tuple[int, int, int]] = field(default_factory=dict)
-    refs: dict[str, tuple[int, dict[str, tuple[str, str]]]] = field(default_factory=dict)
-    """For each site, the session generation and the ``{ref: (role, name)}`` of the snapshot
-    this client last received. A click by reference means the element it was in that snapshot."""
-    seen_downloads: dict[str, dict[str, downloads.Signature]] = field(default_factory=dict)
-    """For each site, the finished downloads this client has already been told about."""
-    bridges: set[str] = field(default_factory=set)
-    """The bridges this connection registered. They end with the connection."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -609,18 +525,17 @@ class Daemon:
         )
         self._idle_given = idle_limit is not None
         self._idle_clock = idle_clock
+        self.registry = Registry(roots, now=now, idle_clock=idle_clock)
         self._screen_finder = screen_finder
-        self._watchers: set[_Watcher] = set()
         self._bridges: dict[str, _RegisteredBridge] = {}
         self._monitor: asyncio.Task[None] | None = None
         self._background: set[asyncio.Task[None]] = set()
         self._uid = os.getuid()
-        self._sites: dict[str, _Site] = {}
         self._connections: set[asyncio.Task[None]] = set()
         self._server: asyncio.Server | None = None
         self._socket_path: Path | None = None
         self._lock_fd: int | None = None
-        self._ops: dict[str, Callable[[_Connection, dict[str, Any]], Awaitable[dict[str, Any]]]] = {
+        self._ops: dict[str, Callable[[Connection, dict[str, Any]], Awaitable[dict[str, Any]]]] = {
             "sites": self._op_sites,
             "open": self._op_open,
             "snapshot": self._op_snapshot,
@@ -752,7 +667,7 @@ class Daemon:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.gather(*(self._shutdown_site(s) for s in self._sites.values()))
+        await asyncio.gather(*(self._shutdown_site(s) for s in self.registry.sites.values()))
         if self._server is not None:
             await self._server.wait_closed()
             self._server = None
@@ -760,7 +675,7 @@ class Daemon:
             await asyncio.to_thread(self._socket_path.unlink, missing_ok=True)
         self._release_lock()  # after the socket file is gone
 
-    async def _shutdown_site(self, state: _Site) -> None:
+    async def _shutdown_site(self, state: Site) -> None:
         async with state.lock:
             await self._end(state)
 
@@ -780,7 +695,7 @@ class Daemon:
                 await writer.wait_closed()
 
     async def _converse(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        connection = _Connection()
+        connection = Connection()
         try:
             await self._exchange(connection, reader, writer)
         finally:
@@ -788,7 +703,7 @@ class Daemon:
                 self._unregister_bridge(name)
 
     async def _exchange(
-        self, connection: _Connection, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        self, connection: Connection, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         while True:
             try:
@@ -811,7 +726,7 @@ class Daemon:
                 return
             await send(writer, await self._dispatch(connection, request))
 
-    async def _dispatch(self, connection: _Connection, request: Request) -> bytes:
+    async def _dispatch(self, connection: Connection, request: Request) -> bytes:
         """Return the response line for one request. Never raises."""
         identifier = request.id
         handler = self._ops.get(request.op)
@@ -836,11 +751,12 @@ class Daemon:
         """Answer ``watch``: a snapshot, then one answer per event, until the client goes away.
 
         The watcher is added before the snapshot is read, and neither step awaits, so no change
-        falls between the two. A client that stops reading and falls :data:`WATCH_QUEUE` events
-        behind is disconnected rather than allowed to hold memory.
+        falls between the two. A client that stops reading and falls
+        :data:`valetkey.registry.WATCH_QUEUE` events behind is disconnected rather than allowed to
+        hold memory.
         """
-        watcher = _Watcher()
-        self._watchers.add(watcher)
+        watcher = Watcher()
+        self.registry.watchers.add(watcher)
         gone = asyncio.ensure_future(reader.read())  # finishes at end-of-file: the client left
         try:
             await send(writer, ok_response(identifier, self._activity("snapshot")))
@@ -856,32 +772,7 @@ class Daemon:
                 await send(writer, ok_response(identifier, item))
         finally:
             gone.cancel()
-            self._watchers.discard(watcher)
-
-    def _emit(
-        self,
-        event: str,
-        site: str | None = None,
-        *,
-        bridge: str | None = None,
-        reason: str | None = None,
-    ) -> None:
-        """Tell every `watch` client that ``event`` happened to ``site`` or to ``bridge``."""
-        message: dict[str, Any] = {"event": event}
-        if site is not None:
-            message["site"] = site
-        if reason is not None:
-            message["reason"] = reason
-        if bridge is not None:
-            message["bridge"] = bridge
-        message["at"] = self._now().strftime(_TIME_FORMAT)
-        for watcher in list(self._watchers):
-            try:
-                watcher.queue.put_nowait(message)
-            except asyncio.QueueFull:
-                self._watchers.discard(watcher)
-                watcher.queue.get_nowait()
-                watcher.queue.put_nowait(None)  # ends that client's stream
+            self.registry.watchers.discard(watcher)
 
     def _activity(self, event: str | None = None, *, links: bool = False) -> dict[str, Any]:
         """Describe what runs now, from the registry the daemon's own processes keep.
@@ -891,9 +782,9 @@ class Daemon:
         """
         sessions_now = []
         logins_now = []
-        for name in sorted(self._sites):
-            state = self._sites[name]
-            since = state.since.strftime(_TIME_FORMAT) if state.since else None
+        for name in sorted(self.registry.sites):
+            state = self.registry.sites[name]
+            since = state.since.strftime(TIME_FORMAT) if state.since else None
             if state.kind == "session":
                 sessions_now.append(
                     {"site": name, "since": since, "contained": True, "host": state.host}
@@ -905,7 +796,7 @@ class Daemon:
                     entry["remote"] = display.describe(state.shown)
                 logins_now.append(entry)
         bridges_now = [
-            {"bridge": bridge.name, "since": bridge.since.strftime(_TIME_FORMAT)}
+            {"bridge": bridge.name, "since": bridge.since.strftime(TIME_FORMAT)}
             for bridge in self._bridges.values()
         ]
         result: dict[str, Any] = {
@@ -914,20 +805,15 @@ class Daemon:
             "bridges": bridges_now,
         }
         if event is not None:
-            result = {"event": event, "at": self._now().strftime(_TIME_FORMAT)} | result
+            result = {"event": event, "at": self._now().strftime(TIME_FORMAT)} | result
         return result
 
-    def _idle_fields(self, state: _Site) -> dict[str, Any]:
+    def _idle_fields(self, state: Site) -> dict[str, Any]:
         """Say how long the session has been unused and when that will close it."""
         limit = self._idle_limit
         idle = max(0.0, self._idle_clock() - state.last_used)
         closes = self._now() + timedelta(seconds=max(0.0, limit - idle))
-        return {"idle_seconds": int(idle), "closes_at": closes.strftime(_TIME_FORMAT)}
-
-    def _touch(self, name: str) -> None:
-        """Note that a client used the site, so its idle time starts again."""
-        if (state := self._sites.get(name)) is not None:
-            state.last_used = self._idle_clock()
+        return {"idle_seconds": int(idle), "closes_at": closes.strftime(TIME_FORMAT)}
 
     async def _announce(self, site: str) -> None:
         """Run the announcer; a failure to tell the person never reaches the session."""
@@ -950,7 +836,7 @@ class Daemon:
         """
         checked = [
             (state, session)
-            for state in list(self._sites.values())
+            for state in list(self.registry.sites.values())
             if state.kind == "session" and (session := state.session) is not None
         ]
         lines = None
@@ -968,7 +854,7 @@ class Daemon:
             except Exception:
                 logger.exception("checking the %s session failed", state.name)
 
-    async def _in_use(self, state: _Site) -> bool:
+    async def _in_use(self, state: Site) -> bool:
         """Say whether something is happening on the site that keeps its session open.
 
         A call that is running, a question waiting for the person, or a download that is not
@@ -979,13 +865,13 @@ class Daemon:
         paths = sessions.session_paths(self.roots, state.name)
         return await asyncio.to_thread(downloads.running, paths.incoming_dir)
 
-    async def _close_if_idle(self, state: _Site, session: BrowserSession) -> None:
+    async def _close_if_idle(self, state: Site, session: BrowserSession) -> None:
         """End the session if nobody has used it for the idle limit, as ``browser_close`` would."""
         limit = self._idle_limit
         if self._idle_clock() - state.last_used < limit:
             return
         if await self._in_use(state):
-            self._touch(state.name)
+            self.registry.touch(state.name)
             return
         async with state.lock:
             if state.session is not session or self._idle_clock() - state.last_used < limit:
@@ -994,7 +880,7 @@ class Daemon:
             logger.info("closing the %s session: unused for %d minutes", state.name, minutes)
             await self._end(state, idle_minutes=minutes)
 
-    async def _end_if_current(self, state: _Site, session: BrowserSession) -> None:
+    async def _end_if_current(self, state: Site, session: BrowserSession) -> None:
         """End the site's session if it is still ``session``, not one opened in the meantime."""
         async with state.lock:
             if state.session is session:
@@ -1002,52 +888,27 @@ class Daemon:
 
     # -- state --
 
-    def _state(self, site: str) -> _Site:
-        return self._sites.setdefault(site, _Site(site))
-
-    def _site(self, args: dict[str, Any]) -> str:
-        """Return the account the ``site`` argument names; a bare name must be unambiguous."""
-        name = sites.resolve_account(self.roots, string_arg(args, "site"))
-        self._touch(name)
-        return name
-
-    def _shown(self, name: str, known: list[str] | None = None) -> str:
-        """Return ``name`` as a client has to write it (see :func:`valetkey.sites.listed_name`)."""
-        return sites.listed_name(name, self._known_sites() if known is None else known)
-
-    def _known_sites(self) -> list[str]:
-        found = set(sites.known_sites(self.roots))
-        return sorted(found | {n for n, s in self._sites.items() if s.kind != "idle" or s.summary})
-
-    async def _load_policy(self, site: str) -> sites.Policy:
-        try:
-            return await asyncio.to_thread(sites.load_policy, self.roots, site)
-        except FileNotFoundError:
-            found = self._known_sites()
-            known = ", ".join(self._shown(n, found) for n in found) or "none yet"
-            fail("unknown_site", f"no site named {site!r}; known sites: {known}")
-
     # -- operations: sites and policies --
 
-    async def _op_sites(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
+    async def _op_sites(self, _connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         entries = []
-        found = self._known_sites()
+        found = self.registry.known_sites()
         only: str | None = None
         if args.get("site") is not None:
-            only = self._site(args)
+            only = self.registry.site_of(args)
             if only not in found:
-                await self._load_policy(only)  # says that the site is not known
+                await self.registry.load_policy(only)  # says that the site is not known
         for name in found:
             if only is not None and name != only:
                 continue
-            state = self._state(name)
+            state = self.registry.state(name)
             try:
                 policy: sites.Policy | None = await asyncio.to_thread(
                     sites.load_policy, self.roots, name
                 )
             except OSError, sites.PolicyError:
                 policy = None
-            shown = self._shown(name, found)
+            shown = self.registry.shown(name, found)
             entries.append(
                 {
                     "site": shown,
@@ -1067,11 +928,11 @@ class Daemon:
         return {"sites": entries}
 
     async def _op_reload_policy(
-        self, _connection: _Connection, args: dict[str, Any]
+        self, _connection: Connection, args: dict[str, Any]
     ) -> dict[str, Any]:
-        site = self._site(args)
-        policy = await self._load_policy(site)
-        state = self._state(site)
+        site = self.registry.site_of(args)
+        policy = await self.registry.load_policy(site)
+        state = self.registry.state(site)
         live = state.proxy is not None
         # The ranges may have changed: only refusals from now on say anything about them.
         state.address_hosts.clear()
@@ -1098,10 +959,10 @@ class Daemon:
             name = approvals.validate_host(host)
         except ValueError as error:
             fail("bad_request", str(error))
-        policy = await self._load_policy(site)
-        state = self._state(site)
+        policy = await self.registry.load_policy(site)
+        state = self.registry.state(site)
         if state.proxy is not None:
-            _remember_refusals(state, state.proxy)
+            remember_refusals(state, state.proxy)
         return (
             policy,
             name,
@@ -1109,12 +970,12 @@ class Daemon:
         )
 
     async def _op_allow_check(
-        self, _connection: _Connection, args: dict[str, Any]
+        self, _connection: Connection, args: dict[str, Any]
     ) -> dict[str, Any]:
         """Say whether ``host`` may be asked about for a site, and whether the daemon can ask."""
-        site = self._site(args)
+        site = self.registry.site_of(args)
         _policy, host, found = await self._eligibility(site, args.get("host"))
-        state = self._state(site)
+        state = self.registry.state(site)
         return {
             "site": site,
             "host": host,
@@ -1134,14 +995,14 @@ class Daemon:
             return None
 
     async def _op_allow_apply(
-        self, _connection: _Connection, args: dict[str, Any]
+        self, _connection: Connection, args: dict[str, Any]
     ) -> dict[str, Any]:
         """Grant ``host`` because the MCP client's interface returned a yes.
 
         The daemon takes the word of the MCP server process for it (see :mod:`approvals`). The
         host must still be eligible: refused, or excluded.
         """
-        site = self._site(args)
+        site = self.registry.site_of(args)
         if args.get("channel") != "elicitation":
             fail("bad_request", 'this operation is for the "elicitation" channel')
         policy, host, found = await self._eligibility(site, args.get("host"))
@@ -1149,11 +1010,11 @@ class Daemon:
             return _allow_answer(site, host, found)
         return await self._grant(site, host, policy)
 
-    async def _op_allow_ask(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
+    async def _op_allow_ask(self, _connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         """Ask through the approval command, and grant if it exits with status 0."""
-        site = self._site(args)
+        site = self.registry.site_of(args)
         reason = approvals.sanitize_reason(args.get("reason"))
-        state = self._state(site)
+        state = self.registry.state(site)
         async with state.ask_lock:
             policy, host, found = await self._eligibility(site, args.get("host"))
             if found.status != "eligible":
@@ -1229,14 +1090,12 @@ class Daemon:
             name = approvals.validate_host(host)
         except ValueError as error:
             fail("bad_request", str(error))
-        policy = await self._load_policy(site)
+        policy = await self.registry.load_policy(site)
         return policy, name, approvals.deny_eligibility(policy, name)
 
-    async def _op_deny_check(
-        self, _connection: _Connection, args: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _op_deny_check(self, _connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         """Say whether ``host`` may be asked about for denying, and whether the daemon can ask."""
-        site = self._site(args)
+        site = self.registry.site_of(args)
         _policy, host, found = await self._deny_eligibility(site, args.get("host"))
         return {
             "site": site,
@@ -1244,15 +1103,13 @@ class Daemon:
             "status": found.status,
             "message": found.message,
             "left_out": found.seen_during_login,
-            "kept": host in self._state(site).kept_hosts,
+            "kept": host in self.registry.state(site).kept_hosts,
             "can_ask": await self._approve_command() is not None,
         }
 
-    async def _op_deny_apply(
-        self, _connection: _Connection, args: dict[str, Any]
-    ) -> dict[str, Any]:
+    async def _op_deny_apply(self, _connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         """Deny ``host`` because the MCP client's interface returned a yes (see ``allow_apply``)."""
-        site = self._site(args)
+        site = self.registry.site_of(args)
         if args.get("channel") != "elicitation":
             fail("bad_request", 'this operation is for the "elicitation" channel')
         policy, host, found = await self._deny_eligibility(site, args.get("host"))
@@ -1260,11 +1117,11 @@ class Daemon:
             return _deny_answer(site, host, found)
         return await self._revoke(site, host, policy)
 
-    async def _op_deny_ask(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
+    async def _op_deny_ask(self, _connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         """Ask through the approval command or a notification, and deny if the answer is yes."""
-        site = self._site(args)
+        site = self.registry.site_of(args)
         reason = approvals.sanitize_reason(args.get("reason"))
-        state = self._state(site)
+        state = self.registry.state(site)
         async with state.ask_lock:
             policy, host, found = await self._deny_eligibility(site, args.get("host"))
             if found.status != "eligible":
@@ -1284,7 +1141,7 @@ class Daemon:
         """Deny ``host`` for the site, save the policy and give it to the live proxy."""
         changed = sites.deny_host(policy, host)
         await asyncio.to_thread(sites.save_policy, self.roots, changed)
-        state = self._state(site)
+        state = self.registry.state(site)
         if state.proxy is not None:
             state.proxy.update_policy(changed)
         logger.info("denied %s for %s", host, site)
@@ -1298,7 +1155,7 @@ class Daemon:
         """Add ``host`` to the site's policy, save it, and give it to the live proxy."""
         changed, _added, _removed = sites.allow_host(policy, host)
         await asyncio.to_thread(sites.save_policy, self.roots, changed)
-        state = self._state(site)
+        state = self.registry.state(site)
         if state.proxy is not None:
             state.proxy.update_policy(changed)
         logger.info("allowed %s for %s", host, site)
@@ -1307,7 +1164,7 @@ class Daemon:
     # -- operations: bridges --
 
     async def _op_bridge_register(
-        self, connection: _Connection, args: dict[str, Any]
+        self, connection: Connection, args: dict[str, Any]
     ) -> dict[str, Any]:
         """Record a bridge and tie it to this connection, which the caller then keeps open.
 
@@ -1334,12 +1191,12 @@ class Daemon:
             fail("no_socket", f"{path} is not a socket of this user; is the ssh forward up?")
         self._bridges[name] = _RegisteredBridge(name, path, self._now())
         connection.bridges.add(name)
-        self._emit("bridge_connected", bridge=name)
+        self.registry.emit("bridge_connected", bridge=name)
         return {"bridge": name, "registered": True}
 
     def _unregister_bridge(self, name: str) -> None:
         del self._bridges[name]
-        self._emit("bridge_disconnected", bridge=name)
+        self.registry.emit("bridge_disconnected", bridge=name)
 
     def bridge_sockets(self) -> list[Path]:
         """Return the sockets of the registered bridges, the newest last."""
@@ -1347,7 +1204,7 @@ class Daemon:
 
     # -- operations: login --
 
-    async def _op_login(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
+    async def _op_login(self, _connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         target = string_arg(args, "target")
         account = args.get("account")
         if account is not None and not isinstance(account, str):
@@ -1356,7 +1213,7 @@ class Daemon:
         site, start = await self._login_target(target, account)
         existing = await self._existing_policy(site)
         await self._refuse_private_start(site, start, existing)
-        state = self._state(site)
+        state = self.registry.state(site)
         async with state.lock:
             closed = state.kind == "session"
             if closed:
@@ -1384,8 +1241,8 @@ class Daemon:
                 raise
             state.since = self._now()
             state.watcher = asyncio.ensure_future(self._watch_login(state, state.window))
-            self._emit("login_opened", site)
-        result: dict[str, Any] = {"site": self._shown(site), "window": "open"}
+            self.registry.emit("login_opened", site)
+        result: dict[str, Any] = {"site": self.registry.shown(site), "window": "open"}
         if closed:
             result["closed_session"] = True
         if state.route == "bridge":
@@ -1411,7 +1268,7 @@ class Daemon:
                 raise
 
     async def _open_window(
-        self, state: _Site, site: str, start: str, networks: Sequence[str]
+        self, state: Site, site: str, start: str, networks: Sequence[str]
     ) -> tuple[LoginWindow, display.Display | None]:
         """Open the login window on the person's screen, or else somewhere they can reach.
 
@@ -1537,7 +1394,7 @@ class Daemon:
     async def _login_known(self, target: str, account: str | None) -> tuple[str, str]:
         if account is None:
             name = sites.resolve_account(self.roots, target)
-            return name, (await self._load_policy(name)).start
+            return name, (await self.registry.load_policy(name)).start
         site, current = sites.split_site_name(target)
         if current is not None:
             fail("bad_request", f"name the account once: {target!r} already has one")
@@ -1551,10 +1408,10 @@ class Daemon:
             pass
         accounts = [n for n in sites.known_sites(self.roots) if sites.split_site_name(n)[0] == site]
         if not accounts:
-            await self._load_policy(target)  # says that the site is not known
-        return name, (await self._load_policy(accounts[0])).start
+            await self.registry.load_policy(target)  # says that the site is not known
+        return name, (await self.registry.load_policy(accounts[0])).start
 
-    def _finisher(self, state: _Site, start: str) -> Callable[[list[Any], Path], Awaitable[None]]:
+    def _finisher(self, state: Site, start: str) -> Callable[[list[Any], Path], Awaitable[None]]:
         async def finish(seen: list[Any], profile: Path) -> None:
             try:
                 if state.began is None:
@@ -1615,7 +1472,7 @@ class Daemon:
 
         return finish
 
-    async def _watch_login(self, state: _Site, window: LoginWindow) -> None:
+    async def _watch_login(self, state: Site, window: LoginWindow) -> None:
         try:
             result = await window.wait()
             if result.private_refused:
@@ -1628,13 +1485,13 @@ class Daemon:
                 await shown.close()
             state.window = None
             state.kind = "idle"
-            self._emit("login_closed", state.name)
+            self.registry.emit("login_closed", state.name)
 
     # -- operations: sessions --
 
-    async def _op_open(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        site = self._site(args)
-        state = self._state(site)
+    async def _op_open(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+        site = self.registry.site_of(args)
+        state = self.registry.state(site)
         async with state.lock:
             if state.kind == "login":
                 fail("login_in_progress", f"a login window for {site} is open; close it first")
@@ -1655,7 +1512,7 @@ class Daemon:
                 url, title = session.first_page.url, session.first_page.title
             else:
                 url, title = await asyncio.to_thread(session.current_url), ""
-            result = self._envelope(connection, state, url)
+            result = self.registry.envelope(connection, state, url)
             if policy is not None:
                 reason = await asyncio.to_thread(
                     expiry.login_expired, policy, url, session.password_fields
@@ -1672,7 +1529,7 @@ class Daemon:
         result["page"] = {"title": untrusted(title)}
         return result
 
-    async def _login_cookies_gone(self, state: _Site) -> dict[str, Any] | None:
+    async def _login_cookies_gone(self, state: Site) -> dict[str, Any] | None:
         """Answer an open with ``login_expired`` when the cookies of the login are gone.
 
         This looks at the profile before any browser starts on it (see :mod:`valetkey.cookies`),
@@ -1681,14 +1538,14 @@ class Daemon:
         says the login is gone, and the open goes on.
         """
         site = state.name
-        policy = await self._load_policy(site)
+        policy = await self.registry.load_policy(site)
         profile = sites.profile_path(self.roots, site)
         if not await asyncio.to_thread(
             cookies.gone, profile, policy.login_cookies, now=self._now()
         ):
             return None
         return {
-            "site": self._shown(site),
+            "site": self.registry.shown(site),
             "contained": True,
             "url": None,
             "refused": [],
@@ -1702,8 +1559,8 @@ class Daemon:
             ),
         }
 
-    async def _begin_session(self, state: _Site) -> sites.Policy:
-        policy = await self._load_policy(state.name)
+    async def _begin_session(self, state: Site) -> sites.Policy:
+        policy = await self.registry.load_policy(state.name)
         paths = sessions.session_paths(self.roots, state.name)
         await asyncio.to_thread(make_private_dirs, paths.proxy_socket.parent)
         proxy = Proxy(
@@ -1716,13 +1573,13 @@ class Daemon:
             )
         except BaseException as error:
             refused = [refused_entry(entry) for entry in proxy.refused_since(0)[0]]
-            _remember_refusals(state, proxy)  # so the host can be asked about, as any other
+            remember_refusals(state, proxy)  # so the host can be asked about, as any other
             await proxy.close()
             await asyncio.to_thread(shutil.rmtree, paths.directory, ignore_errors=True)
             host = _refused_target(str(error), policy.start, refused)
             if isinstance(error, sessions.AgentBrowserError) and host is not None:
                 answer = {
-                    "site": self._shown(state.name),
+                    "site": self.registry.shown(state.name),
                     "contained": True,
                     "url": policy.start,
                     "refused": refused,
@@ -1737,29 +1594,29 @@ class Daemon:
         state.since = self._now()
         state.idle_closed = None
         state.last_used = self._idle_clock()
-        state.host = _host_of(policy.start)
-        self._emit("session_started", state.name)
+        state.host = host_of(policy.start)
+        self.registry.emit("session_started", state.name)
         task = asyncio.ensure_future(self._announce(state.name))
         self._background.add(task)
         task.add_done_callback(self._background.discard)
         self._end_startup_burst(state, proxy)
         return policy
 
-    def _end_startup_burst(self, state: _Site, proxy: Proxy) -> None:
+    def _end_startup_burst(self, state: Site, proxy: Proxy) -> None:
         """Mark the background refusals made so far as start-up noise, after the grace period."""
         generation = state.generation
         state.quiet_floor = None
 
         def mark() -> None:
             if state.proxy is proxy and state.generation == generation:
-                state.quiet_floor = proxy.quiet_refused_since(_NEWEST)[1]
+                state.quiet_floor = proxy.quiet_refused_since(NEWEST)[1]
 
         if self._startup_grace > 0:
             asyncio.get_running_loop().call_later(self._startup_grace, mark)
         else:
             mark()
 
-    async def _end(self, state: _Site, *, idle_minutes: int | None = None) -> None:
+    async def _end(self, state: Site, *, idle_minutes: int | None = None) -> None:
         """Stop whatever the site is doing and make it idle. The caller holds ``state.lock``.
 
         ``idle_minutes`` says the end is for lack of use: it is the reason in the
@@ -1780,7 +1637,7 @@ class Daemon:
         # The shield lets it finish; a later ``_end`` waits for it on ``op_lock``.
         await asyncio.shield(self._release(state, reason))
 
-    async def _release(self, state: _Site, reason: str | None) -> None:
+    async def _release(self, state: Site, reason: str | None) -> None:
         """Close the site's session and proxy and forget them. See :meth:`_end`."""
         async with state.op_lock:
             session, proxy = state.session, state.proxy
@@ -1795,42 +1652,42 @@ class Daemon:
                 # The browser is gone, so what is left in its folder is finished: keep it.
                 await asyncio.to_thread(downloads.sweep, paths.incoming_dir, paths.downloads_dir)
             if proxy is not None:
-                _remember_refusals(state, proxy)
+                remember_refusals(state, proxy)
                 state.address_floor = 0  # the next proxy numbers its refusals from 1
                 await proxy.close()
             if session is not None or proxy is not None:
                 directory = sessions.session_paths(self.roots, state.name).directory
                 await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
             if session is not None:
-                self._emit("session_ended", state.name, reason=reason)
+                self.registry.emit("session_ended", state.name, reason=reason)
 
-    async def _op_close(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        site = self._site(args)
-        state = self._state(site)
+    async def _op_close(self, _connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+        site = self.registry.site_of(args)
+        state = self.registry.state(site)
         async with state.lock:
             was = state.kind != "idle"
             await self._end(state)
-        return {"site": self._shown(site), "closed": was}
+        return {"site": self.registry.shown(site), "closed": was}
 
-    async def _op_status(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
+    async def _op_status(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         if "site" not in args:
             links = args.get("links", False)
             if not isinstance(links, bool):
                 fail("bad_request", '"links" must be true or false')
             return self._activity(links=links)
-        site = self._site(args)
-        state = self._state(site)
+        site = self.registry.site_of(args)
+        state = self.registry.state(site)
         if state.kind != "session":
             if state.kind == "idle":
-                await self._load_policy(site)
+                await self.registry.load_policy(site)
             return {"site": site, "state": state.kind, "contained": True}
         result = await self._session_op(connection, state, BrowserSession.is_alive)
         result.pop("_value")
         result["state"] = "session"
         return result
 
-    async def _op_snapshot(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._state(self._site(args))
+    async def _op_snapshot(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+        state = self.registry.state(self.registry.site_of(args))
         pictures = args.get("images", False)
         if not isinstance(pictures, bool):
             fail("bad_request", '"images" must be true or false')
@@ -1861,8 +1718,8 @@ class Daemon:
         )
         return result
 
-    async def _op_click(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._state(self._site(args))
+    async def _op_click(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+        state = self.registry.state(self.registry.site_of(args))
         generation, known = connection.refs.get(state.name, (-1, {}))
         target = clicks.build_target(args, known if generation == state.generation else {})
         expect = clicks.parse_expectation(args.get("expect"))
@@ -1880,8 +1737,8 @@ class Daemon:
         result["downloads"] = await self._new_downloads(connection, state, seen)
         return result
 
-    async def _op_save(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._state(self._site(args))
+    async def _op_save(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+        state = self.registry.state(self.registry.site_of(args))
         ref, url = args.get("ref"), args.get("url")
         if (ref is None) == (url is None):
             fail("bad_request", 'give either "ref" or "url", not both and not neither')
@@ -1921,8 +1778,8 @@ class Daemon:
             raise DaemonError(code, message, envelope)
         return result
 
-    async def _op_type(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._state(self._site(args))
+    async def _op_type(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+        state = self.registry.state(self.registry.site_of(args))
         ref, text = string_arg(args, "ref"), string_arg(args, "text")
         submit = args.get("submit", False)
         if not isinstance(submit, bool):
@@ -1939,11 +1796,11 @@ class Daemon:
         result["submitted"] = submit
         return result
 
-    async def _op_navigate(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._state(self._site(args))
+    async def _op_navigate(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+        state = self.registry.state(self.registry.site_of(args))
         url = string_arg(args, "url")
         seen = await self._seen_downloads(connection, state.name)
-        self._skip_refusals_so_far(connection, state)
+        self.registry.skip_refusals_so_far(connection, state)
         try:
             result = await self._session_op(
                 connection, state, _watching(lambda session: session.open(url))
@@ -1965,8 +1822,8 @@ class Daemon:
 
     async def _navigation_that_downloaded(
         self,
-        connection: _Connection,
-        state: _Site,
+        connection: Connection,
+        state: Site,
         seen: dict[str, downloads.Signature],
         error: DaemonError,
     ) -> dict[str, Any]:
@@ -1989,7 +1846,7 @@ class Daemon:
         }
 
     async def _seen_downloads(
-        self, connection: _Connection, site: str
+        self, connection: Connection, site: str
     ) -> dict[str, downloads.Signature]:
         """Return the downloads this client already knows of, starting from what is there now."""
         directory = sites.downloads_path(self.roots, site)
@@ -1999,8 +1856,8 @@ class Daemon:
 
     async def _new_downloads(
         self,
-        connection: _Connection,
-        state: _Site,
+        connection: Connection,
+        state: Site,
         seen: dict[str, downloads.Signature],
         settle: float | None = None,
         *,
@@ -2040,7 +1897,7 @@ class Daemon:
             report["by_page"] = unprompted
         return report
 
-    async def _started(self, state: _Site) -> list[sessions.Attachment]:
+    async def _started(self, state: Site) -> list[sessions.Attachment]:
         """List the responses logged since the call began that the browser turns into downloads."""
         session = state.session
         if session is None:
@@ -2049,8 +1906,8 @@ class Daemon:
             return await asyncio.to_thread(session.started_downloads)
         return []
 
-    async def _op_downloads(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        site = self._site(args)
+    async def _op_downloads(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+        site = self.registry.site_of(args)
         seen = await self._seen_downloads(connection, site)
         paths = sessions.session_paths(self.roots, site)
         found = await asyncio.to_thread(
@@ -2069,8 +1926,8 @@ class Daemon:
             "in_progress": [_download_entry(item) for item in found.in_progress],
         }
 
-    async def _op_screenshot(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        state = self._state(self._site(args))
+    async def _op_screenshot(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+        state = self.registry.state(self.registry.site_of(args))
         name = args.get("name", "screenshot.png")
         if not isinstance(name, str):
             fail("bad_request", '"name" must be a string')
@@ -2079,7 +1936,7 @@ class Daemon:
         return result
 
     async def _session_op(
-        self, connection: _Connection, state: _Site, call: Callable[[BrowserSession], Any]
+        self, connection: Connection, state: Site, call: Callable[[BrowserSession], Any]
     ) -> dict[str, Any]:
         """Run ``call`` on the site's session in a worker thread and wrap the answer.
 
@@ -2089,10 +1946,10 @@ class Daemon:
         try:
             return await self._run_session_op(connection, state, call)
         finally:
-            self._touch(state.name)
+            self.registry.touch(state.name)
 
     async def _run_session_op(
-        self, connection: _Connection, state: _Site, call: Callable[[BrowserSession], Any]
+        self, connection: Connection, state: Site, call: Callable[[BrowserSession], Any]
     ) -> dict[str, Any]:
         dead: BrowserSession | None = None
         async with state.op_lock:
@@ -2109,9 +1966,11 @@ class Daemon:
                     url = await asyncio.to_thread(session.current_url)
                 except Exception as error:
                     mapped = map_error(error)
-                    mapped.details = mapped.details | self._envelope(connection, state, None)
+                    mapped.details = mapped.details | self.registry.envelope(
+                        connection, state, None
+                    )
                     raise mapped from error
-                envelope = self._envelope(connection, state, url)
+                envelope = self.registry.envelope(connection, state, url)
                 envelope["_value"] = value
                 return envelope
         async with state.lock:
@@ -2121,55 +1980,6 @@ class Daemon:
         message = f"the {state.name} browser has exited; open the site again"
         raise DaemonError(code, message)
 
-    def _skip_refusals_so_far(self, connection: _Connection, state: _Site) -> None:
-        """Leave out of this client's next answer the refusals made until now.
-
-        A navigation's answer should name what the new page asked for. What the old page asked
-        for as it went away, such as the beacons it fires as it unloads, was refused before the
-        navigation began, and is not the new page's. (Those refusals are still remembered, so the
-        hosts can be asked about.)
-        """
-        proxy = state.proxy
-        if state.kind != "session" or proxy is None:
-            return
-        connection.cursors[state.name] = (
-            state.generation,
-            proxy.refused_since(_NEWEST)[1],
-            proxy.quiet_refused_since(_NEWEST)[1],
-        )
-
-    def _envelope(self, connection: _Connection, state: _Site, url: str | None) -> dict[str, Any]:
-        """Build the fields every session answer carries; this client's refusals are consumed.
-
-        A connection that has not asked about the live session before starts from the refusals
-        made from now on, not from the history of other clients' pages.
-        """
-        proxy = cast("Proxy", state.proxy)
-        if url is not None:
-            state.host = _host_of(url) or state.host
-        known = connection.cursors.get(state.name)
-        if known is None or known[0] != state.generation:
-            known = (
-                state.generation,
-                proxy.refused_since(_NEWEST)[1],
-                proxy.quiet_refused_since(_NEWEST)[1],
-            )
-        entries, cursor = proxy.refused_since(known[1])
-        quiet, quiet_cursor = proxy.quiet_refused_since(known[2])
-        connection.cursors[state.name] = (state.generation, cursor, quiet_cursor)
-        refused = [refused_entry(entry) for entry in entries]
-        floor = state.quiet_floor
-        # Until the start-up burst is over nothing is reported, and what it held never is.
-        background = [] if floor is None else [r.host for r in quiet if r.seq > floor]
-        counts = Counter(background)
-        return {
-            "site": self._shown(state.name),
-            "contained": True,
-            "url": url,
-            "refused": refused,
-            "background_refused": [{"host": h, "count": n} for h, n in counts.items()],
-        }
-
 
 def start_session(
     roots: sites.Roots, site: str, start_url: str, proxy_socket: Path
@@ -2178,16 +1988,6 @@ def start_session(
     return sessions.Session.start(
         roots, site, start_url, proxy_socket=proxy_socket, watch_browser=True
     )
-
-
-def _host_of(url: str) -> str | None:
-    """Return the host of ``url``, or ``None`` for one that has none (``about:blank``)."""
-    if urlsplit(url).scheme not in {"http", "https"}:
-        return None
-    try:
-        return sites.host_of(url)
-    except ValueError:
-        return None
 
 
 def _is_site_name(name: str) -> bool:

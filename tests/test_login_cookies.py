@@ -94,7 +94,9 @@ def test_a_login_in_the_window_is_a_login_in_the_session(
                 await wait_for(
                     lambda: sites.policy_path(roots, name).exists(), "the login was not saved"
                 )
-                await wait_for(lambda: server._sites[name].kind == "idle", "still logging in")  # noqa: SLF001
+                await wait_for(
+                    lambda: server.registry.sites[name].kind == "idle", "still logging in"
+                )
                 # The session is signed in: it is not sent to the sign-in page.
                 site.auto_login = False
                 opened = await c.call("open", site=name)
