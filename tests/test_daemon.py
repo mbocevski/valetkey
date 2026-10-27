@@ -232,6 +232,10 @@ class FakeSession:
         """The file a fetch of an attachment writes, as the browser's own download would."""
         self.body: sessions.Body | None = None
         """What a fetch returns for a plain response; ``None`` when the browser saved it itself."""
+        self.watching = False
+        """Whether the session looks for its browser in the process table."""
+        self.tables: list[list[list[str]] | None] = []
+        """The process table each liveness check was given."""
         self.tree = '- button "Go" [ref=e1]'
         """The text of the snapshot."""
         self.attached = 0
@@ -327,7 +331,12 @@ class FakeSession:
         self._use("screenshot", name)
         return Path("/shots") / name
 
-    def is_alive(self) -> bool:
+    @property
+    def watches_browser(self) -> bool:
+        return self.watching
+
+    def is_alive(self, lines: list[list[str]] | None = None) -> bool:
+        self.tables.append(lines)
         return self.alive
 
     def close(self) -> None:
@@ -3178,9 +3187,9 @@ def test_a_healthy_session_is_left_alone_by_the_liveness_check(
             session = rig.factory.made[0]
             original = session.is_alive
 
-            def counted() -> bool:
+            def counted(*lines: Any) -> bool:  # noqa: ANN401
                 checks.append(1)
-                return original()
+                return original(*lines)
 
             monkeypatch.setattr(session, "is_alive", counted)
             await eventually(lambda: len(checks) >= 3)
@@ -3188,6 +3197,85 @@ def test_a_healthy_session_is_left_alone_by_the_liveness_check(
             assert len((await c.call("status"))["sessions"]) == 1
 
     run(scenario())
+
+
+def table_reader(monkeypatch: pytest.MonkeyPatch) -> list[list[list[str]]]:
+    """Replace the reading of the process table; return the tables handed out, one per read."""
+    handed: list[list[list[str]]] = []
+
+    def read(*_args: object) -> list[list[str]]:
+        handed.append([["chromium", f"--user-data-dir=/p{len(handed)}"]])
+        return handed[-1]
+
+    monkeypatch.setattr(daemon.procs, "command_lines", read)
+    return handed
+
+
+def test_the_process_table_is_read_once_per_check_however_many_sessions_watch(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names = ["sitex", "sitey", "sitez"]
+    for name in names:
+        add_site(roots, name)
+    handed = table_reader(monkeypatch)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            for name in names:
+                await c.call("open", site=name)
+            for session in rig.factory.made:
+                session.watching = True
+            await rig.daemon._check_sessions()  # noqa: SLF001
+            assert len(handed) == 1
+            assert [session.tables for session in rig.factory.made] == [[handed[0]]] * 3
+            await rig.daemon._check_sessions()  # noqa: SLF001
+            assert len(handed) == 2
+            assert all(session.tables[-1] is handed[1] for session in rig.factory.made)
+
+    run(scenario())
+
+
+def test_the_process_table_is_not_read_when_no_session_watches_its_browser(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add_site(roots)
+    handed = table_reader(monkeypatch)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await rig.daemon._check_sessions()  # noqa: SLF001  (no session yet)
+            await c.call("open", site="sitex")
+            await rig.daemon._check_sessions()  # noqa: SLF001
+            assert handed == []
+            assert rig.factory.made[0].tables == [None]
+
+    run(scenario())
+
+
+def test_a_process_table_that_cannot_be_read_does_not_stop_the_check(
+    roots: sites.Roots, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    add_site(roots)
+
+    def unreadable(*_args: object) -> list[list[str]]:
+        message = "no /proc"
+        raise OSError(message)
+
+    monkeypatch.setattr(daemon.procs, "command_lines", unreadable)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.watching = True
+            await rig.daemon._check_sessions()  # noqa: SLF001
+            assert session.tables == [None]  # it was still asked, and left to read for itself
+            session.alive = False
+            await rig.daemon._check_sessions()  # noqa: SLF001
+            assert session.closed == 1
+
+    run(scenario())
+    assert "reading the process table failed" in caplog.text
 
 
 def test_a_login_window_is_left_alone_by_the_liveness_check(roots: sites.Roots) -> None:
@@ -3226,7 +3314,7 @@ def test_a_shutdown_while_a_dead_session_is_being_ended_still_closes_its_proxy(
                 close()
 
             monkeypatch.setattr(first, "close", slow_close)
-            monkeypatch.setattr(first, "is_alive", lambda: False)
+            monkeypatch.setattr(first, "is_alive", lambda *_: False)
             await eventually(started.is_set)
             asyncio.get_running_loop().call_later(0.3, release.set)
             # Leaving the block shuts the daemon down while the poller is in `session.close`.
@@ -3249,13 +3337,13 @@ def test_a_failing_liveness_check_is_logged_and_the_next_one_runs(
             await c.call("open", site="sitex")
             first = rig.factory.made[0]
 
-            def broken() -> bool:
+            def broken(*_: object) -> bool:
                 message = "no process table"
                 raise OSError(message)
 
             monkeypatch.setattr(first, "is_alive", broken)
             await eventually(lambda: "checking the sitex session failed" in caplog.text)
-            monkeypatch.setattr(first, "is_alive", lambda: False)
+            monkeypatch.setattr(first, "is_alive", lambda *_: False)
             await eventually(lambda: first.closed == 1)
 
     run(scenario())

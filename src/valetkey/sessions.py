@@ -794,18 +794,26 @@ class Session:
         except OSError:
             return ""
 
-    def is_alive(self) -> bool:
+    @property
+    def watches_browser(self) -> bool:
+        """Whether :meth:`is_alive` looks for the browser's own process (``watch_browser``)."""
+        return self._watch_browser
+
+    def is_alive(self, lines: list[list[str]] | None = None) -> bool:
         """Whether the session runs: the holder does and, when asked for, so does the browser.
 
         A killed daemon leaves its socket file behind, so the files say nothing; the processes
         do. When only Chrome is killed, the holder keeps running, so the browser is looked up in
-        the host's process table by its profile directory.
+        the host's process table by its profile directory. A caller that checks several
+        sessions passes the table in as ``lines``, read once; without it the table is read here,
+        and only when the browser is watched.
         """
         if self._holder is None or self._holder.poll() is not None:
             return False
-        return not self._watch_browser or (
-            self._driver_answers()
-            and procs.browser_running(self.paths.profile_dir, procs.command_lines())
+        if not self._watch_browser:
+            return True
+        return self._driver_answers() and procs.browser_running(
+            self.paths.profile_dir, procs.command_lines() if lines is None else lines
         )
 
     def close(self) -> None:

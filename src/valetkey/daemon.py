@@ -152,6 +152,7 @@ from valetkey import (
     learn,
     login,
     notify,
+    procs,
     sandbox,
     sessions,
     sites,
@@ -261,8 +262,17 @@ class BrowserSession(Protocol):
     def screenshot(self, name: str = "screenshot.png") -> Path:
         """Save a screenshot and return its path."""
 
-    def is_alive(self) -> bool:
-        """Tell whether the browser still runs."""
+    @property
+    def watches_browser(self) -> bool:
+        """Whether :meth:`is_alive` looks for the browser's own process in the process table."""
+
+    def is_alive(self, lines: list[list[str]] | None = None) -> bool:
+        """Tell whether the browser still runs.
+
+        ``lines`` is the host's process table (see :func:`valetkey.procs.command_lines`), for a
+        caller that checks several sessions and reads it once. Without it, a session that
+        needs the table reads it itself.
+        """
 
     def close(self) -> None:
         """End the session."""
@@ -1095,13 +1105,25 @@ class Daemon:
             await self._check_sessions()
 
     async def _check_sessions(self) -> None:
-        """End the sessions whose browser has died or that nobody has used for too long."""
-        for state in list(self._sites.values()):
-            session = state.session
-            if state.kind != "session" or session is None:
-                continue
+        """End the sessions whose browser has died or that nobody has used for too long.
+
+        The host's process table is read once per check, and only when some session looks for
+        its browser there, however many sessions are open.
+        """
+        checked = [
+            (state, session)
+            for state in list(self._sites.values())
+            if state.kind == "session" and (session := state.session) is not None
+        ]
+        lines = None
+        if any(session.watches_browser for _, session in checked):
             try:
-                if await asyncio.to_thread(session.is_alive):
+                lines = await asyncio.to_thread(procs.command_lines)
+            except OSError:
+                logger.exception("reading the process table failed")
+        for state, session in checked:
+            try:
+                if await asyncio.to_thread(session.is_alive, lines):
                     await self._close_if_idle(state, session)
                     continue
                 await self._end_if_current(state, session)

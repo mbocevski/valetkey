@@ -751,7 +751,8 @@ def test_open_refuses_other_schemes(tmp_path: Path) -> None:
 def test_the_session_has_no_eval_or_passthrough() -> None:
     public = {n for n in dir(sessions.Session) if not n.startswith("_")}
     assert public == {
-        "start", "is_alive", "close", "open", "snapshot", "outline", "click", "fill", "press_enter",
+        "start", "is_alive", "watches_browser", "close", "open", "snapshot", "outline", "click",
+        "fill", "press_enter",
         "current_url", "screenshot", "clear_requests", "started_downloads", "password_fields",
         "resource_url", "images", "fetch", "look",
     }  # fmt: skip
@@ -1466,6 +1467,30 @@ def test_is_alive_looks_for_the_browser_only_when_asked(
     finally:
         session.close()
     assert not session.is_alive()
+
+
+def test_is_alive_uses_the_process_table_it_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = make_session(tmp_path)
+    session._holder = subprocess.Popen(["sleep", "59.5"])  # noqa: S607, SLF001
+    assert not session.watches_browser
+    session._watch_browser = True  # noqa: SLF001
+    assert session.watches_browser
+
+    reads: list[int] = []
+
+    def read() -> list[list[str]]:
+        reads.append(1)
+        return []
+
+    monkeypatch.setattr(procs, "command_lines", read)
+    try:
+        assert session.is_alive(browser_lines(session))
+        assert not session.is_alive([])
+        assert reads == []  # the table that was given was enough
+    finally:
+        session.close()
 
 
 def test_a_watched_session_is_gone_when_the_driver_stops_answering(
