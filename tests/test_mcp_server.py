@@ -1419,6 +1419,35 @@ def test_the_closing_of_a_session_is_remembered_for_the_second_round_of_a_login(
     assert mcp_server._closed_note("s", closed=False) == ""  # noqa: SLF001
 
 
+def test_a_screenshot_that_is_not_a_plain_file_is_refused_and_never_read(
+    short_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = short_dir / "secret.png"
+    secret.write_bytes(b"not for the agent")
+    link = short_dir / "link.png"
+    link.symlink_to(secret)
+    pipe = short_dir / "pipe.png"
+    os.mkfifo(pipe)
+    big = short_dir / "big.png"
+    big.write_bytes(PNG + b"\0" * 100)
+    monkeypatch.setattr(mcp_server, "SCREENSHOT_LIMIT", len(PNG) + 99)
+    reasons = {link: "symbolic links", pipe: "not a regular file", big: "larger than"}
+
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            for path, reason in reasons.items():
+                fake.handlers["screenshot"] = lambda _a, path=path: ENVELOPE | {"path": str(path)}
+                result = await mcp.call_tool("browser_screenshot", {"site": "sitex"})
+                assert result.is_error
+                text = text_of(result)
+                assert "the screenshot could not be read:" in text
+                assert reason in text
+                assert "not for the agent" not in text
+                assert all(part.type == "text" for part in result.content)
+
+    run(scenario())
+
+
 def test_screenshot_returns_image_content(short_dir: Path) -> None:
     shot = short_dir / "shot.png"
     shot.write_bytes(PNG)

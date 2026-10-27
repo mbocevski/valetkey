@@ -60,6 +60,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- `browser_screenshot` reads the picture only if it is a plain file of at most 20 MB, so a browser that swapped it for a link to another file cannot make the server return that file.
 - `browser_open` and `browser_navigate` leave out the title block, `URL: (none)` and an empty refused list when no page loaded: an expired login, a refused start page or a URL that only started a download.
 - `valetkey bridge` now stays connected through a real `ssh`: it gave ssh `/dev/null` as input, which ended the remote side at once, so the server never kept the bridge.
 - `browser_snapshot` now includes the page's text, such as paragraphs, lists and tables, cuts a very long page with a note saying so, and takes `interactive` for the short list of elements to act on.

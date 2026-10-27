@@ -299,6 +299,31 @@ def running(incoming: Path) -> bool:
         return False
 
 
+def read_file(path: Path, limit: int) -> bytes:
+    """Read a regular file that the browser's sandbox could write, of at most ``limit`` bytes.
+
+    The file is opened without following a symlink and without blocking, and checked after it
+    is open, so a link or a pipe put in its place is refused and never read.
+
+    A file that is missing, is a symlink or anything but a regular file, or is larger than
+    ``limit`` raises an ``OSError`` whose message says which.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    with os.fdopen(os.open(path, flags), "rb") as file:
+        info = os.fstat(file.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            message = "not a regular file"
+            raise OSError(message)
+        if info.st_size > limit:
+            message = f"larger than {limit} bytes"
+            raise OSError(message)
+        data = file.read(limit + 1)
+    if len(data) > limit:  # it grew while it was read
+        message = f"larger than {limit} bytes"
+        raise OSError(message)
+    return data
+
+
 def snapshot(directory: Path) -> dict[str, Signature]:
     """Return the signature of every file in ``directory``, to compare against later."""
     return {name: signature for name, (signature, _) in scan(directory).items()}

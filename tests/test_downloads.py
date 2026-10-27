@@ -1135,3 +1135,38 @@ def test_put_cleans_up_when_the_name_cannot_be_taken(tmp_path: Path) -> None:
     with pytest.raises(OSError):  # noqa: PT011 - the folder does not exist
         downloads.put(tmp_path / "missing", "a.png", b"x")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_read_file_reads_a_plain_file_and_refuses_the_rest(tmp_path: Path) -> None:
+    plain = tmp_path / "plain.bin"
+    plain.write_bytes(b"12345")
+    assert downloads.read_file(plain, 5) == b"12345"
+    with pytest.raises(OSError, match="larger than 4 bytes"):
+        downloads.read_file(plain, 4)
+    link = tmp_path / "link.bin"
+    link.symlink_to(plain)
+    with pytest.raises(OSError, match="symbolic links"):
+        downloads.read_file(link, 100)
+    pipe = tmp_path / "pipe.bin"
+    os.mkfifo(pipe)
+    with pytest.raises(OSError, match="not a regular file"):
+        downloads.read_file(pipe, 100)
+    with pytest.raises(FileNotFoundError):
+        downloads.read_file(tmp_path / "missing.bin", 100)
+
+
+def test_read_file_refuses_a_file_that_grows_past_the_limit_while_it_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grower = tmp_path / "grows.bin"
+    grower.write_bytes(b"123")
+    real_fstat = os.fstat
+
+    def small(descriptor: int) -> os.stat_result:
+        info = real_fstat(descriptor)
+        grower.write_bytes(b"1234567")  # written after the size was taken
+        return info
+
+    monkeypatch.setattr(downloads.os, "fstat", small)
+    with pytest.raises(OSError, match="larger than 5 bytes"):
+        downloads.read_file(grower, 5)
