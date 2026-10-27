@@ -1284,11 +1284,71 @@ def test_a_snapshot_is_cut_and_says_how_much_was_left_out(roots: sites.Roots) ->
             assert len(kept) <= session_ops.SNAPSHOT_LIMIT
             assert kept.endswith('"')  # a whole line, not cut in its middle
             assert result["cut"]["lines"] == 5000 - len(kept.split("\n"))
+            assert result["cut"]["next_line"] == len(kept.split("\n")) + 1
             rig.factory.made[0].tree = '- button "Go" [ref=e1]'
             assert "cut" not in await c.call("snapshot", site="sitex", interactive=True)
             with pytest.raises(DaemonError) as info:
                 await c.call("snapshot", site="sitex", interactive="yes")
             assert info.value.code == "bad_request"
+
+    run(scenario())
+
+
+def test_a_long_tree_can_be_read_on_from_a_line(roots: sites.Roots) -> None:
+    add_site(roots)
+    count = 5000
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            rig.factory.made[0].tree = "\n".join(f'- paragraph "{n:05}"' for n in range(count))
+            first = await c.call("snapshot", site="sitex")
+            next_line = first["cut"]["next_line"]
+            middle = await c.call("snapshot", site="sitex", start_line=next_line)
+            text = middle["snapshot"]["text"]
+            assert text.startswith(f'- paragraph "{next_line - 1:05}"')  # lines count from 1
+            assert middle["cut"]["next_line"] == next_line + len(text.split("\n"))
+            assert middle["cut"]["lines"] == count - (next_line - 1) - len(text.split("\n"))
+            last = await c.call("snapshot", site="sitex", start_line=middle["cut"]["next_line"])
+            assert "cut" not in last  # what is left fits, so there is nothing to read on from
+            assert last["snapshot"]["text"].endswith(f'"{count - 1:05}"')
+            only = await c.call("snapshot", site="sitex", start_line=count)
+            assert only["snapshot"]["text"] == f'- paragraph "{count - 1:05}"'
+            # The table holds the refs of the whole tree, so one that is on no line shown works.
+            assert (await c.call("click", site="sitex", ref="e1"))["outcome"] == "unchecked"
+
+    run(scenario())
+
+
+def test_a_start_line_past_the_end_of_the_tree_is_refused(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            rig.factory.made[0].tree = "- a\n- b\n- c"
+            with pytest.raises(DaemonError) as info:
+                await c.call("snapshot", site="sitex", start_line=4)
+            assert info.value.code == "bad_request"
+            assert info.value.message == "The tree has 3 lines; start_line must be 3 or less."
+            assert info.value.details["site"] == "sitex"
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("start_line", [0, -1, "2", True, 1.5, None], ids=repr)
+def test_a_start_line_that_is_not_a_whole_number_of_one_or_more_is_refused(
+    roots: sites.Roots, start_line: object
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("snapshot", site="sitex", start_line=start_line)
+            assert info.value.code == "bad_request"
+            assert '"start_line" must be a whole number' in info.value.message
 
     run(scenario())
 

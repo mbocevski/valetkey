@@ -9,6 +9,7 @@ Changes that affect users of valetkey. The format follows
 ### Added
 
 - `browser_click` and `browser_type` say what changed on the page, as lines taken out and put in, so an agent need not take a new snapshot after every step.
+- `browser_snapshot` takes a `start_line`, so an agent can read on past the 40,000-character cut, and says which line to start from.
 - `browser_snapshot` takes a `selector`, a CSS selector, to read only one part of the page, such as a form or a table, with refs you can act on.
 - A browser session that nothing uses for 15 minutes is closed, keeping the login; `session_idle_minutes` in the config file sets the time (1 to 1440), and `valetkey status` shows when each session will close.
 - `browser_open` notices a login that has expired without a redirect, by the sign-in cookies it recorded at login, before the browser starts.

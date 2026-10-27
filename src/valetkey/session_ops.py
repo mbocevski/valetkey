@@ -196,6 +196,41 @@ def _selector_arg(args: dict[str, Any]) -> str | None:
     return selector
 
 
+def _add_part_of_tree(result: dict[str, Any], tree: str, start_line: int) -> None:
+    """Put in ``result`` the trimmed ``tree`` from ``start_line`` on, cut to the size limit.
+
+    ``start_line`` counts lines of the trimmed tree, which is what the agent reads. When the cut
+    leaves lines out, ``cut`` says how many and which line to read on from.
+
+    Raises:
+        DaemonError: ``bad_request`` when the tree has fewer lines than ``start_line``.
+
+    """
+    lines = treetrim.trim_tree(tree).split("\n")
+    if start_line > len(lines):
+        message = f"The tree has {len(lines)} lines; start_line must be {len(lines)} or less."
+        envelope = {k: result[k] for k in ("site", "contained", "url", "refused")}
+        code = "bad_request"
+        raise DaemonError(code, message, envelope)
+    kept, left_out = cut_tree("\n".join(lines[start_line - 1 :]))
+    result["snapshot"] = untrusted(kept)
+    if left_out is not None:
+        shown = len(lines) - (start_line - 1) - left_out[0]
+        result["cut"] = {
+            "lines": left_out[0],
+            "characters": left_out[1],
+            "next_line": start_line + shown,
+        }
+
+
+def _start_line_arg(args: dict[str, Any]) -> int:
+    """Return the ``start_line`` argument of a snapshot: the first line to read, 1 by default."""
+    start = args.get("start_line", 1)
+    if isinstance(start, bool) or not isinstance(start, int) or start < 1:
+        fail("bad_request", '"start_line" must be a whole number, 1 or more')
+    return start
+
+
 def _idle_message(site: str, minutes: int) -> str:
     noun = "minute" if minutes == 1 else "minutes"
     return (
@@ -465,6 +500,7 @@ class Sessions:
             fail("bad_request", '"interactive" must be true or false')
 
         selector = _selector_arg(args)
+        start_line = _start_line_arg(args)
 
         def look(
             session: BrowserSession,
@@ -490,10 +526,6 @@ class Sessions:
                 for item in found
             ]
         result["url"] = snap.url
-        tree, left_out = cut_tree(treetrim.trim_tree(snap.tree))
-        result["snapshot"] = untrusted(tree)
-        if left_out is not None:
-            result["cut"] = {"lines": left_out[0], "characters": left_out[1]}
         result["refs"] = {ref: element.role for ref, element in snap.refs.items()}
         table = {ref: (element.role, element.name) for ref, element in snap.refs.items()}
         known = connection.refs.get(state.name)
@@ -501,7 +533,9 @@ class Sessions:
             result["scope"] = selector
             if known is not None and known[0] == state.generation and known[2] == snap.url:
                 table = known[1] | table  # the earlier refs of this page stay usable
+        # The table holds the refs of the whole tree, not only of the lines shown below.
         connection.refs[state.name] = (state.generation, table, snap.url)
+        _add_part_of_tree(result, snap.tree, start_line)
         return result
 
     async def op_click(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:

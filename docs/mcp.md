@@ -131,6 +131,15 @@ snapshot still works. A whole-page snapshot, or one of another page, starts the 
 selector that matches nothing is a `browser_error`: "No element on the page matches the selector".
 `interactive`, `images` and the cut for a long tree work as they do for the whole page.
 
+## Reading a long page
+
+A tree over 40,000 characters is cut at the end of a line. The result then says how many lines were
+left out, and `start_line=K` with the first of them. Call `browser_snapshot` with that `start_line`
+to read on: the tree is taken again, the lines before `start_line` are dropped, and the cut applies
+to the rest. A part after the first says that the page may have changed since the last part. A
+`start_line` past the end of the tree is a `bad_request`. The references of the whole tree are
+usable, including those on lines that were not shown.
+
 ## Downloads
 
 Files a site downloads are saved in its downloads folder, `$XDG_STATE_HOME/valetkey/downloads/SITE`.

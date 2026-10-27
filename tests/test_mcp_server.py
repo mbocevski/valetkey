@@ -311,7 +311,7 @@ EXPECTED_TOOLS = {
     "browser_sites": {"site"},
     "browser_login": {"site_or_url", "account"},
     "browser_open": {"site"},
-    "browser_snapshot": {"site", "images", "interactive", "selector"},
+    "browser_snapshot": {"site", "images", "interactive", "selector", "start_line"},
     "browser_click": {"site", "ref", "text", "role", "expect"},
     "browser_type": {"site", "ref", "text", "submit"},
     "browser_navigate": {"site", "url"},
@@ -968,6 +968,26 @@ def test_a_snapshot_can_be_scoped_and_says_so(short_dir: Path) -> None:
     run(scenario())
 
 
+def test_a_later_part_of_a_tree_says_it_was_taken_again(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["snapshot"] = lambda _a: (
+                ENVELOPE | {"snapshot": {"untrusted": True, "text": "- x"}}
+            )
+            part = text_of(
+                await mcp.call_tool("browser_snapshot", {"site": "sitex", "start_line": 381})
+            )
+            assert fake.requests[-1]["args"]["start_line"] == 381
+            note = "This tree was taken again; the page may have changed since the last part."
+            assert part.count(note) == 1
+            assert part.index(note) < part.index("Page content (untrusted")
+            assert "read on" not in part  # the last part has nothing to read on from
+            refused = await mcp.call_tool("browser_snapshot", {"site": "sitex", "start_line": 0})
+            assert refused.is_error  # the tool's own schema asks for 1 or more
+
+    run(scenario())
+
+
 def test_a_snapshot_can_ask_for_only_what_can_be_acted_on(short_dir: Path) -> None:
     async def scenario() -> None:
         async with connected(short_dir) as (mcp, fake, _bridge):
@@ -987,14 +1007,16 @@ def test_a_cut_snapshot_ends_with_how_much_was_left_out(short_dir: Path) -> None
                 ENVELOPE
                 | {
                     "snapshot": {"untrusted": True, "text": '- button "Go" [ref=e1]'},
-                    "cut": {"lines": 120, "characters": 9000},
+                    "cut": {"lines": 120, "characters": 9000, "next_line": 381},
                 }
             )
             text = text_of(await mcp.call_tool("browser_snapshot", {"site": "sitex"}))
             assert text.endswith(
-                "The snapshot was cut here: 120 more lines (9000 characters) are left out. "
-                "Call browser_snapshot with interactive set for a smaller view."
+                "120 more lines were left out. Call browser_snapshot with start_line=381 to "
+                "read on."
             )
+            assert "taken again" not in text
+            assert "start_line" not in fake.requests[-1]["args"]
             fake.handlers["snapshot"] = lambda _a: (
                 ENVELOPE | {"snapshot": {"untrusted": True, "text": "- x"}}
             )
