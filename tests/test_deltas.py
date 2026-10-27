@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import re
 from typing import Any
 
 import delta_answers as recorded
@@ -156,15 +157,87 @@ def test_changes_over_the_limit_are_not_listed_but_are_followed() -> None:
     assert fits["kind"] == "delta"
 
 
-def test_a_full_answer_starts_the_view_again_and_leaves_the_references() -> None:
+def test_a_full_answer_at_another_address_is_a_new_page() -> None:
     view, refs = view_at_start()
     again = parsed(recorded.FULL)
     again = sessions.SnapshotDelta(
-        "full", again.url, 9, snapshot=again.snapshot, tree='- heading "Elsewhere"'
+        "full",
+        "http://site.test/elsewhere",
+        9,
+        snapshot=again.snapshot,
+        tree='- heading "Elsewhere"',
     )
     assert deltas.follow(view, again, refs, 4000) == {"kind": "full"}
-    assert (view.revision, view.lines) == (9, ['- heading "Elsewhere"'])
-    assert "e2" in refs
+    assert (view.revision, view.lines, view.url) == (
+        9,
+        ['- heading "Elsewhere"'],
+        "http://site.test/elsewhere",
+    )
+    assert "e2" in refs  # the references of the old page are left; a click looks them up again
+
+
+def full_answer_of_the_same_page(
+    extra: list[str], url: str = recorded.ORIGIN
+) -> sessions.SnapshotDelta:
+    """What agent-browser sends when a change is large: the whole tree, with ``extra`` lines in."""
+    first = parsed(recorded.FULL)
+    assert first.snapshot is not None
+    lines = first.tree.split("\n")
+    tree = "\n".join([lines[0], *extra, *lines[1:]])
+    refs = dict(first.snapshot.refs)
+    for line in extra:
+        if found := re.search(r'link "([^"]*)" \[ref=(e\d+)\]', line):
+            refs[found.group(2)] = sessions.Ref("link", found.group(1))
+    return sessions.SnapshotDelta(
+        "full", url, 9, snapshot=sessions.Snapshot(url, tree, refs), tree=tree
+    )
+
+
+def test_a_full_answer_at_the_same_address_is_told_as_a_delta_from_what_was_read() -> None:
+    view, refs = view_at_start()
+    menu = ["- list", '  - link "Entry 0" [ref=e50]', '  - link "Entry 1" [ref=e51]']
+    change = deltas.follow(view, full_answer_of_the_same_page(menu), refs, 4000)
+    assert change == {
+        "kind": "delta",
+        "removed": [],
+        "added": ["- list", ' - link "Entry 0" [ref=e50]', ' - link "Entry 1" [ref=e51]'],
+    }
+    assert refs["e50"] == ("link", "Entry 0")  # the new references can be clicked
+    assert view.lines is not None
+    assert view.lines[1:4] == menu
+    assert view.revision == 9
+
+
+def test_the_part_after_a_hash_is_not_another_address() -> None:
+    view, refs = view_at_start()
+    answer = full_answer_of_the_same_page(["- list"], recorded.ORIGIN + "#account")
+    assert deltas.follow(view, answer, refs, 4000)["kind"] == "delta"
+    assert view.url == recorded.ORIGIN + "#account"
+
+
+def test_a_full_answer_at_the_same_address_follows_the_limit_too() -> None:
+    view, refs = view_at_start()
+    menu = [f'  - link "Entry {n}" [ref=e{50 + n}]' for n in range(20)]
+    change = deltas.follow(view, full_answer_of_the_same_page(menu), refs, 100)
+    assert change["kind"] == "delta"
+    assert change["removed"] == []
+    assert change["more"] == 20 - len(change["added"])
+    assert 0 < len(change["added"]) < 20
+
+
+def test_a_full_answer_of_an_identical_page_is_no_change() -> None:
+    view, refs = view_at_start()
+    assert deltas.follow(view, full_answer_of_the_same_page([]), refs, 4000) == {
+        "kind": "unchanged"
+    }
+
+
+def test_a_full_answer_with_no_tree_to_compare_with_is_a_new_page() -> None:
+    view, refs = view_at_start()
+    view.lines = None  # out of step with the baseline
+    assert deltas.follow(view, full_answer_of_the_same_page(["- list"]), refs, 4000) == {
+        "kind": "full"
+    }
 
 
 @pytest.mark.parametrize("base", [1, 3])

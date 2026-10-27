@@ -41,8 +41,18 @@ TALL_PAGE = (
 )
 """A page of over a thousand tree lines. A click on the first button opens a menu at the top and
 changes the other button, far below it, so agent-browser's one splice holds all the rows between."""
+BIG_MENU_PAGE = (
+    b"<title>Big menu</title><header><button onclick=\"document.getElementById('menu').innerHTML = "
+    b"'<ul>"
+    + b"".join(b"<li><a href=/m%d>Menu entry %d</a></li>" % (n, n) for n in range(300))
+    + b"</ul>'\">Account</button><div id=menu></div></header>"
+    + b"".join(b"<p>Row %d <a href=/row%d>Item %d</a></p>" % (n, n, n) for n in range(300))
+)
+"""A menu of 300 entries on a page of 300 rows: so large a change that agent-browser sends the whole
+tree again, not a delta, though the address is the same."""
 PAGES = {
     "/": ({"Content-Type": "text/html"}, PAGE),
+    "/bigmenu": ({"Content-Type": "text/html"}, BIG_MENU_PAGE),
     "/tall": ({"Content-Type": "text/html"}, TALL_PAGE),
     "/nav": ({"Content-Type": "text/html"}, NAV_PAGE),
     "/orders": ({"Content-Type": "text/html"}, b"<title>Your orders</title><h1>Orders</h1>"),
@@ -187,6 +197,102 @@ def test_a_menu_that_opens_far_from_another_change_is_still_listed(short_dir: Pa
                     assert ref is not None
                     went = await c.call("click", site="demo", ref=ref.group(1))
                     assert went["url"].endswith("/orders")
+            finally:
+                await server.shutdown()
+
+    run(scenario())
+
+
+@pytest.mark.integration
+@needs_everything
+def test_a_click_with_an_expectation_lists_the_menu_it_opened(short_dir: Path) -> None:
+    runtime = short_dir / "rt"
+    runtime.mkdir(mode=0o700)
+    roots = sites.Roots(short_dir / "cfg", short_dir / "state", runtime)
+    sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
+
+    async def resolve(_host: str, _port: int) -> list[str]:
+        return ["127.0.0.1"]
+
+    async def scenario() -> None:
+        with PageServer({}, files=PAGES) as pages:
+
+            async def connect(_address: str, _port: int) -> Any:  # noqa: ANN401
+                return await asyncio.open_connection(*pages.address)
+
+            options = {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
+            server = daemon.Daemon(roots, proxy_options=options)
+            await server.start()
+            try:
+                async with await client.Client.connect(client.socket_path(roots)) as c:
+                    await c.call("open", site="demo")
+                    await c.call("navigate", site="demo", url="http://site.test/tall")
+                    await c.call("snapshot", site="demo")
+                    clicked = await c.call(
+                        "click",
+                        site="demo",
+                        text="Account",
+                        expect={"text_appears": "Orders"},
+                    )
+                    assert clicked["outcome"] == "met"
+                    change = clicked["change"]
+                    assert change["kind"] == "delta", change  # not the text of a new page
+                    added = change["added"]["text"]
+                    assert 'link "Orders"' in added
+                    assert 'link "Settings"' in added
+                    ref = re.search(r'link "Orders" \[ref=(e\d+)\]', added)
+                    assert ref is not None
+                    went = await c.call("click", site="demo", ref=ref.group(1))
+                    assert went["url"].endswith("/orders")
+            finally:
+                await server.shutdown()
+
+    run(scenario())
+
+
+@pytest.mark.integration
+@needs_everything
+def test_a_menu_so_large_that_the_whole_tree_comes_again_is_still_a_change(short_dir: Path) -> None:
+    runtime = short_dir / "rt"
+    runtime.mkdir(mode=0o700)
+    roots = sites.Roots(short_dir / "cfg", short_dir / "state", runtime)
+    sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
+
+    async def resolve(_host: str, _port: int) -> list[str]:
+        return ["127.0.0.1"]
+
+    async def scenario() -> None:
+        with PageServer({}, files=PAGES) as pages:
+
+            async def connect(_address: str, _port: int) -> Any:  # noqa: ANN401
+                return await asyncio.open_connection(*pages.address)
+
+            options = {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
+            server = daemon.Daemon(roots, proxy_options=options)
+            await server.start()
+            try:
+                async with await client.Client.connect(client.socket_path(roots)) as c:
+                    await c.call("open", site="demo")
+                    await c.call("navigate", site="demo", url="http://site.test/bigmenu")
+                    await c.call("snapshot", site="demo")
+                    clicked = await c.call(
+                        "click",
+                        site="demo",
+                        text="Account",
+                        expect={"text_appears": "Menu entry 0"},
+                    )
+                    assert clicked["outcome"] == "met"
+                    change = clicked["change"]
+                    assert change["kind"] == "delta", change  # not the text of a new page
+                    shown = change["added"]["text"].split("\n")
+                    assert (
+                        'link "Menu entry 0"' in shown[0]
+                    )  # the lines with a reference come first
+                    assert change["more"] > 0  # the entries that did not fit are counted
+                    ref = re.search(r'link "Menu entry 0" \[ref=(e\d+)\]', change["added"]["text"])
+                    assert ref is not None
+                    went = await c.call("click", site="demo", ref=ref.group(1))
+                    assert went["url"].endswith("/m0")
             finally:
                 await server.shutdown()
 

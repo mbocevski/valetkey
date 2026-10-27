@@ -24,6 +24,7 @@ import difflib
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urldefrag
 
 from valetkey import treetrim
 
@@ -118,16 +119,15 @@ def follow(
     that really changed, when they come to ``limit`` characters or fewer; when they come to more,
     a ``delta`` with the ``added`` lines that carry a reference, as many as fit, and ``more``, the
     number of changed lines not shown, or ``large`` when none of them carries one;
-    ``full`` when agent-browser sent the whole tree again (the address changed, or too much
-    did); and ``changed`` when the delta does not apply to what the client saw. ``refs`` is only
+    ``full`` when agent-browser sent the whole tree again because the address changed; and
+    ``changed`` when the delta does not apply to what the client saw. ``refs`` is only
     changed by a delta that applies, and the view is moved on in every case.
     """
     previous, view.revision = view.revision, answer.revision
     if answer.kind == "unchanged":
         return {"kind": "unchanged"}
     if answer.kind == "full":
-        view.lines, view.url = answer.tree.split("\n"), answer.url
-        return {"kind": "full"}
+        return _follow_whole(view, answer, refs, limit)
     start = answer.start_line
     if (
         view.lines is None
@@ -140,6 +140,29 @@ def follow(
     view.lines[start : start + answer.delete_count] = answer.lines
     _apply_refs(refs, answer.changes)
     return _report(taken_out, list(answer.lines), limit)
+
+
+def _follow_whole(
+    view: View,
+    answer: sessions.SnapshotDelta,
+    refs: dict[str, tuple[str, str]],
+    limit: int,
+) -> dict[str, Any]:
+    """Follow an answer that is the whole tree again.
+
+    agent-browser sends the whole tree when the address changed, and also when a change is large
+    next to the page, as a menu with hundreds of entries is. At the same address (the part after a
+    ``#`` ignored) it is the same page: what changed is what differs between the tree the client
+    read and this one, told as a delta would, and the references of the new tree are added to the
+    table. At another address, or with no tree to compare, it is a new page.
+    """
+    old, view.lines = view.lines, answer.tree.split("\n")
+    same_page = urldefrag(view.url).url == urldefrag(answer.url).url
+    view.url = answer.url
+    if old is None or not same_page or answer.snapshot is None:
+        return {"kind": "full"}
+    refs.update({ref: (item.role, item.name) for ref, item in answer.snapshot.refs.items()})
+    return _report(old, view.lines, limit)
 
 
 def _report(taken_out: list[str], put_in: list[str], limit: int) -> dict[str, Any]:

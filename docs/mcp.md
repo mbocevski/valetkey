@@ -92,7 +92,7 @@ will close. `valetkey watch` reports the close as `session_ended` with `"reason"
 The result of `browser_click` and `browser_type` ends by saying what the step changed on the page,
 so the agent need not read it again. It says that the page did not change, or gives the lines that
 were taken out and put in, fenced as untrusted page data. That can be a menu that opened or an
-error that appeared. Only the lines that differ are given, however far apart the changes are. When
+error that appeared. Only the lines that differ are given, however far apart the changes are and however large. When
 they come to more than 4,000 characters, the lines with a reference come first and the result
 counts the rest. If none has a reference, it says the page changed a lot. A step that took the
 browser to another page returns that page's title and says to call `browser_snapshot`. A

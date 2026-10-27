@@ -1621,6 +1621,37 @@ def test_each_kind_of_answer_gives_its_change(roots: sites.Roots) -> None:
     run(scenario())
 
 
+def test_a_whole_tree_at_the_same_address_is_told_as_a_change_and_at_another_as_a_page(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            session = await opened_and_read(rig, c)
+            tree = '- button "Go" [ref=e1]\n- link "Orders" [ref=e5]'
+            refs = {**session.elements, "e5": sessions.Ref("link", "Orders")}
+            whole = sessions.Snapshot(session.url, tree, refs)
+            session.answers[:] = [
+                sessions.SnapshotDelta("full", session.url, 2, snapshot=whole, tree=tree)
+            ]
+            same = (await c.call("click", site="sitex", text="Go"))["change"]
+            assert same["kind"] == "delta"
+            assert same["added"] == {"untrusted": True, "text": '- link "Orders" [ref=e5]'}
+            session.elements["e5"] = sessions.Ref("link", "Orders")
+            clicked = await c.call("click", site="sitex", ref="e5")  # the new ref is known
+            assert clicked["clicked"]["name"]["text"] == "Orders"
+            there = "https://sitex.test/elsewhere"
+            session.answers[:] = [
+                sessions.SnapshotDelta("full", there, 4, snapshot=whole, tree=tree)
+            ]
+            session.page_title = "Elsewhere"
+            other = (await c.call("click", site="sitex", text="Go"))["change"]
+            assert other == {"kind": "full", "title": {"untrusted": True, "text": "Elsewhere"}}
+
+    run(scenario())
+
+
 def test_changes_over_the_limit_show_the_lines_with_references_and_count_the_rest(
     roots: sites.Roots,
 ) -> None:
