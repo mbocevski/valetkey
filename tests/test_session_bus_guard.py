@@ -78,7 +78,7 @@ def test_the_guard_fails_a_test_that_notifies_on_the_real_bus(pytester: pytest.P
     """A test run of its own, with the same guard, ends in a failure when it notifies."""
     if shutil.which("notify-send") is None:
         pytest.skip("notify-send is not installed")
-    for name in ("conftest.py", "require_integration.py"):
+    for name in ("conftest.py", "leftovers.py", "require_integration.py"):
         shutil.copy(Path(__file__).parent / name, pytester.path / name)
     pytester.makepyfile(
         test_inner="""

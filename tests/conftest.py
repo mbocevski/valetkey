@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import leftovers
 import pytest
 
 from valetkey import daemon, notify, sites
@@ -30,17 +31,31 @@ goes, takes them back, for that one command."""
 REAL_NOTIFY_ASK = notify.ask
 
 
+_MADE: dict[Path, str] = {}
+"""The temporary directories this process made, each with the test module that asked for it."""
+
+
 @pytest.fixture
-def short_dir() -> Iterator[Path]:
-    """A short temporary directory: Unix socket paths are limited to about 100 bytes."""
+def short_dir(request: pytest.FixtureRequest) -> Iterator[Path]:
+    """A short temporary directory: Unix socket paths are limited to about 100 bytes.
+
+    A client started in it may start a daemon, which keeps running when the test ends. So the
+    daemons that have this directory in their environment are stopped before it is removed.
+    """
     with tempfile.TemporaryDirectory(prefix="vk-") as directory:
-        yield Path(directory)
+        path = Path(directory)
+        _MADE[path] = request.module.__name__
+        try:
+            yield path
+        finally:
+            leftovers.stop_under([path])
 
 
 @pytest.fixture(scope="session")
 def runtime_base() -> Iterator[str]:
     """A directory that holds the runtime directories of the tests, removed after the last one."""
     directory = tempfile.mkdtemp(prefix="vk-")
+    _MADE[Path(directory)] = "conftest (runtime_base)"
     yield directory
     shutil.rmtree(directory, ignore_errors=True)
 
@@ -91,6 +106,19 @@ def suffix_list(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPa
     path.write_text(SUFFIX_LIST, encoding="utf-8")
     monkeypatch.setattr(sites, "PUBLIC_SUFFIX_LIST", path)
     return path
+
+
+@pytest.fixture(scope="session", autouse=True)
+def no_daemons_left(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Fail the run if a test leaves a valetkey daemon running.
+
+    Only daemons under directories this process made count, so runs on the same machine, which
+    may be several at once, do not fail each other. The ones found are stopped by process number.
+    """
+    yield
+    made = {**_MADE, tmp_path_factory.getbasetemp(): "a test using tmp_path"}
+    if (message := leftovers.leftovers_message(made)) is not None:
+        pytest.fail(message, pytrace=False)
 
 
 @pytest.fixture(autouse=True)
