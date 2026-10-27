@@ -67,6 +67,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- A click that opens a menu on a long page lists the menu even when something far from it changes too. It counts any lines it leaves out, and no longer says the page changed a lot.
 - The browser no longer asks the proxy for `update.googleapis.com` at the start of every session, so it is not listed among the refused background requests.
 - A click or typing step says what changed on the page even after a snapshot of only one part, or none. The line about no expectation is left out when it does.
 - `browser_screenshot` reads the picture only if it is a plain file of at most 20 MB, so a browser that swapped it for a link to another file cannot make the server return that file.

@@ -471,7 +471,13 @@ def change_text(change: dict[str, Any] | None) -> str:
         for label, key in (("Removed", "removed"), ("Added", "added")):
             if lines := untrusted_text(change[key]):
                 parts.append(f"{label}:\n{lines}")
-        return f"Page changes (untrusted page data):\n{fence(chr(10).join(parts))}"
+        text = f"Page changes (untrusted page data):\n{fence(chr(10).join(parts))}"
+        if more := change.get("more"):
+            text += (
+                f"\n{more} more changed lines were left out. "
+                "Call browser_snapshot to read the whole page."
+            )
+        return text
     if kind == "large":
         return "The page changed a lot. Call browser_snapshot to read it."
     if kind == "changed":

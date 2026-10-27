@@ -190,3 +190,148 @@ def test_a_splice_past_the_end_of_the_tree_says_the_page_changed() -> None:
     answer = sessions.SnapshotDelta("delta", recorded.ORIGIN, 2, 1, start_line=3, delete_count=5)
     assert deltas.follow(view, answer, refs, 4000) == {"kind": "changed"}
     assert view.lines is None
+
+
+# -- a splice that carries unchanged lines along -------------------------------------------------
+
+
+def long_page() -> list[str]:
+    """A tree of 160 lines: a header with a button, rows, and a button in the foot."""
+    rows = [f'- link "Item {n} of the list of items" [ref=e{n + 10}]' for n in range(158)]
+    return ['- button "Account" [ref=e2]', *rows, '- button "Cookies" [ref=e3, expanded=false]']
+
+
+def two_distant_changes() -> tuple[deltas.View, dict[str, tuple[str, str]], sessions.SnapshotDelta]:
+    """A view of the long page, and agent-browser's splice for a click that opens a menu at the top
+    and toggles the button in the foot: one splice from the first changed line to the last."""
+    old = long_page()
+    new = [
+        old[0],
+        "- list",
+        "  - listitem",
+        '    - link "Orders" [ref=e900]',
+        "  - listitem",
+        '    - link "Settings" [ref=e901]',
+        *old[1:-1],
+        '- button "Cookies" [ref=e3, expanded=true]',
+    ]
+    view = deltas.View(7, interactive=False, revision=1, lines=list(old), url=recorded.ORIGIN)
+    refs = {"e2": ("button", "Account"), "e3": ("button", "Cookies")}
+    answer = sessions.SnapshotDelta(
+        "delta",
+        recorded.ORIGIN,
+        2,
+        1,
+        changes=(
+            sessions.RefChange("add", "e900", "link", "Orders"),
+            sessions.RefChange("add", "e901", "link", "Settings"),
+            sessions.RefChange("replace", "e3", field="name", value="Cookies"),
+        ),
+        start_line=1,
+        delete_count=len(old) - 1,
+        lines=tuple(new[1:]),
+    )
+    return view, refs, answer
+
+
+def test_two_distant_changes_report_only_the_lines_that_changed() -> None:
+    view, refs, answer = two_distant_changes()
+    splice = sum(len(line) + 1 for line in (*answer.lines, *long_page()[1:]))
+    assert splice > 4000  # the splice, as agent-browser sends it, is over the limit
+    change = deltas.follow(view, answer, refs, 4000)
+    assert change == {
+        "kind": "delta",
+        "removed": ['- button "Cookies" [ref=e3, expanded=false]'],
+        "added": [
+            "- list",
+            " - listitem",
+            '  - link "Orders" [ref=e900]',
+            " - listitem",
+            '  - link "Settings" [ref=e901]',
+            '- button "Cookies" [ref=e3, expanded=true]',
+        ],
+    }
+    assert refs["e900"] == ("link", "Orders")  # every reference of the delta is kept
+    assert view.lines is not None
+    assert len(view.lines) == 165
+    assert view.lines[3] == '    - link "Orders" [ref=e900]'  # the view keeps agent-browser's lines
+
+
+def test_over_the_limit_the_added_lines_with_a_reference_come_first_and_the_rest_is_counted() -> (
+    None
+):
+    view, refs, answer = two_distant_changes()
+    change = deltas.follow(view, answer, refs, 110)
+    assert change == {
+        "kind": "delta",
+        "removed": [],
+        "added": [
+            '  - link "Orders" [ref=e900]',
+            '  - link "Settings" [ref=e901]',
+            '- button "Cookies" [ref=e3, expanded=true]',
+        ],
+        "more": 4,  # the list and two items, and the button's old line
+    }
+    assert "e901" in refs
+
+
+def test_over_the_limit_with_no_reference_in_the_added_lines_is_a_lot() -> None:
+    view, refs, _ = two_distant_changes()
+    answer = sessions.SnapshotDelta(
+        "delta",
+        recorded.ORIGIN,
+        2,
+        1,
+        start_line=1,
+        delete_count=3,
+        lines=tuple(f"- paragraph {n} of text that is long enough" for n in range(10)),
+    )
+    assert deltas.follow(view, answer, refs, 100) == {"kind": "large"}
+
+
+def test_a_splice_that_changes_nothing_in_its_lines_is_no_change() -> None:
+    view, refs, _ = two_distant_changes()
+    assert view.lines is not None
+    same = tuple(view.lines[1:4])
+    answer = sessions.SnapshotDelta(
+        "delta", recorded.ORIGIN, 2, 1, start_line=1, delete_count=3, lines=same
+    )
+    assert deltas.follow(view, answer, refs, 4000) == {"kind": "unchanged"}
+
+
+def test_the_lines_shown_are_trimmed_like_a_snapshot() -> None:
+    view, refs, _ = two_distant_changes()
+    answer = sessions.SnapshotDelta(
+        "delta",
+        recorded.ORIGIN,
+        2,
+        1,
+        start_line=1,
+        delete_count=0,
+        lines=(
+            "- generic",
+            '  - heading "Menu"',
+            "    - generic",
+            '      - link "Orders" [ref=e950]',
+        ),
+    )
+    change = deltas.follow(view, answer, refs, 4000)
+    assert change["added"] == ['- heading "Menu"', ' - link "Orders" [ref=e950]']
+
+
+def test_a_splice_too_long_to_compare_is_taken_to_have_changed_throughout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deltas, "MAX_COMPARED", 10)
+    view, refs, answer = two_distant_changes()
+    change = deltas.follow(view, answer, refs, 100_000)
+    assert change["kind"] == "delta"
+    assert len(change["removed"]) == 159  # nothing was left out as unchanged
+
+
+def test_the_lines_a_splice_begins_and_ends_with_unchanged_are_set_aside() -> None:
+    old = ["- a", "- b", "- c", "- d", "- e"]
+    new = ["- a", "- b", "- X", "- Y", "- d", "- e"]
+    assert deltas._difference(old, new) == (["- c"], ["- X", "- Y"])  # noqa: SLF001
+    assert deltas._difference(old, old) == ([], [])  # noqa: SLF001
+    assert deltas._difference([], ["- new"]) == ([], ["- new"])  # noqa: SLF001

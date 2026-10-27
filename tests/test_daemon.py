@@ -1621,7 +1621,9 @@ def test_each_kind_of_answer_gives_its_change(roots: sites.Roots) -> None:
     run(scenario())
 
 
-def test_changes_over_the_limit_are_reported_as_a_lot(roots: sites.Roots) -> None:
+def test_changes_over_the_limit_show_the_lines_with_references_and_count_the_rest(
+    roots: sites.Roots,
+) -> None:
     add_site(roots)
 
     async def scenario() -> None:
@@ -1632,11 +1634,48 @@ def test_changes_over_the_limit_are_reported_as_a_lot(roots: sites.Roots) -> Non
                 "https://sitex.test/",
                 2,
                 1,
+                changes=tuple(
+                    sessions.RefChange("add", f"e{n + 10}", "link", f"Link number {n}")
+                    for n in range(200)
+                ),
                 start_line=1,
-                lines=tuple(f'- link "Link number {n}" [ref=e{n}]' for n in range(200)),
+                lines=tuple(f'- link "Link number {n}" [ref=e{n + 10}]' for n in range(200)),
             )
             assert len("\n".join(big.lines)) > session_ops.DELTA_LIMIT
             session.answers[:] = [big]
+            change = (await c.call("click", site="sitex", text="Go"))["change"]
+            shown = change["added"]["text"].split("\n")
+            assert change["kind"] == "delta"
+            assert change["removed"] == {"untrusted": True, "text": ""}
+            assert shown[0] == '- link "Link number 0" [ref=e10]'
+            assert len("\n".join(shown)) <= session_ops.DELTA_LIMIT
+            assert change["more"] == 200 - len(shown)
+            # Every reference of the delta is in the client's table, shown or not.
+            session.elements["e209"] = sessions.Ref("link", "Link number 199")
+            clicked = await c.call("click", site="sitex", ref="e209")
+            assert clicked["clicked"]["name"]["text"] == "Link number 199"
+
+    run(scenario())
+
+
+def test_changes_over_the_limit_with_no_reference_to_show_are_reported_as_a_lot(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            session = await opened_and_read(rig, c)
+            session.answers[:] = [
+                sessions.SnapshotDelta(
+                    "delta",
+                    "https://sitex.test/",
+                    2,
+                    1,
+                    start_line=1,
+                    lines=tuple(f"- paragraph {n} with some more text in it" for n in range(200)),
+                )
+            ]
             result = await c.call("click", site="sitex", text="Go")
             assert result["change"] == {"kind": "large"}
 

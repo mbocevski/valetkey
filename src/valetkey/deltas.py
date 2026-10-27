@@ -9,16 +9,31 @@ agent-browser wrote them (the splice counts lines in them, so they are never tri
 revision they belong to. :func:`follow` applies an answer to it and to the client's table of
 references, and says what changed.
 
+agent-browser's splice runs from the first changed line to the last. A click that changes two
+places far apart (a menu opens, and something in the page's foot toggles) gives a splice that
+holds every unchanged line between them. So what is reported is the difference between the lines the
+splice takes out and the lines it puts in (:func:`_difference`), trimmed as a snapshot is, and
+the limit applies to that.
+
 A client can only be followed while it is the one that moved the baseline. If another client's
 snapshot moved it, a delta does not apply to what this client saw, and the answer is that the page
 changed, without saying how.
 """
 
+import difflib
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from valetkey import treetrim
+
 if TYPE_CHECKING:
     from valetkey import sessions
+
+MAX_COMPARED = 20_000
+"""The most lines, taken out and put in together, that are compared line by line. Past it every
+line of the splice is taken to have changed, which costs the comparison nothing."""
+_REF = re.compile(r"\bref=e\d+")
 
 
 @dataclass(eq=False)
@@ -56,6 +71,41 @@ def _apply_refs(refs: dict[str, tuple[str, str]], changes: tuple[sessions.RefCha
                 refs[change.ref] = (change.value, name)
 
 
+def _difference(old: list[str], new: list[str]) -> tuple[list[str], list[str]]:
+    """Return the lines of ``old`` that are gone and the lines of ``new`` that are there now.
+
+    The lines both have in the same order are the unchanged ones a splice carried along, and are
+    left out. The lines the two begin and end with are set aside first, which is cheap and is most
+    of a splice. A splice whose middle is too long to compare is taken to have changed throughout.
+    """
+    head = 0
+    while head < min(len(old), len(new)) and old[head] == new[head]:
+        head += 1
+    tail = 0
+    while tail < min(len(old), len(new)) - head and old[-1 - tail] == new[-1 - tail]:
+        tail += 1
+    old, new = old[head : len(old) - tail], new[head : len(new) - tail]
+    if len(old) + len(new) > MAX_COMPARED:
+        return old, new
+    gone: list[str] = []
+    came: list[str] = []
+    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    for tag, old_from, old_to, new_from, new_to in matcher.get_opcodes():
+        if tag != "equal":
+            gone += old[old_from:old_to]
+            came += new[new_from:new_to]
+    return gone, came
+
+
+def _shown(lines: list[str]) -> list[str]:
+    """Return ``lines`` as an agent reads a snapshot: without empty wrappers, one space a level."""
+    return treetrim.trim_tree("\n".join(lines)).split("\n") if lines else []
+
+
+def _size(lines: list[str]) -> int:
+    return sum(len(line) + 1 for line in lines)
+
+
 def follow(
     view: View,
     answer: sessions.SnapshotDelta,
@@ -64,8 +114,10 @@ def follow(
 ) -> dict[str, Any]:
     """Apply ``answer`` to ``view`` and ``refs``, and say what it means for the client.
 
-    The result has a ``kind``: ``unchanged``; ``delta`` with the ``removed`` and ``added`` lines,
-    when they come to ``limit`` characters or fewer; ``large`` when they come to more;
+    The result has a ``kind``: ``unchanged``; ``delta`` with the ``removed`` and ``added`` lines
+    that really changed, when they come to ``limit`` characters or fewer; when they come to more,
+    a ``delta`` with the ``added`` lines that carry a reference, as many as fit, and ``more``, the
+    number of changed lines not shown, or ``large`` when none of them carries one;
     ``full`` when agent-browser sent the whole tree again (the address changed, or too much
     did); and ``changed`` when the delta does not apply to what the client saw. ``refs`` is only
     changed by a delta that applies, and the view is moved on in every case.
@@ -84,10 +136,25 @@ def follow(
     ):
         view.lines = None
         return {"kind": "changed"}
-    removed = view.lines[start : start + answer.delete_count]
+    taken_out = view.lines[start : start + answer.delete_count]
     view.lines[start : start + answer.delete_count] = answer.lines
     _apply_refs(refs, answer.changes)
-    size = sum(len(line) + 1 for line in (*removed, *answer.lines))
-    if size > limit:
+    return _report(taken_out, list(answer.lines), limit)
+
+
+def _report(taken_out: list[str], put_in: list[str], limit: int) -> dict[str, Any]:
+    """Say what a splice that took out ``taken_out`` and put in ``put_in`` changed."""
+    gone, came = (_shown(lines) for lines in _difference(taken_out, put_in))
+    if not (gone or came):
+        return {"kind": "unchanged"}  # the lines are the same: only what a splice carried along
+    if _size(gone) + _size(came) <= limit:
+        return {"kind": "delta", "removed": gone, "added": came}
+    shown: list[str] = []
+    for line in (line for line in came if _REF.search(line)):
+        if _size(shown) + len(line) + 1 > limit:
+            break
+        shown.append(line)
+    if not shown:
         return {"kind": "large"}
-    return {"kind": "delta", "removed": removed, "added": list(answer.lines)}
+    more = len(gone) + len(came) - len(shown)
+    return {"kind": "delta", "removed": [], "added": shown, "more": more}

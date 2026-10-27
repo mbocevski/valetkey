@@ -560,6 +560,19 @@ CHANGE_TEXT = {
             'Added:\n- link "Orders" [ref=e5]\n- link "Settings" [ref=e6]\n```'
         ),
     ),
+    "more": (
+        {
+            "kind": "delta",
+            "removed": untrusted_lines(),
+            "added": untrusted_lines('- link "A" [ref=e1]', '- link "B" [ref=e2]'),
+            "more": 37,
+        },
+        (
+            'Page changes (untrusted page data):\n```\nAdded:\n- link "A" [ref=e1]\n'
+            '- link "B" [ref=e2]\n```\n37 more changed lines were left out. '
+            "Call browser_snapshot to read the whole page."
+        ),
+    ),
     "only added": (
         {"kind": "delta", "removed": untrusted_lines(), "added": untrusted_lines("- a")},
         "Page changes (untrusted page data):\n```\nAdded:\n- a\n```",

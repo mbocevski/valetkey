@@ -30,8 +30,20 @@ NAV_PAGE = (
     b"Account</button><div id=menu></div></nav><h1>Shop</h1>"
     + b"".join(b"<p>Row %d <a href=/row%d>Item %d</a></p>" % (n, n, n) for n in range(60))
 )
+TALL_PAGE = (
+    b"<title>Tall</title><header><button onclick=\"document.getElementById('menu').innerHTML = "
+    b"'<ul><li><a href=/orders>Orders</a></li><li><a href=/settings>Settings</a></li></ul>';"
+    b"document.getElementById('foot').setAttribute('aria-expanded', 'true')\">Account</button>"
+    b"<div id=menu></div></header>"
+    + b"".join(b"<p>Row %d <a href=/row%d>Item %d</a></p>" % (n, n, n) for n in range(300))
+    + b"<button id=foot aria-expanded=false>Cookies</button>"
+    + b"".join(b"<p>Tail %d <a href=/tail%d>Tail item %d</a></p>" % (n, n, n) for n in range(400))
+)
+"""A page of over a thousand tree lines. A click on the first button opens a menu at the top and
+changes the other button, far below it, so agent-browser's one splice holds all the rows between."""
 PAGES = {
     "/": ({"Content-Type": "text/html"}, PAGE),
+    "/tall": ({"Content-Type": "text/html"}, TALL_PAGE),
     "/nav": ({"Content-Type": "text/html"}, NAV_PAGE),
     "/orders": ({"Content-Type": "text/html"}, b"<title>Your orders</title><h1>Orders</h1>"),
     "/other": ({"Content-Type": "text/html"}, b"<title>Other page</title><h1>Other</h1>"),
@@ -126,6 +138,51 @@ def test_a_click_after_a_snapshot_of_only_the_nav_still_says_what_changed(short_
                     added = opened["added"]["text"]
                     assert 'link "Orders"' in added
                     assert 'link "Settings"' in added
+                    ref = re.search(r'link "Orders" \[ref=(e\d+)\]', added)
+                    assert ref is not None
+                    went = await c.call("click", site="demo", ref=ref.group(1))
+                    assert went["url"].endswith("/orders")
+            finally:
+                await server.shutdown()
+
+    run(scenario())
+
+
+@pytest.mark.integration
+@needs_everything
+def test_a_menu_that_opens_far_from_another_change_is_still_listed(short_dir: Path) -> None:
+    runtime = short_dir / "rt"
+    runtime.mkdir(mode=0o700)
+    roots = sites.Roots(short_dir / "cfg", short_dir / "state", runtime)
+    sites.save_policy(roots, sites.Policy("demo", "http://site.test/", ("site.test",)))
+
+    async def resolve(_host: str, _port: int) -> list[str]:
+        return ["127.0.0.1"]
+
+    async def scenario() -> None:
+        with PageServer({}, files=PAGES) as pages:
+
+            async def connect(_address: str, _port: int) -> Any:  # noqa: ANN401
+                return await asyncio.open_connection(*pages.address)
+
+            options = {"resolver": resolve, "connector": connect, "address_check": lambda _a: None}
+            server = daemon.Daemon(roots, proxy_options=options)
+            await server.start()
+            try:
+                async with await client.Client.connect(client.socket_path(roots)) as c:
+                    await c.call("open", site="demo")
+                    await c.call("navigate", site="demo", url="http://site.test/tall")
+                    whole = await c.call("snapshot", site="demo")
+                    assert whole["snapshot"]["text"].count("\n") > 1000
+                    change = (await c.call("click", site="demo", text="Account"))["change"]
+                    assert (
+                        change["kind"] == "delta"
+                    )  # not "a lot": the rows between were carried along
+                    added = change["added"]["text"]
+                    assert 'link "Orders"' in added
+                    assert 'link "Settings"' in added
+                    assert "expanded=true" in added  # the other change is there too
+                    assert 'link "Item 150"' not in added  # and the rows between are not
                     ref = re.search(r'link "Orders" \[ref=(e\d+)\]', added)
                     assert ref is not None
                     went = await c.call("click", site="demo", ref=ref.group(1))
