@@ -46,6 +46,13 @@ GRACE_SECONDS = 2.0
 SETTLE_SECONDS = 5.0
 """The most time an expectation gets after a click, retry included."""
 POLL_SECONDS = 0.1
+"""The wait before the second check. Later waits grow: see :data:`BACKOFF_SECONDS`."""
+BACKOFF_SECONDS = (POLL_SECONDS, 0.25, 0.5)
+"""The wait after the first check, after the second, and after every later one. Each check is a
+full snapshot, which is a program started in the sandbox, so a slow page is not asked ten times a
+second."""
+MAX_CHECKS = 15
+"""The most checks of an expectation after one click, whatever time is left."""
 MAX_CANDIDATES = 5
 
 type Kind = Literal["text_appears", "text_gone", "url_changes"]
@@ -75,14 +82,11 @@ class Page(Protocol):
     def snapshot(self) -> sessions.Snapshot:
         """Return the interactive elements with their references."""
 
-    def outline(self) -> str:
-        """Return the whole accessibility tree as text."""
+    def look(self) -> tuple[str, str]:
+        """Return the page's URL and its whole accessibility tree as text, from one snapshot."""
 
     def click(self, ref: str) -> None:
         """Click ``ref``."""
-
-    def current_url(self) -> str:
-        """Return the page's URL."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,35 +287,67 @@ def resolve(refs: Mapping[str, sessions.Ref], target: Target) -> tuple[str, sess
 # -- waiting and expecting ---------------------------------------------------------------------
 
 
-def _wait_until(check: Callable[[], bool], seconds: float, clock: Clock) -> bool:
-    """Call ``check`` until it is true or ``seconds`` have passed; the last look is at the end."""
-    deadline = clock.monotonic() + seconds
-    while not check():
-        remaining = deadline - clock.monotonic()
-        if remaining <= 0:
-            return False
-        clock.sleep(min(POLL_SECONDS, remaining))
-    return True
+class _Watch:
+    """The checks of one click: what the page looked like last, how many looks were taken."""
+
+    def __init__(self, page: Page, clock: Clock) -> None:
+        self.page = page
+        self.clock = clock
+        self.url = ""
+        self.outline = ""
+        """The latest look: the URL and the outline."""
+        self.checks = 0
+
+    def until(
+        self, test: Callable[[str, str], bool], seconds: float, *, look_now: bool = True
+    ) -> bool:
+        """Look until ``test(url, outline)`` is true, ``seconds`` have passed or the checks run out.
+
+        A check is one snapshot. The first is at once (unless ``look_now`` is false, because the
+        page was just looked at), the waits between checks grow (see :data:`BACKOFF_SECONDS`), and
+        the last look is at the end of the time. After :data:`MAX_CHECKS` checks in all, it gives
+        up whatever time is left.
+        """
+        deadline = self.clock.monotonic() + seconds
+        while True:
+            if look_now:
+                self.url, self.outline = self.page.look()
+                self.checks += 1
+                if test(self.url, self.outline):
+                    return True
+            look_now = True
+            remaining = deadline - self.clock.monotonic()
+            if remaining <= 0 or self.checks >= MAX_CHECKS:
+                return False
+            wait = BACKOFF_SECONDS[min(max(self.checks, 1) - 1, len(BACKOFF_SECONDS) - 1)]
+            self.clock.sleep(min(wait, remaining))
 
 
-def _has_text(page: Page, text: str) -> bool:
+def _has_text(outline: str, text: str) -> bool:
     wanted = normalize(text).casefold()
-    return any(wanted in normalize(name).casefold() for name in names_in(page.outline()))
+    return any(wanted in normalize(name).casefold() for name in names_in(outline))
 
 
-def _is_met(page: Page, expect: Expect, url_before: str) -> bool:
-    if expect.kind == "text_appears":
-        return _has_text(page, expect.text)
-    if expect.kind == "text_gone":
-        return not _has_text(page, expect.text)
-    return page.current_url() != url_before
+def _is_met(expect: Expect, url_before: str) -> Callable[[str, str], bool]:
+    """Return the test of ``expect`` on what the page looks like."""
+
+    def test(url: str, outline: str) -> bool:
+        if expect.kind == "text_appears":
+            return _has_text(outline, expect.text)
+        if expect.kind == "text_gone":
+            return not _has_text(outline, expect.text)
+        return url != url_before
+
+    return test
 
 
 def _was_already_true(page: Page, expect: Expect, clock: Clock) -> bool:
     """Whether the expectation holds before the click. A URL change never does."""
     if expect.kind == "url_changes":
         return False
-    seen = _wait_until(lambda: _has_text(page, expect.text), PRESENCE_SECONDS, clock)
+    seen = _Watch(page, clock).until(
+        lambda _url, outline: _has_text(outline, expect.text), PRESENCE_SECONDS
+    )
     return seen if expect.kind == "text_appears" else not seen
 
 
@@ -341,7 +377,7 @@ def verified_click(
         resolve(page.snapshot().refs, target)  # refuse now, before any waiting, if it is not there
         already_true = _was_already_true(page, expect, clock)
     ref, element = resolve(page.snapshot().refs, target)  # (again, because the page kept moving)
-    url_before, outline_before = page.current_url(), page.outline()
+    url_before, outline_before = page.look()
     page.click(ref)
     attempts = 1
     if expect is None:
@@ -349,13 +385,15 @@ def verified_click(
     if already_true:
         return ClickResult(element.role, element.name, attempts, expect, "already_true")
 
-    if _wait_until(lambda: _is_met(page, expect, url_before), GRACE_SECONDS, clock):
+    watch = _Watch(page, clock)
+    test = _is_met(expect, url_before)
+    if watch.until(test, GRACE_SECONDS):
         return ClickResult(element.role, element.name, attempts, expect, "met")
-    unchanged = page.current_url() == url_before and page.outline() == outline_before
+    unchanged = watch.url == url_before and watch.outline == outline_before
     budget = SETTLE_SECONDS - GRACE_SECONDS
     if unchanged:
         ref, element = resolve(page.snapshot().refs, target)
         page.click(ref)
         attempts = 2
-    met = _wait_until(lambda: _is_met(page, expect, url_before), budget, clock)
+    met = watch.until(test, budget, look_now=unchanged)
     return ClickResult(element.role, element.name, attempts, expect, "met" if met else "not_met")

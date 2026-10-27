@@ -225,8 +225,8 @@ class BrowserSession(Protocol):
     def snapshot(self, *, interactive: bool = True) -> sessions.Snapshot:
         """Return the page's interactive elements, or with ``interactive`` false its whole tree."""
 
-    def outline(self) -> str:
-        """Return the whole accessibility tree as text."""
+    def look(self) -> tuple[str, str]:
+        """Return the page's URL and its whole accessibility tree as text."""
 
     def click(self, ref: str) -> None:
         """Click ``ref``."""

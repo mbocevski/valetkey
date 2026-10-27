@@ -955,6 +955,15 @@ class Session:
         """
         return parse_snapshot(self._call("snapshot")).tree
 
+    def look(self) -> tuple[str, str]:
+        """Return the page's URL and its whole accessibility tree, from one snapshot.
+
+        A check of an expectation after a click needs both. The snapshot says where the page is
+        (its ``origin``), so the URL is not asked for separately.
+        """
+        snapshot = parse_snapshot(self._call("snapshot"))
+        return snapshot.url, snapshot.tree
+
     def click(self, ref: str) -> None:
         """Click the element ``ref`` (``e3`` or ``@e3``) from the latest snapshot."""
         self._call("click", _check_ref(ref))

@@ -276,6 +276,9 @@ class FakeSession:
         texts = [f'- StaticText "{text}"' for text in [f"page at {self.url}", *self.texts]]
         return "\n".join(['- button "Go" [ref=e1]', *texts])
 
+    def look(self) -> tuple[str, str]:
+        return self.url, self.outline()
+
     def click(self, ref: str) -> None:
         self._use("click", ref)
         if self.on_click is not None:

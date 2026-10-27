@@ -753,8 +753,25 @@ def test_the_session_has_no_eval_or_passthrough() -> None:
     assert public == {
         "start", "is_alive", "close", "open", "snapshot", "outline", "click", "fill", "press_enter",
         "current_url", "screenshot", "clear_requests", "started_downloads", "password_fields",
-        "resource_url", "images", "fetch",
+        "resource_url", "images", "fetch", "look",
     }  # fmt: skip
+
+
+def test_look_gives_the_url_and_the_whole_tree_from_one_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = make_session(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def answer(*verb: str, timeout: float | None = None) -> dict[str, Any]:  # noqa: ARG001
+        calls.append(verb)
+        return {"origin": "https://s.test/a?b=1", "snapshot": '- heading "Hi"', "refs": {}}
+
+    monkeypatch.setattr(session, "_call", answer)
+    assert session.look() == ("https://s.test/a?b=1", '- heading "Hi"')
+    assert calls == [
+        ("snapshot",)
+    ]  # the whole tree, not the interactive one, and no "get" for the URL
 
 
 # --- saving pictures and files ------------------------------------------------------------

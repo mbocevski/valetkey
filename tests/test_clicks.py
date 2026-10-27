@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import itertools
 import re
 import tempfile
 import time
@@ -220,6 +221,8 @@ class FakePage:
     clicks: list[tuple[str, float]] = field(default_factory=list)
     on_click: Callable[[FakePage, str], None] | None = None
     scheduled: list[tuple[float, Callable[[FakePage], None]]] = field(default_factory=list)
+    looks: list[tuple[float, int]] = field(default_factory=list)
+    """Each look (a full snapshot with the URL): when, and how many clicks came before it."""
 
     def _advance(self) -> None:
         due = [item for item in self.scheduled if item[0] <= self.time.now]
@@ -238,6 +241,10 @@ class FakePage:
         self._advance()
         lines = [f'- {e.role} "{e.name}" [ref={r}]' for r, e in self.elements.items()]
         return "\n".join([*lines, *(f'- StaticText "{t}"' for t in self.texts)])
+
+    def look(self) -> tuple[str, str]:
+        self.looks.append((self.time.now, len(self.clicks)))
+        return self.current_url(), self.outline()
 
     def click(self, ref: str) -> None:
         self._advance()
@@ -759,3 +766,58 @@ def test_option_like_text_is_typed_literally_and_the_browser_is_left_alone(
         assert browser_pids(session) == before, f"{text!r} restarted the browser"
         assert session.is_alive()
         assert session.current_url() == START
+
+
+# -- what an unmet expectation costs ----------------------------------------------------------
+
+
+def looks_after_the_first_click(page: FakePage) -> list[float]:
+    return [moment for moment, clicked in page.looks if clicked >= 1]
+
+
+def test_a_never_met_expectation_costs_at_most_fifteen_snapshots_in_the_settle_time() -> None:
+    page = page_with(save=("button", "Save"))
+    result = run(page, SAVE, Expect("text_appears", "Saved"))
+    assert (result.outcome, result.attempts) == ("not_met", 2)
+    looks = looks_after_the_first_click(page)
+    assert len(looks) <= clicks.MAX_CHECKS
+    assert page.time.now - page.clicks[0][1] <= clicks.SETTLE_SECONDS
+
+
+def test_the_checks_back_off_from_a_tenth_of_a_second_to_half_a_second() -> None:
+    page = page_with(save=("button", "Save"))
+    run(page, SAVE, Expect("text_appears", "Saved"))
+    first = page.clicks[0][1]
+    gaps = [round(b - a, 2) for a, b in itertools.pairwise(looks_after_the_first_click(page))]
+    assert gaps[:5] == [0.1, 0.25, 0.5, 0.5, 0.5]
+    assert all(gap <= 0.5 for gap in gaps)
+    assert page.time.now - first <= clicks.SETTLE_SECONDS
+
+
+def test_a_click_that_changed_the_page_but_never_met_the_expectation_is_not_repeated() -> None:
+    page = page_with(save=("button", "Save"))
+    page.on_click = lambda p, _ref: p.texts.append("Something else")
+    result = run(page, SAVE, Expect("text_appears", "Saved"))
+    assert (result.outcome, result.attempts) == ("not_met", 1)
+    assert len(looks_after_the_first_click(page)) <= clicks.MAX_CHECKS
+    assert page.time.now - page.clicks[0][1] <= clicks.SETTLE_SECONDS
+
+
+def test_the_checks_stop_at_the_limit_even_when_time_is_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(clicks, "MAX_CHECKS", 4)
+    page = page_with(save=("button", "Save"))
+    page.on_click = lambda p, _ref: p.texts.append("Something else")
+    result = run(page, SAVE, Expect("text_appears", "Saved"))
+    assert result.outcome == "not_met"
+    assert len(looks_after_the_first_click(page)) == 4
+    assert page.time.now - page.clicks[0][1] < clicks.SETTLE_SECONDS
+
+
+def test_a_page_that_looks_the_same_after_the_grace_is_clicked_again_and_looked_at_again() -> None:
+    page = page_with(save=("button", "Save"))
+    run(page, SAVE, Expect("text_appears", "Saved"))
+    assert len(page.clicks) == 2
+    assert page.clicks[1][1] == pytest.approx(page.clicks[0][1] + clicks.GRACE_SECONDS)
+    assert any(moment == page.clicks[1][1] and clicked == 2 for moment, clicked in page.looks)

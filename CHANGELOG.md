@@ -44,6 +44,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Changed
 
+- A `browser_click` whose `expect` does not come true now takes one snapshot per check, with growing pauses, and at most 15 checks, so it starts far fewer browser programs in the same time.
 - `browser_open` and `browser_navigate` label the page title as the title and tell the agent to call `browser_snapshot` to read the page.
 - A login leaves out the ad and tracking hosts of Peter Lowe's list, kept in the package, and more of those a page loads; after an upgrade, restart your MCP client.
 - A policy file without a `denied` list keeps its excluded hosts as left out, and the next login builds that list again.
