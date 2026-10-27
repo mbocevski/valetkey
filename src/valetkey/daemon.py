@@ -124,7 +124,6 @@ import contextlib
 import fcntl
 import functools
 import itertools
-import json
 import logging
 import os
 import re
@@ -139,7 +138,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urljoin, urlsplit
 
 from valetkey import (
@@ -159,6 +158,21 @@ from valetkey import (
     sites,
 )
 from valetkey.client import MAX_LINE_BYTES, DaemonError
+from valetkey.protocol import (
+    BrowserSession,
+    LoginWindow,
+    Request,
+    error_response,
+    fail,
+    map_error,
+    ok_response,
+    parse_request,
+    refused_entry,
+    request_id_of,
+    send,
+    string_arg,
+    untrusted,
+)
 from valetkey.proxy import (
     NOT_ALLOWED,
     PRIVATE_ADDRESS,
@@ -199,95 +213,10 @@ _NEWEST = 2**62
 STARTUP_GRACE = 3.0
 """Seconds after a session starts during which its background refusals are not reported."""
 """A cursor beyond any refusal, to ask the proxy where its history ends."""
-_NOT_JSON = "the request is not valid JSON"
-_ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
-    (login.X11OnlyError, "x11_only"),
-    (login.DisplayError, "no_display"),
-    (sessions.AgentBrowserError, "browser_error"),
-    (sessions.SessionError, "session_failed"),
-    (sites.PolicyError, "bad_policy"),
-    (sites.SuffixListError, "setup_error"),
-    (sites.AmbiguousAccountError, "ambiguous_account"),
-    (ValueError, "bad_request"),
-)
-"""How errors from below become codes. The first match wins, so subclasses come first."""
 
 
 class AlreadyRunningError(RuntimeError):
     """Another daemon already listens on the socket."""
-
-
-class BrowserSession(Protocol):
-    """What the daemon needs of a session. :class:`valetkey.sessions.Session` provides it."""
-
-    first_page: sessions.Page
-
-    def open(self, url: str) -> sessions.Page:
-        """Navigate to ``url``."""
-
-    def snapshot(self, *, interactive: bool = True) -> sessions.Snapshot:
-        """Return the page's interactive elements, or with ``interactive`` false its whole tree."""
-
-    def look(self) -> tuple[str, str]:
-        """Return the page's URL and its whole accessibility tree as text."""
-
-    def click(self, ref: str) -> None:
-        """Click ``ref``."""
-
-    def password_fields(self) -> int:
-        """Count the password fields on the page."""
-
-    def clear_requests(self) -> None:
-        """Forget the logged network requests."""
-
-    def started_downloads(self) -> list[sessions.Attachment]:
-        """List the logged responses that the browser turns into downloads."""
-
-    def press_enter(self) -> None:
-        """Press Enter in the focused element."""
-
-    def fill(self, ref: str, text: str) -> None:
-        """Fill ``ref`` with ``text``."""
-
-    def current_url(self) -> str:
-        """Return the page's URL."""
-
-    def resource_url(self, ref: str) -> str:
-        """Return the address that the element ``ref`` stands for."""
-
-    def images(self) -> list[dict[str, Any]]:
-        """List the pictures and videos on the page."""
-
-    def fetch(self, url: str) -> sessions.Body | None:
-        """Return what ``url`` serves, or ``None`` when the browser saves it by itself."""
-
-    def screenshot(self, name: str = "screenshot.png") -> Path:
-        """Save a screenshot and return its path."""
-
-    @property
-    def watches_browser(self) -> bool:
-        """Whether :meth:`is_alive` looks for the browser's own process in the process table."""
-
-    def is_alive(self, lines: list[list[str]] | None = None) -> bool:
-        """Tell whether the browser still runs.
-
-        ``lines`` is the host's process table (see :func:`valetkey.procs.command_lines`), for a
-        caller that checks several sessions and reads it once. Without it, a session that
-        needs the table reads it itself.
-        """
-
-    def close(self) -> None:
-        """End the session."""
-
-
-class LoginWindow(Protocol):
-    """What the daemon needs of a login. :class:`valetkey.login.LoginHandle` provides it."""
-
-    async def wait(self) -> login.LoginResult:
-        """Wait until the window has closed."""
-
-    async def cancel(self) -> login.LoginResult:
-        """End the login without classifying anything."""
 
 
 type SessionFactory = Callable[[sites.Roots, str, str, Path], BrowserSession]
@@ -340,94 +269,6 @@ async def announce_session(
 
 
 # -- the protocol: small pure functions ------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class Request:
-    """One parsed request line."""
-
-    id: int | str | None
-    op: str
-    args: dict[str, Any]
-
-
-def _fail(code: str, message: str) -> NoReturn:
-    raise DaemonError(code, message)
-
-
-def _parse_fail(message: str, request_id: int | str | None = None) -> NoReturn:
-    raise _ParseError(message, request_id)
-
-
-class _ParseError(DaemonError):
-    """A request line that cannot be served; ``request_id`` is the id to answer with, if any."""
-
-    def __init__(self, message: str, request_id: int | str | None = None) -> None:
-        super().__init__("bad_request", message)
-        self.request_id = request_id
-
-
-def parse_request(line: bytes) -> Request:
-    """Parse one request line.
-
-    Raises:
-        DaemonError: with code ``bad_request`` for anything that is not a JSON object with a
-            string ``op``, an optional object ``args`` and an optional integer or string ``id``.
-            Use :func:`request_id_of` on it to get the id to answer with, when one was readable.
-
-    """
-    try:
-        data = json.loads(line)
-    except ValueError:
-        _parse_fail(_NOT_JSON)
-    if not isinstance(data, dict):
-        _parse_fail("the request must be a JSON object")
-    identifier = data.get("id")
-    if isinstance(identifier, bool) or not isinstance(identifier, int | str | None):
-        identifier = None
-    if not isinstance(data.get("op"), str) or not data["op"]:
-        _parse_fail('the request needs an "op" string', identifier)
-    args = data.get("args", {})
-    if not isinstance(args, dict):
-        _parse_fail('"args" must be an object', identifier)
-    return Request(identifier, data["op"], args)
-
-
-def request_id_of(error: DaemonError) -> int | str | None:
-    """Return the request id a parse error carries, or ``None``."""
-    return error.request_id if isinstance(error, _ParseError) else None
-
-
-def encode(message: dict[str, Any]) -> bytes:
-    """Return ``message`` as one line of JSON."""
-    return json.dumps(message, separators=(",", ":")).encode() + b"\n"
-
-
-def ok_response(identifier: int | str | None, result: dict[str, Any]) -> bytes:
-    """Return the line that answers a request successfully."""
-    return encode({"id": identifier, "ok": True, "result": result})
-
-
-def error_response(identifier: int | str | None, error: DaemonError) -> bytes:
-    """Return the line that answers a request with ``error``."""
-    return encode({"id": identifier, "ok": False, "error": error.to_json()})
-
-
-def untrusted(text: str) -> dict[str, Any]:
-    """Wrap text that came from a web page, so a client can tell it from the daemon's own."""
-    return {"untrusted": True, "text": text}
-
-
-def map_error(error: Exception) -> DaemonError:
-    """Turn an error from a session or the login runner into the error the client sees."""
-    if isinstance(error, DaemonError):
-        return error
-    if isinstance(error, clicks.ClickError):
-        return DaemonError(error.code, str(error), error.details)
-    for kind, code in _ERROR_CODES:
-        if isinstance(error, kind):
-            return DaemonError(code, str(error))
-    return DaemonError("internal", "the daemon hit an unexpected error")
 
 
 def listen_fds(environ: Mapping[str, str], pid: int) -> int:
@@ -488,11 +329,6 @@ def peer_uid(connection: socket.socket) -> int:
         socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
     )
     return struct.unpack("3i", credentials)[1]
-
-
-def refused_entry(refusal: Any) -> dict[str, Any]:  # noqa: ANN401 - a proxy.Refusal
-    """Describe one refusal for a client: the host, the port and the reason, nothing else."""
-    return {"host": refusal.host, "port": refusal.port, "reason": refusal.reason}
 
 
 def _watching(call: Callable[[BrowserSession], Any]) -> Callable[[BrowserSession], Any]:
@@ -961,19 +797,19 @@ class Daemon:
                 error = DaemonError(
                     "request_too_large", f"a request may not exceed {MAX_LINE_BYTES} bytes"
                 )
-                await _send(writer, error_response(None, error))
+                await send(writer, error_response(None, error))
                 return
             if not line.endswith(b"\n"):
                 return
             try:
                 request = parse_request(line)
             except DaemonError as error:
-                await _send(writer, error_response(request_id_of(error), error))
+                await send(writer, error_response(request_id_of(error), error))
                 continue
             if request.op == "watch":
                 await self._stream(reader, writer, request.id)
                 return
-            await _send(writer, await self._dispatch(connection, request))
+            await send(writer, await self._dispatch(connection, request))
 
     async def _dispatch(self, connection: _Connection, request: Request) -> bytes:
         """Return the response line for one request. Never raises."""
@@ -1007,7 +843,7 @@ class Daemon:
         self._watchers.add(watcher)
         gone = asyncio.ensure_future(reader.read())  # finishes at end-of-file: the client left
         try:
-            await _send(writer, ok_response(identifier, self._activity("snapshot")))
+            await send(writer, ok_response(identifier, self._activity("snapshot")))
             while True:
                 event = asyncio.ensure_future(watcher.queue.get())
                 await asyncio.wait({event, gone}, return_when=asyncio.FIRST_COMPLETED)
@@ -1017,7 +853,7 @@ class Daemon:
                 item = event.result()
                 if item is None:
                     return
-                await _send(writer, ok_response(identifier, item))
+                await send(writer, ok_response(identifier, item))
         finally:
             gone.cancel()
             self._watchers.discard(watcher)
@@ -1171,7 +1007,7 @@ class Daemon:
 
     def _site(self, args: dict[str, Any]) -> str:
         """Return the account the ``site`` argument names; a bare name must be unambiguous."""
-        name = sites.resolve_account(self.roots, _string_arg(args, "site"))
+        name = sites.resolve_account(self.roots, string_arg(args, "site"))
         self._touch(name)
         return name
 
@@ -1189,7 +1025,7 @@ class Daemon:
         except FileNotFoundError:
             found = self._known_sites()
             known = ", ".join(self._shown(n, found) for n in found) or "none yet"
-            _fail("unknown_site", f"no site named {site!r}; known sites: {known}")
+            fail("unknown_site", f"no site named {site!r}; known sites: {known}")
 
     # -- operations: sites and policies --
 
@@ -1261,7 +1097,7 @@ class Daemon:
         try:
             name = approvals.validate_host(host)
         except ValueError as error:
-            _fail("bad_request", str(error))
+            fail("bad_request", str(error))
         policy = await self._load_policy(site)
         state = self._state(site)
         if state.proxy is not None:
@@ -1307,7 +1143,7 @@ class Daemon:
         """
         site = self._site(args)
         if args.get("channel") != "elicitation":
-            _fail("bad_request", 'this operation is for the "elicitation" channel')
+            fail("bad_request", 'this operation is for the "elicitation" channel')
         policy, host, found = await self._eligibility(site, args.get("host"))
         if found.status != "eligible":
             return _allow_answer(site, host, found)
@@ -1392,7 +1228,7 @@ class Daemon:
         try:
             name = approvals.validate_host(host)
         except ValueError as error:
-            _fail("bad_request", str(error))
+            fail("bad_request", str(error))
         policy = await self._load_policy(site)
         return policy, name, approvals.deny_eligibility(policy, name)
 
@@ -1418,7 +1254,7 @@ class Daemon:
         """Deny ``host`` because the MCP client's interface returned a yes (see ``allow_apply``)."""
         site = self._site(args)
         if args.get("channel") != "elicitation":
-            _fail("bad_request", 'this operation is for the "elicitation" channel')
+            fail("bad_request", 'this operation is for the "elicitation" channel')
         policy, host, found = await self._deny_eligibility(site, args.get("host"))
         if found.status != "eligible":
             return _deny_answer(site, host, found)
@@ -1481,21 +1317,21 @@ class Daemon:
         connection already holds changes nothing, so the caller can repeat it. Another
         connection's name is refused. The bridge is forgotten when the connection closes.
         """
-        rand = _string_arg(args, "rand")
+        rand = string_arg(args, "rand")
         if not _BRIDGE_RAND.fullmatch(rand):
-            _fail("bad_request", "rand must be 8 to 64 letters and digits")
+            fail("bad_request", "rand must be 8 to 64 letters and digits")
         name = f"bridge-{rand}"
         if name in connection.bridges:
             return {"bridge": name, "registered": False}
         if name in self._bridges:
-            _fail("bridge_exists", f"{name} is already registered")
+            fail("bridge_exists", f"{name} is already registered")
         path = sites.runtime_path(self.roots) / f"{name}.sock"
         try:
             found = await asyncio.to_thread(path.lstat)
         except OSError:
             found = None
         if found is None or not stat.S_ISSOCK(found.st_mode) or found.st_uid != self._uid:
-            _fail("no_socket", f"{path} is not a socket of this user; is the ssh forward up?")
+            fail("no_socket", f"{path} is not a socket of this user; is the ssh forward up?")
         self._bridges[name] = _RegisteredBridge(name, path, self._now())
         connection.bridges.add(name)
         self._emit("bridge_connected", bridge=name)
@@ -1512,10 +1348,10 @@ class Daemon:
     # -- operations: login --
 
     async def _op_login(self, _connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
-        target = _string_arg(args, "target")
+        target = string_arg(args, "target")
         account = args.get("account")
         if account is not None and not isinstance(account, str):
-            _fail("bad_request", '"account" must be a string')
+            fail("bad_request", '"account" must be a string')
         await asyncio.to_thread(sites.system_suffixes)  # no list, no login: see SuffixListError
         site, start = await self._login_target(target, account)
         existing = await self._existing_policy(site)
@@ -1530,7 +1366,7 @@ class Daemon:
                 await self._require_screen()
                 await self._end(state)
             if state.kind == "login":
-                _fail("login_in_progress", f"a login window for {site} is already open")
+                fail("login_in_progress", f"a login window for {site} is already open")
             state.kind = "login"
             state.start = start
             state.began = self._now()
@@ -1667,7 +1503,7 @@ class Daemon:
             if existing
             else f"valetkey add {site} {start} --private-network RANGE"
         )
-        _fail(
+        fail(
             "private_address",
             f"{host} resolves to a private address that {site} may not reach. Only the person "
             f"can allow that, for this site only: ask them to run `{command}`, with the "
@@ -1704,11 +1540,11 @@ class Daemon:
             return name, (await self._load_policy(name)).start
         site, current = sites.split_site_name(target)
         if current is not None:
-            _fail("bad_request", f"name the account once: {target!r} already has one")
+            fail("bad_request", f"name the account once: {target!r} already has one")
         try:
             name = sites.account_name(site, account)
         except ValueError as error:
-            _fail("bad_request", str(error))
+            fail("bad_request", str(error))
         try:
             return name, (await asyncio.to_thread(sites.load_policy, self.roots, name)).start
         except FileNotFoundError:
@@ -1801,7 +1637,7 @@ class Daemon:
         state = self._state(site)
         async with state.lock:
             if state.kind == "login":
-                _fail("login_in_progress", f"a login window for {site} is open; close it first")
+                fail("login_in_progress", f"a login window for {site} is open; close it first")
             if state.kind == "session" and not (state.session and state.session.is_alive()):
                 await self._end(state)
             reused = state.kind == "session"
@@ -1980,7 +1816,7 @@ class Daemon:
         if "site" not in args:
             links = args.get("links", False)
             if not isinstance(links, bool):
-                _fail("bad_request", '"links" must be true or false')
+                fail("bad_request", '"links" must be true or false')
             return self._activity(links=links)
         site = self._site(args)
         state = self._state(site)
@@ -1997,11 +1833,11 @@ class Daemon:
         state = self._state(self._site(args))
         pictures = args.get("images", False)
         if not isinstance(pictures, bool):
-            _fail("bad_request", '"images" must be true or false')
+            fail("bad_request", '"images" must be true or false')
 
         interactive = args.get("interactive", False)
         if not isinstance(interactive, bool):
-            _fail("bad_request", '"interactive" must be true or false')
+            fail("bad_request", '"interactive" must be true or false')
 
         def look(session: BrowserSession) -> tuple[sessions.Snapshot, list[dict[str, Any]]]:
             return session.snapshot(interactive=interactive), session.images() if pictures else []
@@ -2048,8 +1884,8 @@ class Daemon:
         state = self._state(self._site(args))
         ref, url = args.get("ref"), args.get("url")
         if (ref is None) == (url is None):
-            _fail("bad_request", 'give either "ref" or "url", not both and not neither')
-        wanted = _string_arg(args, "ref" if ref is not None else "url")
+            fail("bad_request", 'give either "ref" or "url", not both and not neither')
+        wanted = string_arg(args, "ref" if ref is not None else "url")
         seen = await self._seen_downloads(connection, state.name)
 
         folder = sites.downloads_path(self.roots, state.name)
@@ -2087,10 +1923,10 @@ class Daemon:
 
     async def _op_type(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         state = self._state(self._site(args))
-        ref, text = _string_arg(args, "ref"), _string_arg(args, "text")
+        ref, text = string_arg(args, "ref"), string_arg(args, "text")
         submit = args.get("submit", False)
         if not isinstance(submit, bool):
-            _fail("bad_request", '"submit" must be true or false')
+            fail("bad_request", '"submit" must be true or false')
 
         def fill(session: BrowserSession) -> None:
             session.fill(ref, text)
@@ -2105,7 +1941,7 @@ class Daemon:
 
     async def _op_navigate(self, connection: _Connection, args: dict[str, Any]) -> dict[str, Any]:
         state = self._state(self._site(args))
-        url = _string_arg(args, "url")
+        url = string_arg(args, "url")
         seen = await self._seen_downloads(connection, state.name)
         self._skip_refusals_so_far(connection, state)
         try:
@@ -2237,7 +2073,7 @@ class Daemon:
         state = self._state(self._site(args))
         name = args.get("name", "screenshot.png")
         if not isinstance(name, str):
-            _fail("bad_request", '"name" must be a string')
+            fail("bad_request", '"name" must be a string')
         result = await self._session_op(connection, state, lambda session: session.screenshot(name))
         result["path"] = str(result.pop("_value"))
         return result
@@ -2262,8 +2098,8 @@ class Daemon:
         async with state.op_lock:
             if state.kind != "session":
                 if state.idle_closed is not None:
-                    _fail("session_idle", _idle_message(state.name, state.idle_closed))
-                _fail("no_session", f"{state.name} has no running session; open it first")
+                    fail("session_idle", _idle_message(state.name, state.idle_closed))
+                fail("no_session", f"{state.name} has no running session; open it first")
             session = cast("BrowserSession", state.session)
             if not session.is_alive():
                 dead = session
@@ -2281,7 +2117,9 @@ class Daemon:
         async with state.lock:
             if state.session is dead:
                 await self._end(state)
-        _fail("session_ended", f"the {state.name} browser has exited; open the site again")
+        code = "session_ended"
+        message = f"the {state.name} browser has exited; open the site again"
+        raise DaemonError(code, message)
 
     def _skip_refusals_so_far(self, connection: _Connection, state: _Site) -> None:
         """Leave out of this client's next answer the refusals made until now.
@@ -2358,19 +2196,6 @@ def _is_site_name(name: str) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _string_arg(args: dict[str, Any], name: str) -> str:
-    value = args.get(name)
-    if not isinstance(value, str) or not value:
-        _fail("bad_request", f'"{name}" must be a non-empty string')
-    return value
-
-
-async def _send(writer: asyncio.StreamWriter, line: bytes) -> None:
-    with contextlib.suppress(OSError):
-        writer.write(line)
-        await writer.drain()
 
 
 # -- running ---------------------------------------------------------------------------------

@@ -32,6 +32,7 @@ from valetkey import (
     login,
     mcp_server,
     procs,
+    protocol,
     sessions,
     sites,
 )
@@ -54,10 +55,12 @@ def run[T](scenario: Awaitable[T]) -> T:
 
 
 def test_parse_request() -> None:
-    request = daemon.parse_request(b'{"id": 7, "op": "open", "args": {"site": "sitex"}}\n')
-    assert request == daemon.Request(7, "open", {"site": "sitex"})
-    assert daemon.parse_request(b'{"id": "a", "op": "sites"}') == daemon.Request("a", "sites", {})
-    assert daemon.parse_request(b'{"op": "sites"}').id is None
+    request = protocol.parse_request(b'{"id": 7, "op": "open", "args": {"site": "sitex"}}\n')
+    assert request == protocol.Request(7, "open", {"site": "sitex"})
+    assert protocol.parse_request(b'{"id": "a", "op": "sites"}') == protocol.Request(
+        "a", "sites", {}
+    )
+    assert protocol.parse_request(b'{"op": "sites"}').id is None
 
 
 @pytest.mark.parametrize(
@@ -77,27 +80,27 @@ def test_parse_request() -> None:
 )
 def test_parse_request_rejects_bad_lines(line: bytes, request_id: int | str | None) -> None:
     with pytest.raises(DaemonError) as info:
-        daemon.parse_request(line)
+        protocol.parse_request(line)
     assert info.value.code == "bad_request"
-    assert daemon.request_id_of(info.value) == request_id
+    assert protocol.request_id_of(info.value) == request_id
 
 
 def test_request_id_of_other_errors_is_none() -> None:
-    assert daemon.request_id_of(DaemonError("x", "y")) is None
+    assert protocol.request_id_of(DaemonError("x", "y")) is None
 
 
 def test_responses_are_single_compact_lines() -> None:
-    ok = daemon.ok_response(4, {"a": "é\n"})
+    ok = protocol.ok_response(4, {"a": "é\n"})
     assert ok.endswith(b"\n")
     assert ok.count(b"\n") == 1
     assert json.loads(ok) == {"id": 4, "ok": True, "result": {"a": "é\n"}}
-    error = daemon.error_response(None, DaemonError("unknown_op", "no", {"k": 1}))
+    error = protocol.error_response(None, DaemonError("unknown_op", "no", {"k": 1}))
     assert json.loads(error) == {
         "id": None,
         "ok": False,
         "error": {"code": "unknown_op", "message": "no", "details": {"k": 1}},
     }
-    assert daemon.untrusted("hi") == {"untrusted": True, "text": "hi"}
+    assert protocol.untrusted("hi") == {"untrusted": True, "text": "hi"}
 
 
 @pytest.mark.parametrize(
@@ -115,7 +118,7 @@ def test_responses_are_single_compact_lines() -> None:
     ],
 )
 def test_map_error(error: Exception, code: str) -> None:
-    mapped = daemon.map_error(error)
+    mapped = protocol.map_error(error)
     assert mapped.code == code
     assert "secret" not in mapped.message
 
@@ -367,7 +370,7 @@ class Factory:
 
     def __call__(
         self, _roots: sites.Roots, site: str, url: str, proxy_socket: Path
-    ) -> daemon.BrowserSession:
+    ) -> protocol.BrowserSession:
         self.calls.append((site, url, proxy_socket))
         if self.during_start is not None:
             self.during_start(proxy_socket)
