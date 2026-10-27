@@ -785,6 +785,55 @@ def test_look_gives_the_url_and_the_whole_tree_from_one_snapshot(
     ]  # the whole tree, not the interactive one, and no "get" for the URL
 
 
+def test_a_snapshot_of_one_part_passes_the_selector_with_the_scope_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = make_session(tmp_path)
+    calls: list[tuple[str, ...]] = []
+
+    def answer(*verb: str, timeout: float | None = None) -> dict[str, Any]:  # noqa: ARG001
+        calls.append(verb)
+        return {"origin": "https://s.test/", "snapshot": "- form", "refs": {}}
+
+    monkeypatch.setattr(session, "_call", answer)
+    session.snapshot(interactive=False, selector="#main form")
+    session.snapshot(interactive=True, selector=".a")
+    assert calls == [("snapshot", "-s", "#main form"), ("snapshot", "-i", "-s", ".a")]
+
+
+def test_a_selector_that_matches_nothing_says_so_in_plain_words(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = make_session(tmp_path)
+    failure = sessions.AgentBrowserError
+
+    def nothing(*_verb: str, timeout: float | None = None) -> dict[str, Any]:  # noqa: ARG001
+        message = "Selector '#nope' did not match any element"
+        raise failure(message)
+
+    monkeypatch.setattr(session, "_call", nothing)
+    with pytest.raises(failure) as info:
+        session.snapshot(interactive=False, selector="#nope")
+    assert str(info.value) == "No element on the page matches the selector #nope."
+    with pytest.raises(failure, match="did not match any element"):
+        session.snapshot(interactive=False)  # without a selector the error stands as it is
+
+    def broken(*_verb: str, timeout: float | None = None) -> dict[str, Any]:  # noqa: ARG001
+        message = "Invalid selector 'div[': SyntaxError"
+        raise failure(message)
+
+    monkeypatch.setattr(session, "_call", broken)
+    with pytest.raises(failure, match="Invalid selector"):
+        session.snapshot(interactive=False, selector="div[")
+
+
+def test_a_selector_that_starts_with_a_dash_never_reaches_agent_browser(tmp_path: Path) -> None:
+    paths = sessions.session_paths(make_roots(tmp_path), "demo")
+    sessions.call_command("/usr/bin/ab", paths, tmp_path / "rt", "snapshot", "-s", "#a")
+    with pytest.raises(ValueError, match="looks like an option"):
+        sessions.call_command("/usr/bin/ab", paths, tmp_path / "rt", "snapshot", "-s", "--json")
+
+
 # --- saving pictures and files ------------------------------------------------------------
 
 

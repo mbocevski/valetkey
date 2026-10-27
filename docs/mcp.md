@@ -20,8 +20,7 @@ starts `valetkey daemon` itself, and that daemon keeps running so several client
 Start with `browser_sites`. The others act on one site by its name.
 
 - `browser_sites` lists the sites you have set up, their state, the first hosts each may reach, and
-  what the last login learned. With `site` it lists that one site's complete lists: hosts it may
-  reach, hosts the login left out, and hosts denied.
+  what the last login learned. With `site` it lists that site's complete host lists.
 - `browser_login` opens a login window on your screen and returns at once. It closes the site's
   running browser first. Pass `account` to add another account to a site (see
   [accounts](#accounts)). With no screen it uses a connected bridge if `remote_logins.waypipe` is
@@ -33,7 +32,8 @@ Start with `browser_sites`. The others act on one site by its name.
   the saved login has expired.
 - `browser_snapshot` reads the page as a text tree with its text and a reference such as `e3`
   for each element to act on. A long page is cut, and `interactive` lists only those elements.
-  `images` adds the biggest pictures and videos.
+  `images` adds the biggest pictures and videos. `selector` reads one part of the page (see
+  [below](#reading-one-part-of-a-page)).
 - `browser_click` clicks an element by reference, or by visible text and role. It looks the
   element up again at click time, and checks an `expect` of `text_appears`, `text_gone` or
   `url_changes`. Only a click with an `expect` is ever repeated, and only when the first attempt
@@ -120,6 +120,16 @@ The agent adds an account with `browser_login` and its `account` argument, for e
 `site_or_url` `sitex` with `account` `work`. The new account starts at the same page, with its own
 list of hosts. You can start it with the hosts of another account using
 `valetkey add sitex:work START --copy-hosts-from sitex`. Only you can do that.
+
+## Reading one part of a page
+
+`browser_snapshot` takes a `selector`: a CSS selector of 1 to 500 characters, with no newline, that
+does not start with a dash. The tree is then only the part of the page under the first element it
+matches, and the result has a `Scope:` line after the URL lines. The references of that tree are
+added to the ones the client already has for the page, so a reference from an earlier whole-page
+snapshot still works. A whole-page snapshot, or one of another page, starts the table again. A
+selector that matches nothing is a `browser_error`: "No element on the page matches the selector".
+`interactive`, `images` and the cut for a long tree work as they do for the whole page.
 
 ## Downloads
 

@@ -14,11 +14,15 @@ profile.
   account, or only the entry of ``site`` when that is given. ``summary`` is what the last login
   learned, and it is delivered once.
 * ``open`` ``{site}``: start the site's session, or join the running one (``reused: true``).
-* ``snapshot`` ``{images?}``, ``type`` ``{ref, text, submit?}``, ``navigate`` ``{url}``,
+* ``snapshot`` ``{images?, interactive?, selector?}``, ``type`` ``{ref, text, submit?}``,
+  ``navigate`` ``{url}``,
   ``screenshot`` ``{name?}``, ``status`` ``{site}``: act on the site's session. ``submit``
   presses Enter after the text is typed. With ``images: true`` a ``snapshot`` answer also has
   ``images``, the biggest pictures and videos on the page, each ``{kind, alt, url, width,
-  height}`` with ``alt`` and ``url`` untrusted.
+  height}`` with ``alt`` and ``url`` untrusted. With ``selector``, a CSS selector, the tree is
+  only the part of the page under the first element it matches, the answer has ``scope`` (the
+  selector) and its references are added to the client's table for the page; a selector that
+  matches nothing is a ``browser_error``.
 * ``save`` ``{ref | url}``: save what an address serves into the site's downloads directory,
   by the contained browser and its proxy, so only hosts the site may reach work. ``ref`` is an
   element of the last snapshot (a link's target, a picture's or video's source or poster); ``url``

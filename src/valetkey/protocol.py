@@ -31,8 +31,13 @@ class BrowserSession(Protocol):
     def open(self, url: str) -> sessions.Page:
         """Navigate to ``url``."""
 
-    def snapshot(self, *, interactive: bool = True) -> sessions.Snapshot:
-        """Return the page's interactive elements, or with ``interactive`` false its whole tree."""
+    def snapshot(
+        self, *, interactive: bool = True, selector: str | None = None
+    ) -> sessions.Snapshot:
+        """Return the page's interactive elements, or with ``interactive`` false its whole tree.
+
+        With ``selector``, a CSS selector, only the part of the page under it.
+        """
 
     def snapshot_delta(self, *, interactive: bool, full: bool = False) -> sessions.SnapshotDelta:
         """Return what changed in the page's tree since the last answer, or the whole tree."""

@@ -455,8 +455,8 @@ def holder_script(paths: SessionPaths, binary: str, open_command: list[str], run
     )
 
 
-OWN_FLAGS = frozenset({"-i", "--clear", "--content", "--delta", "--full"})
-"""The only option-like arguments valetkey itself passes after a verb (``snapshot -i --delta
+OWN_FLAGS = frozenset({"-i", "-s", "--clear", "--content", "--delta", "--full"})
+"""The only option-like arguments valetkey itself passes after a verb (``snapshot -i -s --delta
 --full``, ``network requests --clear``, ``network har start --content all``)."""
 
 
@@ -1041,17 +1041,31 @@ class Session:
         """Navigate to an HTTP or HTTPS ``url``."""
         return parse_page(self._call("open", _check_url(url)))
 
-    def snapshot(self, *, interactive: bool = True) -> Snapshot:
+    def snapshot(self, *, interactive: bool = True, selector: str | None = None) -> Snapshot:
         """Return the page's accessibility tree, with references for ``click`` and ``fill``.
 
         With ``interactive`` (the default, which a click looks its target up in) only the
         elements one can act on are listed. Without it the whole tree is, with the page's text
         in it: paragraphs, lists and tables. The references are the same kind either way. The
         tree is agent-browser's own text; the daemon trims it (see :mod:`valetkey.treetrim`).
+
+        With ``selector``, a CSS selector, only the part of the page under the first element it
+        matches is listed.
+
+        Raises:
+            AgentBrowserError: when ``selector`` matches nothing or is not a valid selector.
+
         """
         # Not ``-c``: agent-browser's compact mode drops text with no reference above it, such as
         # the second item of a list or a page's footer (0.39). The daemon trims the tree instead.
-        return parse_snapshot(self._call("snapshot", *(["-i"] if interactive else [])))
+        scope = ["-s", selector] if selector is not None else []
+        try:
+            return parse_snapshot(self._call("snapshot", *(["-i"] if interactive else []), *scope))
+        except AgentBrowserError as error:
+            if selector is None or "did not match any element" not in str(error):
+                raise
+            message = f"No element on the page matches the selector {selector}."
+            raise AgentBrowserError(message) from error
 
     def snapshot_delta(self, *, interactive: bool, full: bool = False) -> SnapshotDelta:
         """Return what changed in the page's tree since the last answer of this kind.

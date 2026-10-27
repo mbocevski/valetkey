@@ -90,9 +90,11 @@ class Connection:
     """One client connection. Refusal cursors and the last snapshot are kept here, per site."""
 
     cursors: dict[str, tuple[int, int, int]] = field(default_factory=dict)
-    refs: dict[str, tuple[int, dict[str, tuple[str, str]]]] = field(default_factory=dict)
-    """For each site, the session generation and the ``{ref: (role, name)}`` of the snapshot
-    this client last received. A click by reference means the element it was in that snapshot."""
+    refs: dict[str, tuple[int, dict[str, tuple[str, str]], str]] = field(default_factory=dict)
+    """For each site, the session generation, the ``{ref: (role, name)}`` of the snapshots this
+    client received of the page at ``url``, and that ``url``. A click by reference means the
+    element it was in those snapshots. A snapshot of one part of the page adds to the table when
+    the page is the same, and a snapshot of the whole page or of another page replaces it."""
     views: dict[str, deltas.View] = field(default_factory=dict)
     """For each site, the tree this client last read in a snapshot, which a delta changes."""
     seen_downloads: dict[str, dict[str, downloads.Signature]] = field(default_factory=dict)

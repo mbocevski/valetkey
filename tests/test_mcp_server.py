@@ -311,7 +311,7 @@ EXPECTED_TOOLS = {
     "browser_sites": {"site"},
     "browser_login": {"site_or_url", "account"},
     "browser_open": {"site"},
-    "browser_snapshot": {"site", "images", "interactive"},
+    "browser_snapshot": {"site", "images", "interactive", "selector"},
     "browser_click": {"site", "ref", "text", "role", "expect"},
     "browser_type": {"site", "ref", "text", "submit"},
     "browser_navigate": {"site", "url"},
@@ -942,6 +942,28 @@ def test_a_snapshot_asks_for_pictures_only_when_told_to(short_dir: Path) -> None
                 "images": True,
                 "interactive": False,
             }
+
+    run(scenario())
+
+
+def test_a_snapshot_can_be_scoped_and_says_so(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["snapshot"] = lambda a: (
+                ENVELOPE
+                | {"snapshot": {"untrusted": True, "text": '- button "Save" [ref=e2]'}}
+                | ({"scope": a["selector"]} if "selector" in a else {})
+            )
+            whole = text_of(await mcp.call_tool("browser_snapshot", {"site": "sitex"}))
+            assert "Scope:" not in whole
+            assert "selector" not in fake.requests[-1]["args"]
+            part = text_of(
+                await mcp.call_tool("browser_snapshot", {"site": "sitex", "selector": "#form"})
+            )
+            assert fake.requests[-1]["args"]["selector"] == "#form"
+            lines = part.splitlines()
+            assert lines.index("Scope: #form") == lines.index("Refused hosts: none") + 1
+            assert part.index("Scope: #form") < part.index("Page content (untrusted")
 
     run(scenario())
 

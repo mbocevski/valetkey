@@ -170,6 +170,32 @@ def cut_tree(tree: str, limit: int = SNAPSHOT_LIMIT) -> tuple[str, tuple[int, in
     return text, (len(lines) - max(kept, 1), len(tree) - len(text))
 
 
+MAX_SELECTOR = 500
+"""The longest CSS selector a snapshot takes, in characters."""
+
+
+def _selector_arg(args: dict[str, Any]) -> str | None:
+    """Return the ``selector`` argument of a snapshot, or ``None`` when there is none.
+
+    agent-browser would read a selector that starts with a dash as one of its own options.
+    """
+    selector = args.get("selector")
+    if selector is None:
+        return None
+    if (
+        not isinstance(selector, str)
+        or not 1 <= len(selector) <= MAX_SELECTOR
+        or "\n" in selector
+        or selector.startswith("-")
+    ):
+        fail(
+            "bad_request",
+            f'"selector" must be a CSS selector of 1 to {MAX_SELECTOR} characters, with no '
+            'newline, that does not start with "-"',
+        )
+    return selector
+
+
 def _idle_message(site: str, minutes: int) -> str:
     noun = "minute" if minutes == 1 else "minutes"
     return (
@@ -438,17 +464,26 @@ class Sessions:
         if not isinstance(interactive, bool):
             fail("bad_request", '"interactive" must be true or false')
 
+        selector = _selector_arg(args)
+
         def look(
             session: BrowserSession,
-        ) -> tuple[sessions.SnapshotDelta, list[dict[str, Any]]]:
+        ) -> tuple[sessions.SnapshotDelta | sessions.Snapshot, list[dict[str, Any]]]:
+            pictures_found = session.images() if pictures else []
+            if selector is not None:
+                # One part of the page is not the tree later deltas change, so it leaves the
+                # baseline alone.
+                return session.snapshot(interactive=interactive, selector=selector), pictures_found
             # In full, so that it is the whole tree and the baseline later deltas change.
-            answer = session.snapshot_delta(interactive=interactive, full=True)
-            return answer, session.images() if pictures else []
+            return session.snapshot_delta(interactive=interactive, full=True), pictures_found
 
         result = await self.session_op(connection, state, look)
         answer, found = result.pop("_value")
-        snap = cast("sessions.Snapshot", answer.snapshot)
-        connection.views[state.name] = deltas.start(state.generation, interactive, answer)
+        if selector is None:
+            snap = cast("sessions.Snapshot", answer.snapshot)
+            connection.views[state.name] = deltas.start(state.generation, interactive, answer)
+        else:
+            snap = cast("sessions.Snapshot", answer)
         if pictures:
             result["images"] = [
                 item | {"alt": untrusted(item["alt"]), "url": untrusted(item["url"])}
@@ -460,16 +495,19 @@ class Sessions:
         if left_out is not None:
             result["cut"] = {"lines": left_out[0], "characters": left_out[1]}
         result["refs"] = {ref: element.role for ref, element in snap.refs.items()}
-        connection.refs[state.name] = (
-            state.generation,
-            {ref: (element.role, element.name) for ref, element in snap.refs.items()},
-        )
+        table = {ref: (element.role, element.name) for ref, element in snap.refs.items()}
+        known = connection.refs.get(state.name)
+        if selector is not None:
+            result["scope"] = selector
+            if known is not None and known[0] == state.generation and known[2] == snap.url:
+                table = known[1] | table  # the earlier refs of this page stay usable
+        connection.refs[state.name] = (state.generation, table, snap.url)
         return result
 
     async def op_click(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         """Answer ``click``: a verified click, with the downloads it started."""
         state = self.registry.state(self.registry.site_of(args))
-        generation, known = connection.refs.get(state.name, (-1, {}))
+        generation, known, _url = connection.refs.get(state.name, (-1, {}, ""))
         target = clicks.build_target(args, known if generation == state.generation else {})
         expect = clicks.parse_expectation(args.get("expect"))
         seen = await self.downloads.seen_downloads(connection, state.name)
@@ -515,9 +553,11 @@ class Sessions:
         except sessions.AgentBrowserError, sessions.SessionError, OSError:
             logger.warning("reading what changed on the %s page failed", state.name, exc_info=True)
             return
-        table = connection.refs.get(state.name, (state.generation, {}))[1]
+        known = connection.refs.get(state.name, (state.generation, {}, ""))
+        table = known[1]
         change = deltas.follow(view, answer, table, DELTA_LIMIT)
-        connection.refs[state.name] = (state.generation, table)
+        # The address stays that of the snapshot the table came from, not of where the page went.
+        connection.refs[state.name] = (state.generation, table, known[2])
         if change["kind"] == "delta":
             change["removed"] = untrusted("\n".join(change["removed"]))
             change["added"] = untrusted("\n".join(change["added"]))

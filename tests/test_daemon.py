@@ -262,6 +262,8 @@ class FakeSession:
         """The ``(interactive, full)`` of each snapshot asked for as a delta."""
         self.page_title = "A page"
         self.delta_fails: Exception | None = None
+        self.parts: dict[str, tuple[str, dict[str, sessions.Ref]]] = {}
+        """The tree and the references of the part of the page each selector matches."""
         self.attached = 0
         self.attach_names: list[str] | None = None
         self.passwords = 0
@@ -296,8 +298,16 @@ class FakeSession:
             self.on_open()
         return sessions.Page(url, f"Title of {url}")
 
-    def snapshot(self, *, interactive: bool = True) -> sessions.Snapshot:
-        self._use("snapshot", interactive)
+    def snapshot(
+        self, *, interactive: bool = True, selector: str | None = None
+    ) -> sessions.Snapshot:
+        self._use("snapshot", interactive, *([] if selector is None else [selector]))
+        if selector is not None:
+            if selector not in self.parts:
+                msg = f"No element on the page matches the selector {selector}."
+                raise sessions.AgentBrowserError(msg)
+            tree, refs = self.parts[selector]
+            return sessions.Snapshot(self.url, tree, refs)
         return sessions.Snapshot(self.url, self.tree, dict(self.elements))
 
     def snapshot_delta(self, *, interactive: bool, full: bool = False) -> sessions.SnapshotDelta:
@@ -1279,6 +1289,111 @@ def test_a_snapshot_is_cut_and_says_how_much_was_left_out(roots: sites.Roots) ->
             with pytest.raises(DaemonError) as info:
                 await c.call("snapshot", site="sitex", interactive="yes")
             assert info.value.code == "bad_request"
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("selector", ["", "x" * 501, "a\nb", "-s", "--json", 5, ["a"]], ids=repr)
+def test_a_selector_that_is_not_a_plain_css_selector_is_refused(
+    roots: sites.Roots, selector: object
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("snapshot", site="sitex", selector=selector)
+            assert info.value.code == "bad_request"
+            assert '"selector" must be a CSS selector' in info.value.message
+            assert not [call for call in rig.factory.made[0].calls if call[0] == "snapshot"]
+
+    run(scenario())
+
+
+def test_a_snapshot_can_be_scoped_to_one_part_of_the_page(roots: sites.Roots) -> None:
+    add_site(roots)
+    form = ('- form\n  - button "Save" [ref=e2]', {"e2": sessions.Ref("button", "Save")})
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.parts["#form"] = form
+            result = await c.call("snapshot", site="sitex", selector="#form")
+            # The daemon trims the tree: one space of indent for each level.
+            assert result["snapshot"] == {
+                "untrusted": True,
+                "text": '- form\n - button "Save" [ref=e2]',
+            }
+            assert result["refs"] == {"e2": "button"}
+            assert result["scope"] == "#form"
+            asked = [call for call in session.calls if call[0] == "snapshot"]
+            assert asked == [("snapshot", False, "#form")]
+            whole = await c.call("snapshot", site="sitex")
+            assert "scope" not in whole
+
+    run(scenario())
+
+
+def test_a_scoped_snapshot_leaves_the_baseline_of_the_deltas_alone(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.parts["#form"] = ("- form", {"e2": sessions.Ref("button", "Save")})
+            ops = rig.daemon.sessions
+            connection = registry.Connection()
+            await ops.op_snapshot(connection, {"site": "sitex"})
+            view = connection.views["sitex"]
+            asked = list(session.delta_calls)
+            await ops.op_snapshot(connection, {"site": "sitex", "selector": "#form"})
+            assert session.delta_calls == asked  # no delta was asked for one part of the page
+            assert connection.views["sitex"] is view
+
+    run(scenario())
+
+
+def test_a_selector_that_matches_nothing_is_a_browser_error(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            with pytest.raises(DaemonError) as info:
+                await c.call("snapshot", site="sitex", selector="#nope")
+            assert info.value.code == "browser_error"
+            assert info.value.message == "No element on the page matches the selector #nope."
+
+    run(scenario())
+
+
+def test_the_references_of_a_scoped_snapshot_are_added_to_the_page_s_table(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    go = ("button", "Go")
+    save = ("button", "Save")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.parts["#form"] = ("- form", {"e2": sessions.Ref(*save)})
+            ops = rig.daemon.sessions
+            connection = registry.Connection()
+            await ops.op_snapshot(connection, {"site": "sitex"})
+            assert connection.refs["sitex"][1] == {"e1": go}
+            await ops.op_snapshot(connection, {"site": "sitex", "selector": "#form"})
+            assert connection.refs["sitex"][1] == {"e1": go, "e2": save}  # added, not replaced
+            await ops.op_snapshot(connection, {"site": "sitex"})
+            assert connection.refs["sitex"][1] == {"e1": go}  # a whole snapshot replaces
+            await ops.op_snapshot(connection, {"site": "sitex", "selector": "#form"})
+            session.url = "https://sitex.test/other"  # another page: its table starts again
+            await ops.op_snapshot(connection, {"site": "sitex", "selector": "#form"})
+            assert connection.refs["sitex"][1] == {"e2": save}
 
     run(scenario())
 
