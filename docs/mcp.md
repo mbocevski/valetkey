@@ -19,7 +19,7 @@ starts `valetkey daemon` itself, and that daemon keeps running so several client
 
 Start with `browser_sites`. The others act on one site by its name.
 
-- `browser_sites` lists the sites you have set up, their state, the first hosts each may reach, and
+- `browser_sites` lists your sites, their state, the first hosts each may reach, and
   what the last login learned. With `site` it lists that site's complete host lists.
 - `browser_login` opens a login window on your screen and returns at once. It closes the site's
   running browser first. Pass `account` to add another account to a site (see
@@ -28,23 +28,22 @@ Start with `browser_sites`. The others act on one site by its name.
   Otherwise, with `remote_logins.novnc` on, the window is shown in a web browser. The link goes to
   you, never to the agent: your client shows it, or you run `valetkey status` (see
   [remote logins](remote.md)).
-- `browser_open` starts the signed-in browser for a site, or joins the running one. It says when
+- `browser_open` starts the signed-in browser for a site, or joins the running one, and says when
   the saved login has expired.
 - `browser_snapshot` reads the page as a text tree with its text and a reference such as `e3`
   for each element to act on. A long page is cut, and `interactive` lists only those elements.
   `images` adds the biggest pictures and videos. `selector` reads one part of the page (see
   [below](#reading-one-part-of-a-page)).
-- `browser_click` clicks an element by reference, or by visible text and role. It looks the
-  element up again at click time, and checks an `expect` of `text_appears`, `text_gone` or
-  `url_changes`. Only a click with an `expect` is ever repeated, and only when the first attempt
+- `browser_click` clicks an element by reference, or by visible text and role. Text that is
+  part of one name, as whole words, also matches. It looks the element up again at click time, and
+  checks an `expect` of `text_appears`, `text_gone` or `url_changes`. Only a click with an `expect` is ever repeated, and only when the first attempt
   changed nothing.
 - `browser_type` replaces the contents of a field, and presses Enter when `submit` is true.
 - `browser_navigate` goes to an HTTP or HTTPS address on an allowed host.
 - `browser_save` saves a picture, a video or a linked file into the downloads folder (see
   [Downloads](#downloads)).
-- `browser_downloads` lists the files the browser has saved. Clicks and navigation also list new
-  files.
-- `browser_screenshot` returns an image of the page.
+- `browser_downloads` lists saved files; clicks and navigation list new ones.
+- `browser_screenshot` returns a page image.
 - `browser_allow` asks you to let the site reach more hosts.
 - `browser_deny` asks you to stop the site reaching hosts it reaches now (see
   [denying a host](#denying-a-host)).

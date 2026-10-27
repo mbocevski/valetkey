@@ -242,8 +242,23 @@ def _matches(role: str, name: str, target: Target) -> bool:
     return _same(normalize(name), target.name, fold=target.fold)
 
 
+def _holds_words(name: str, target: Target) -> bool:
+    """Tell whether ``name`` contains the target's text as whole words, in the right role.
+
+    A word ends at a space or a mark, never inside a longer word: ``konto`` is in ``Mitt konto``
+    and not in ``kontoret``, and ``orders`` is in ``icon_user Orders icon_arrow`` but not in
+    ``icon_orders``.
+    """
+    pattern = rf"(?<!\w){re.escape(target.name.casefold())}(?!\w)"
+    return re.search(pattern, normalize(name).casefold()) is not None
+
+
 def resolve(refs: Mapping[str, sessions.Ref], target: Target) -> tuple[str, sessions.Ref]:
     """Pick the one element of a fresh snapshot that ``target`` means.
+
+    An exact name wins. When none has that name and the text came from the caller (``fold``),
+    the one element whose name holds the text as whole words is taken, as when a site builds names
+    from icon labels (``icon_user Orders icon_arrow``). Several such elements are not guessed at.
 
     Raises:
         ClickError: ``target_not_found`` or ``target_ambiguous``, with the names that came
@@ -261,6 +276,15 @@ def resolve(refs: Mapping[str, sessions.Ref], target: Target) -> tuple[str, sess
     ]
     if len(matches) == 1:
         return matches[0]
+    if not matches and target.fold:
+        holding = [
+            (ref, element)
+            for ref, element in refs.items()
+            if (target.role is None or element.role.casefold() == target.role.casefold())
+            and _holds_words(element.name, target)
+        ]
+        if len(holding) == 1:
+            return holding[0]
     what = f"a {target.role}" if target.role else "an element"
     if matches:
         details = {"candidates": [{"role": e.role, "name": e.name} for _, e in matches]}

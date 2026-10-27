@@ -186,6 +186,59 @@ def test_text_ignores_case_and_a_snapshots_names_do_not() -> None:
         resolve(fresh, Target("save", "button", fold=False))
 
 
+def test_an_exact_name_wins_over_names_that_hold_the_text() -> None:
+    fresh = refs(e1=("link", "icon_user Orders icon_arrow"), e2=("link", "Orders"))
+    assert resolve(fresh, Target("orders", "link", fold=True))[0] == "e2"
+
+
+def test_the_one_name_that_holds_the_text_as_whole_words_is_clicked() -> None:
+    fresh = refs(
+        e1=("link", "icon_arialabel_user Mitt konto icon_arialabel_arrow-right-small"),
+        e2=("link", "Kontoret"),
+        e3=("button", "Cancel"),
+    )
+    ref, element = resolve(fresh, Target("mitt konto", None, fold=True))
+    assert (ref, element.name) == (
+        "e1",
+        "icon_arialabel_user Mitt konto icon_arialabel_arrow-right-small",
+    )
+    assert resolve(fresh, Target("Mitt konto", "link", fold=True))[0] == "e1"
+
+
+def test_a_text_that_is_only_part_of_a_word_does_not_match() -> None:
+    fresh = refs(
+        e1=("link", "icon_user Kontoret"), e2=("link", "icon_konto"), e3=("link", "konto2")
+    )
+    with pytest.raises(ClickError) as info:
+        resolve(fresh, Target("konto", None, fold=True))
+    assert info.value.code == "target_not_found"
+
+
+def test_several_names_that_hold_the_text_are_refused_with_the_candidates() -> None:
+    fresh = refs(
+        e1=("link", "icon_a Orders icon_b"), e2=("link", "Your Orders"), e3=("link", "Help")
+    )
+    with pytest.raises(ClickError) as info:
+        resolve(fresh, Target("Orders", None, fold=True))
+    assert info.value.code == "target_not_found"
+    assert info.value.details["candidates"] == [
+        {"role": "link", "name": "icon_a Orders icon_b"},
+        {"role": "link", "name": "Your Orders"},
+    ]
+
+
+def test_the_role_narrows_the_names_that_hold_the_text() -> None:
+    fresh = refs(e1=("link", "icon_a Orders icon_b"), e2=("button", "Your Orders"))
+    assert resolve(fresh, Target("Orders", "link", fold=True))[0] == "e1"
+    assert resolve(fresh, Target("Orders", "button", fold=True))[0] == "e2"
+
+
+def test_a_reference_is_never_matched_by_words() -> None:
+    fresh = refs(e1=("link", "icon_a Orders icon_b"))
+    with pytest.raises(ClickError):
+        resolve(fresh, Target("Orders", "link", ref="e9"))  # an exact snapshot name, no fold
+
+
 def test_names_are_compared_with_whitespace_made_single() -> None:
     fresh = refs(e1=("button", "Save\n  now"))
     assert resolve(fresh, Target("Save now", None))[0] == "e1"
@@ -468,6 +521,7 @@ FIXTURE = """<!doctype html><title>Fixture</title>
 <a href="/two">Next page</a>
 <form id="form"><input id="q" aria-label="Query"></form>
 <textarea id="notes" aria-label="Notes"></textarea>
+<a href="/two" id="orders"><span>icon_user</span> Orders <span>icon_arrow</span></a>
 <script>
 // What happened is reported to the server, not written on the page, so the page itself stays
 // exactly as it was when nothing visible changed.
@@ -667,6 +721,22 @@ def test_ambiguous_and_missing_targets_click_nothing(browser: Browser) -> None:
 def test_a_link_that_changes_the_url_is_verified(browser: Browser) -> None:
     result = verified_click(browser.session, Target("Next page", "link"), Expect("url_changes"))
     assert (result.attempts, result.outcome) == (1, "met")
+    assert browser.session.current_url().endswith("/two")
+
+
+@pytest.mark.integration
+@needs_everything
+def test_a_link_named_with_icon_words_is_clicked_by_its_text(browser: Browser) -> None:
+    names = {e.name for e in browser.session.snapshot().refs.values() if e.role == "link"}
+    assert "icon_user Orders icon_arrow" in names
+    result = verified_click(
+        browser.session, build_target({"text": "Orders"}, {}), Expect("url_changes")
+    )
+    assert (result.role, result.name, result.outcome) == (
+        "link",
+        "icon_user Orders icon_arrow",
+        "met",
+    )
     assert browser.session.current_url().endswith("/two")
 
 

@@ -48,6 +48,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Changed
 
+- `browser_click` by text now clicks the one element whose name holds the text as whole words, such as `icon_user Orders icon_arrow` for `Orders`. An exact name still wins, and an ambiguous text is refused.
 - The browser starts with Chromium's page tools (WebMCP) turned off, so pages see no `ModelContext`; `valetkey doctor` fails an agent-browser that does not accept the option.
 - `browser_snapshot` is 15 to 40% shorter: it leaves out unnamed layout nodes and text that repeats its parent's name, and nests one space per level, keeping every reference and all other text.
 - A `browser_click` whose `expect` does not come true now takes one snapshot per check, with growing pauses, and at most 15 checks, so it starts far fewer browser programs in the same time.

@@ -777,8 +777,10 @@ DESCRIPTIONS = {
     "browser_click": (
         "Click an element, named by its reference (e3) from your latest browser_snapshot, or by "
         "its visible text with an optional role. The element is looked up again by role and "
-        "name at click time, so a page that re-rendered cannot send the click elsewhere; if the "
-        "name matches nothing or several elements, nothing is clicked. Say what should follow "
+        "name at click time, so a page that re-rendered cannot send the click elsewhere. A text "
+        "that is not a whole name still matches an element whose name holds it as whole words "
+        "(an icon label around it), but only if exactly one does. If the name matches nothing or "
+        "several elements, nothing is clicked. Say what should follow "
         "in expect (text_appears, text_gone or url_changes) and the result says whether it "
         "happened. Only a click with an expect is ever repeated, and only if the first changed "
         "nothing. If the click starts a download, the new files are listed. Once you have read "
