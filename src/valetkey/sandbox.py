@@ -96,12 +96,14 @@ def installed_chrome_major(executable: str = "chromium") -> int:
 
 
 BACKGROUND_HOSTS = frozenset({"update.googleapis.com"})
-"""Hosts Chrome still contacts at start-up whatever the flags say, so a proxy can treat them as
-known noise rather than as hosts the page needs. ``update.googleapis.com`` is the component
-updater asking for a foreground update, which no flag stops; :data:`CHROME_POLICY` does, and the
-host stays here in case a browser asks anyway. Every other background request is stopped by the
-flags below and by the policy, so a host that is refused for a page is a host the page asked
-for."""
+"""Hosts Chrome may still contact at start-up, so a proxy can treat them as known noise rather
+than as hosts the page needs. ``update.googleapis.com`` is the component updater, which checks
+on demand for the "Optimization Guide On Device Models Manifest" component the moment it is
+registered. ``ComponentUpdatesEnabled`` only makes that request say ``updatedisabled``, and no
+policy or feature flag tried stops the check, but ``--component-updater=url-source=`` in
+:func:`chrome_flags` sends it to an address that cannot be fetched, so the request is never made.
+The host stays here in case a browser asks anyway. A host that is refused for a page is a host the
+page asked for."""
 
 CHROME_POLICY = {
     "DefaultSearchProviderEnabled": False,
@@ -162,6 +164,11 @@ def chrome_flags(major: int, *, hide_automation: bool = True) -> list[str]:
         "--proxy-bypass-list=<-loopback>",
         "--disable-background-networking",
         "--disable-component-update",
+        # With component updates off by policy, Chromium still sends an on-demand update check
+        # for its one registered component (the on-device models manifest) at every start, to
+        # update.googleapis.com, where the proxy had to refuse it. This points the updater at a
+        # file that does not exist, so the check fails inside the browser and no request is made.
+        "--component-updater=url-source=file:///nonexistent",
         "--enable-features=NavigationPredictorPreconnectHoldback",
         "--disable-sync",
         "--disable-default-apps",

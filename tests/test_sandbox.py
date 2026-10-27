@@ -137,6 +137,11 @@ def test_the_policy_is_bound_read_only_where_chromium_and_chrome_read_it(tmp_pat
     assert (str(tmp_path / "policy"), "/etc/opt/chrome/policies") in ro
 
 
+def test_the_component_updater_is_pointed_at_something_that_cannot_be_fetched() -> None:
+    flag = next(f for f in sandbox.chrome_flags(156) if f.startswith("--component-updater="))
+    assert flag == "--component-updater=url-source=file:///nonexistent"
+
+
 def test_chrome_flags_hold_the_containment_and_quiet_flags() -> None:
     flags = sandbox.chrome_flags(156)
     assert "--proxy-server=http://127.0.0.1:3128" in flags
