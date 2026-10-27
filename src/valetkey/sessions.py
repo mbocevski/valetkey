@@ -398,6 +398,10 @@ def launch_command(
     return [
         binary,
         "--json",
+        # agent-browser turns on Chromium's WebMCP in every browser it starts: pages would see an
+        # API stock Chrome lacks and could register tools. Nothing here uses them (see
+        # docs/security.md), so the browser starts without.
+        "--no-webmcp",
         "--profile",
         str(paths.profile_dir),
         "--download-path",

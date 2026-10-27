@@ -1110,6 +1110,12 @@ def check_agent_browser(system: System) -> Check:
     except sessions.VersionError as error:
         return Check("agent-browser", "fail", str(error))
     text = sessions.version_text(version)
+    if "--no-webmcp" not in system.run([path, "--help"])[1]:
+        detail = (
+            f"agent-browser {text} does not list --no-webmcp, which valetkey passes; "
+            "every release from 0.36.0 on has it"
+        )
+        return Check("agent-browser", "fail", detail)
     if sessions.is_untested(version):
         tested = sessions.version_text(sessions.TESTED_VERSION)
         detail = (

@@ -175,6 +175,10 @@ The browser's own error messages and the tails of its logs are fenced and labell
 because they can repeat what a page chose. The summary of a login holds only valetkey's words and
 host names, never text from the login's history.
 
+Chromium's experimental page tools (WebMCP), which let a page register actions for an agent, are
+turned off in every session. Nothing in valetkey passes them on, so they would only add an API that
+stock Chrome lacks, and a page can lie about what a tool does. A page then sees no `ModelContext`.
+
 A login window can also tamper with the files it writes. valetkey reads its history and its
 cookie database from a copy, read-only, with a size cap and a time limit, and refuses a file that
 holds anything but plain tables. Of the cookies it keeps only a host and a name, never a value.

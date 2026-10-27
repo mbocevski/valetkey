@@ -927,6 +927,7 @@ class FakeSystem:
             "/usr/bin/bwrap --version": (0, "bubblewrap 0.13.1\n"),
             "/usr/bin/chromium --version": (0, "Chromium 156.0.8078.47 Arch Linux\n"),
             "/usr/bin/agent-browser --version": (0, "agent-browser 0.39.4\n"),
+            "/usr/bin/agent-browser --help": (0, "Options:\n  --no-webmcp  Disable WebMCP\n"),
             "systemctl --user is-active valetkeyd.socket": (3, "inactive\n"),
         }
         self.probe: tuple[int, str] = (0, "")
@@ -1095,6 +1096,18 @@ def test_doctor_agent_browser_problems(tmp_path: Path) -> None:
     assert results(fake)["agent-browser"] == (
         "fail",
         "cannot read the version of /usr/bin/agent-browser",
+    )
+
+
+def test_doctor_fails_an_agent_browser_that_does_not_list_no_webmcp(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path)
+    fake.outputs["/usr/bin/agent-browser --help"] = (0, "Options:\n  --json  JSON output\n")
+    assert results(fake)["agent-browser"] == (
+        "fail",
+        (
+            "agent-browser 0.39.4 does not list --no-webmcp, which valetkey passes; "
+            "every release from 0.36.0 on has it"
+        ),
     )
 
 

@@ -275,6 +275,15 @@ def test_launch_command_carries_every_launch_option_once(tmp_path: Path) -> None
     assert "--proxy-server" not in option["--args"]
 
 
+def test_launch_command_turns_page_tools_off_once_and_before_the_open(tmp_path: Path) -> None:
+    paths = sessions.session_paths(make_roots(tmp_path), "demo")
+    argv = sessions.launch_command(
+        "/usr/bin/ab", paths, "http://site.test/", "/usr/bin/chromium", 156
+    )
+    assert argv.count("--no-webmcp") == 1
+    assert argv.index("--no-webmcp") < argv.index("open")
+
+
 @pytest.mark.parametrize(
     "url", ["file:///etc/passwd", "javascript:alert(1)", "data:text/html,x", "http://", "site.test"]
 )
