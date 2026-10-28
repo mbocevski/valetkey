@@ -117,6 +117,14 @@ response, with the stack and the line for an error. A request marked refused nee
 (see above); an error in the page's own code is for the site's owner. A request for a worker's
 script shows with no response even when the worker started, so do not read it as the cause.
 
+If a page stays on a spinner, no host is refused and `browser_console` shows nothing else, the
+site's own stored state may be stuck. That could be a service worker or a cache it left in the
+profile that waits for something it never gets. Ask the agent to call `browser_login` for the site,
+so that a login window opens. In that window open the developer tools, go to Application and choose
+Clear site data with its cookies box unchecked, so you stay signed in. Then close the window and
+open the site again. If the page still spins, run `valetkey forget` for the site and log in again.
+That deletes the profile, so it is the last resort.
+
 ## A tool says the session was closed
 
 A session that nothing uses for 15 minutes is closed, and the next call says so and asks the agent
