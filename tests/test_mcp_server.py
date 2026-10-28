@@ -2,7 +2,6 @@
 import asyncio
 import base64
 import contextlib
-import inspect
 import json
 import os
 import signal
@@ -10,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
@@ -2310,9 +2310,23 @@ when it sent the question itself, in the middle of a call; a result that asks fo
 answered by the client, and a client that raises there fails the call, whatever the server does."""
 
 
+def _names_used(code: types.CodeType) -> set[str]:
+    """Return every name the code of a function, or of one defined inside it, looks up."""
+    names = {*code.co_names, *code.co_varnames, *code.co_freevars, *code.co_cellvars}
+    for constant in code.co_consts:
+        if isinstance(constant, types.CodeType):
+            names |= _names_used(constant)
+    return names
+
+
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    """Run each test that puts a question to a client in both protocol generations."""
-    if "asking(" in inspect.getsource(metafunc.function):
+    """Run each test that puts a question to a client in both protocol generations.
+
+    A test does so when it uses ``asking``. That is read from the compiled code, not from the
+    source: a cached compilation made on another machine names a file that is not here, and the
+    source cannot be found.
+    """
+    if "asking" in _names_used(metafunc.function.__code__):
         modes = (
             ELICIT_MODES[:1]
             if metafunc.function.__name__ in ONLY_IN_THE_MIDDLE_OF_A_CALL
