@@ -4607,6 +4607,8 @@ def test_the_approval_command_is_run_without_a_shell_and_gets_the_request(
         ("head -c 3000 /dev/urandom; exit 0", "allowed", True),
         ("kill -9 $$", "denied", False),
         ("sleep 30", "expired", False),
+        ("exit 75", "expired", False),
+        ("exit 69", "could_not_ask", False),
     ],
 )
 def test_each_way_the_command_can_end(
@@ -6109,6 +6111,128 @@ def test_a_notification_asks_about_denying_when_there_is_no_approval_command(
 
     run(scenario())
     assert ("seen.test" in sites.load_policy(roots, "sitex").denied) is (outcome == "yes")
+
+
+# What each kind of question is, to try the statuses of an approval command on all of them: the
+# operation, the arguments that name the host, the results of a yes and of a no, and the command
+# that the person is told to run when nobody could be asked.
+KINDS = {
+    "allow": ("allow_ask", {"host": "seen.test"}, ("allowed", "denied"), "valetkey allow sitex"),
+    "deny": (
+        "deny_ask",
+        {"host": "cdn.assets.test"},
+        ("denied", "declined"),
+        "valetkey deny sitex",
+    ),
+    "microphone": ("microphone_ask", {}, ("allowed", "denied"), "valetkey mic sitex on"),
+}
+
+
+def kind_granted(roots: sites.Roots, kind: str) -> bool:
+    """Whether a yes to the question of ``kind`` changed the policy."""
+    policy = sites.load_policy(roots, "sitex")
+    return {
+        "allow": "seen.test" in policy.allow,
+        "deny": "cdn.assets.test" in policy.denied,
+        "microphone": policy.microphone,
+    }[kind]
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_status_for_nobody_answered_is_unanswered_and_writes_nothing(
+    roots: sites.Roots, tmp_path: Path, kind: str
+) -> None:
+    deny_site(roots)
+    operation, extra, _results, _manual = KINDS[kind]
+    runs = tmp_path / "runs"
+    write_approver(roots, f"echo x >> {runs}\nexit {approvals.EXIT_NOBODY_ANSWERED}")
+    before = policy_text(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            for _ in range(2):  # it is asked again: nothing was remembered
+                answer = await c.call(operation, site="sitex", reason="x", **extra)
+                assert answer["result"] == "expired"
+                assert "Nobody answered" in answer["message"]
+            if kind == "allow":
+                assert (await c.call("allow_check", site="sitex", **extra))["denied"] is False
+            if kind == "deny":
+                assert (await c.call("deny_check", site="sitex", **extra))["kept"] is False
+
+    run(scenario())
+    assert len(runs.read_text(encoding="utf-8").split()) == 2
+    assert policy_text(roots) == before
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_status_for_could_not_ask_with_nobody_else_to_ask_says_what_to_run(
+    roots: sites.Roots, tmp_path: Path, kind: str
+) -> None:
+    deny_site(roots)
+    operation, extra, _results, manual = KINDS[kind]
+    runs = tmp_path / "runs"
+    write_approver(roots, f"echo x >> {runs}\nexit {approvals.EXIT_COULD_NOT_ASK}")
+    before = policy_text(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:  # no notification can ask
+            for _ in range(2):
+                answer = await c.call(operation, site="sitex", reason="x", **extra)
+                assert answer["result"] == "could_not_ask"
+                assert manual in answer["message"]
+
+    run(scenario())
+    assert len(runs.read_text(encoding="utf-8").split()) == 2  # nothing was remembered
+    assert policy_text(roots) == before
+
+
+@pytest.mark.parametrize("outcome", ["yes", "no", "timeout"])
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_command_that_could_not_ask_hands_the_question_to_a_notification(
+    roots: sites.Roots, tmp_path: Path, kind: str, outcome: str
+) -> None:
+    deny_site(roots)
+    operation, extra, (said_yes, said_no), _manual = KINDS[kind]
+    runs = tmp_path / "runs"
+    write_approver(roots, f"echo x >> {runs}\nexit {approvals.EXIT_COULD_NOT_ASK}")
+    notifier = Notifier(outcome)
+    wanted = {"yes": said_yes, "no": said_no, "timeout": "expired"}[outcome]
+
+    async def scenario() -> None:
+        async with serving(roots, notifier=notifier) as rig, await rig.connect() as c:
+            answer = await c.call(operation, site="sitex", reason="x", **extra)
+            assert answer["result"] == wanted
+
+    run(scenario())
+    assert len(runs.read_text(encoding="utf-8").split()) == 1  # the command ran once
+    (question, _env, _limit) = notifier.asked[0]
+    assert question.site == "sitex"
+    assert question.microphone is (kind == "microphone")
+    assert question.host == extra.get("host", "")
+    assert kind_granted(roots, kind) is (outcome == "yes")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_the_status_for_could_not_ask_with_notifications_off_is_could_not_ask(
+    roots: sites.Roots, kind: str
+) -> None:
+    deny_site(roots)
+    operation, extra, _results, manual = KINDS[kind]
+    script = write_approver(roots, f"exit {approvals.EXIT_COULD_NOT_ASK}")
+    (script.parent / "config.json").write_text(
+        json.dumps({"approve_command": [str(script)], "notifications": False}), encoding="utf-8"
+    )
+    notifier = Notifier("yes")
+
+    async def scenario() -> None:
+        async with serving(roots, notifier=notifier) as rig, await rig.connect() as c:
+            answer = await c.call(operation, site="sitex", reason="x", **extra)
+            assert answer["result"] == "could_not_ask"
+            assert manual in answer["message"]
+
+    run(scenario())
+    assert notifier.asked == []
+    assert kind_granted(roots, kind) is False
 
 
 def test_a_deny_never_adds_to_what_a_site_may_reach(roots: sites.Roots) -> None:

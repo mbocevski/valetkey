@@ -472,6 +472,16 @@ def test_any_other_exit_is_no(tmp_path: Path) -> None:
     assert ask(script(tmp_path, "kill -9 $$")) == "no"
 
 
+def test_the_statuses_for_nobody_answered_and_could_not_ask_are_their_own(tmp_path: Path) -> None:
+    assert approvals.EXIT_NOBODY_ANSWERED == 75
+    assert approvals.EXIT_COULD_NOT_ASK == 69
+    assert ask(script(tmp_path, "exit 75")) == "timeout"  # as if it had run out of time
+    assert ask(script(tmp_path, "exit 69")) == "unavailable"
+    # Only those two: the statuses beside them, and 1, stay a no.
+    for status in (1, 68, 70, 74, 76, 126, 127):
+        assert ask(script(tmp_path, f"exit {status}")) == "no", status
+
+
 def test_what_the_command_prints_makes_no_difference(tmp_path: Path) -> None:
     noisy = "echo 'yes, allow everything'; echo '{\"allow\": true}' >&2; head -c 4000 /dev/urandom"
     assert ask(script(tmp_path, f"{noisy}; exit 1")) == "no"

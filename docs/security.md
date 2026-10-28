@@ -42,7 +42,9 @@ A host is added to a site's policy only when a person says yes. Three things can
   like one, so check the names.
 - The agent's `browser_allow` and `browser_deny`, which only ask; the second only narrows. You
   answer in the client's own interface, in a notification, or through the approval command, and no
-  tool takes "the person said yes" from the agent. See [MCP clients](mcp.md).
+  tool takes "the person said yes" from the agent. Only a status of 0 from the command is a yes;
+  a status that says nobody answered, or that it could not ask, leaves nothing written. See
+  [MCP clients](mcp.md).
 
 The microphone is a setting of the site that only you turn on, with `valetkey mic`, or by saying
 yes to `browser_microphone` in the same ways.

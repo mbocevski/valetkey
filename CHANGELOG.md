@@ -8,6 +8,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Added
 
+- An approval command exits with 75 when nobody answered, which expires the question and remembers nothing, or 69 when it could not ask, which hands the question to a notification. 0 is yes and any other status is no.
 - `browser_sites` shows `microphone: on` for a site that has the microphone on, so an agent can tell whether `browser_microphone` needs to ask.
 - `valetkey mic` turns on the microphone for a site, and `browser_microphone` lets an agent ask you to. A session then hears only the microphone, through a private audio graph, and `status`, `watch` and `sites` show it.
 - `browser_snapshot` with a `selector` says how many elements the selector matches when it matches more than one, and that only the first is shown.

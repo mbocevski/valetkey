@@ -193,8 +193,8 @@ The daemon runs it with one line of JSON on standard input:
 `{"site": ..., "permission": "host", "host": ..., "seen_during_login": ..., "reason": ...}`.
 The `permission` says what is asked: `host` here, and `microphone` for the question in
 [the microphone](#the-microphone), which has no `host`. Check it, because a command that ignores
-it would read a microphone request as a host request with no host. Exit status 0 means yes.
-Any other status means no. A command that runs longer than 60 seconds counts as unanswered. What it
+it would read a microphone request as a host request with no host. Exit status 0 means yes. Other statuses are
+[listed below](#exit-statuses-of-the-approval-command). What it
 prints is never shown to the agent. The reason is the agent's claim, so show it as one. The command
 runs without a shell and gets a small environment: `PATH`, `HOME`, `XDG_RUNTIME_DIR`, `LANG`, and the
 display and session bus variables (`WAYLAND_DISPLAY`, `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`), which
@@ -206,6 +206,18 @@ Allow and Deny buttons. Closing it, or not answering for 60 seconds, counts as u
 a no. Switch it off with `{"notifications": false}` in the same file.
 
 If nothing can ask, the agent tells you to run `valetkey allow SITE HOST`.
+
+## Exit statuses of the approval command
+
+For a host or the microphone, the approval command says how the question ended with its exit
+status:
+
+- 0: yes.
+- 1, and any status not listed here: no. For a host that is final, and a death by signal is a no.
+- 75: nobody answered. The question counts as unanswered, as when the command runs longer than 60
+  seconds, and nothing is remembered.
+- 69: it could not ask anyone, for lack of a display, say. A notification asks instead. If that
+  cannot ask either, the agent tells you the command to run.
 
 ## What `browser_allow` returns
 
@@ -246,8 +258,8 @@ agent can ask with `browser_microphone`, giving the site and a reason. You are a
 notification. Only a yes turns it on. A site that has it on answers `allowed` without asking. `browser_sites` shows `microphone: on` for such a site, and nothing for the rest.
 
 The approval command gets `{"site": ..., "permission": "microphone", "reason": ...}`, with no
-`host` and no `seen_during_login`. Exit status 0 means yes. The notification has Allow and Deny
-buttons.
+`host` and no `seen_during_login`. Its exit statuses are those above. The notification has Allow
+and Deny buttons.
 
 The results are `allowed`, `denied` (you said no), `expired` (nobody answered, or the question was
 dismissed) and `could_not_ask` (nobody could be asked from here, so the agent tells you to run

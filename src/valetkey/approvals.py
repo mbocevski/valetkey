@@ -56,6 +56,13 @@ if TYPE_CHECKING:
 
 CONFIG_NAME = "config.json"
 COMMAND_TIMEOUT = 60.0
+EXIT_NOBODY_ANSWERED = 75
+"""The status an approval command exits with when nobody answered (``EX_TEMPFAIL``): the question
+is unanswered, as if it timed out, and nothing is remembered."""
+EXIT_COULD_NOT_ASK = 69
+"""The status an approval command exits with when it could not ask anyone (``EX_UNAVAILABLE``): no
+display, say. valetkey then asks with a notification, and if it cannot either, says it could not
+ask."""
 REASON_LENGTH = 240
 _CONFIG_KEYS = frozenset(
     {"approve_command", "notifications", "remote_logins", "session_idle_minutes"}
@@ -74,7 +81,7 @@ _MARKUP = re.compile(r"[`*_\[\]()<>#|~\\{}]")
 _SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 _NOT_A_HOST = "*/\\@#?:%[]()<>\"' ,;=&"
 
-type Answer = Literal["yes", "no", "timeout"]
+type Answer = Literal["yes", "no", "timeout", "unavailable"]
 type Status = Literal["eligible", "already_allowed", "already_denied", "not_eligible"]
 
 
@@ -464,9 +471,10 @@ async def run_command(
     """Run the approval command with ``request`` as JSON on stdin and return its answer.
 
     No shell is involved: ``argv`` is run as given, in a process group of its own, with its
-    output thrown away. ``yes`` is exit status 0, ``no`` is any other status or a death by
-    signal, and ``timeout`` is not having exited within ``limit`` seconds, in which case the
-    whole process group is killed.
+    output thrown away. ``yes`` is exit status 0, ``timeout`` is status
+    :data:`EXIT_NOBODY_ANSWERED` or not having exited within ``limit`` seconds (the whole process
+    group is then killed), ``unavailable`` is status :data:`EXIT_COULD_NOT_ASK`, and ``no`` is any
+    other status, 1 included, or a death by signal.
 
     Raises:
         `OSError`: when the program cannot be started.
@@ -483,12 +491,23 @@ async def run_command(
     try:
         async with asyncio.timeout(limit):
             await _feed(process, json.dumps(request).encode() + b"\n")
-            return "yes" if await process.wait() == 0 else "no"
+            return _answer_of(await process.wait())
     except TimeoutError:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
         await process.wait()
         return "timeout"
+
+
+def _answer_of(status: int) -> Answer:
+    """Return what an approval command's exit status says."""
+    if status == 0:
+        return "yes"
+    if status == EXIT_NOBODY_ANSWERED:
+        return "timeout"
+    if status == EXIT_COULD_NOT_ASK:
+        return "unavailable"
+    return "no"
 
 
 async def _feed(process: asyncio.subprocess.Process, data: bytes) -> None:

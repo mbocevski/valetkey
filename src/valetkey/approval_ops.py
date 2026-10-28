@@ -179,8 +179,11 @@ class Approvals:
     ) -> str:
         """Run the approval command and return ``yes``, ``no``, ``timeout``, ``none`` or ``broken``.
 
-        ``none`` means no command is configured (or its config is unusable), ``broken`` that it
-        could not be started. With ``deny`` the question is whether to deny a host the site may
+        ``none`` means nobody could be asked: no command is configured (or its config is unusable)
+        and no notification can ask either, ``broken`` that the command could not be started. A
+        command that exits with :data:`approvals.EXIT_COULD_NOT_ASK` could not ask, so the
+        notification asks instead, and one that exits with :data:`approvals.EXIT_NOBODY_ANSWERED`
+        is a ``timeout``. With ``deny`` the question is whether to deny a host the site may
         reach: the request then has ``"action": "deny"`` and ``seen_during_login`` says the host
         was left out at login, and yes (exit status 0) denies it.
         """
@@ -188,8 +191,8 @@ class Approvals:
         env = await asyncio.to_thread(
             approvals.command_environment, os.environ, self._user_environment
         )
+        question = notify.Question(site, host, seen=seen, reason=reason, deny=deny)
         if command is None:
-            question = notify.Question(site, host, seen=seen, reason=reason, deny=deny)
             return await self._notify(question, env)
         request: dict[str, Any] = {
             "site": site,
@@ -200,11 +203,7 @@ class Approvals:
         }
         if deny:
             request["action"] = "deny"
-        try:
-            return await approvals.run_command(command, request, env, self._approve_timeout)
-        except OSError as error:
-            logger.warning("the approval command could not run: %s", error)
-            return "broken"
+        return await self._run_approver(command, request, env, question)
 
     async def _consult_microphone(self, site: str, reason: str) -> str:
         """Ask whether to turn the microphone on; the outcomes are those of :meth:`_consult`.
@@ -215,16 +214,29 @@ class Approvals:
         env = await asyncio.to_thread(
             approvals.command_environment, os.environ, self._user_environment
         )
+        question = notify.Question(site, "", seen=False, reason=reason, microphone=True)
         if command is None:
-            return await self._notify(
-                notify.Question(site, "", seen=False, reason=reason, microphone=True), env
-            )
+            return await self._notify(question, env)
         request = {"site": site, "permission": "microphone", "reason": reason}
+        return await self._run_approver(command, request, env, question)
+
+    async def _run_approver(
+        self,
+        command: tuple[str, ...],
+        request: dict[str, Any],
+        env: Mapping[str, str],
+        question: notify.Question,
+    ) -> str:
+        """Run the approval command; one that could not ask hands the question to a notification."""
         try:
-            return await approvals.run_command(command, request, env, self._approve_timeout)
+            answer = await approvals.run_command(command, request, env, self._approve_timeout)
         except OSError as error:
             logger.warning("the approval command could not run: %s", error)
             return "broken"
+        if answer == "unavailable":
+            logger.info("the approval command could not ask, so a notification asks")
+            return await self._notify(question, env)
+        return answer
 
     async def _notify(self, question: notify.Question, env: Mapping[str, str]) -> str:
         """Ask with a desktop notification when nothing else can; ``none`` if that is not on.
