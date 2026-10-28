@@ -914,7 +914,13 @@ class Session:
                 message = f"no page after {self._timeout:g} seconds\n{self._log_tail()}"
                 raise SessionError(message)
             time.sleep(0.05)
-        return parse_response(self.paths.ready_file.read_text())
+        text = self.paths.ready_file.read_text()
+        if not text.strip():
+            # The holder writes the file whole and then renames it, so an empty one is the
+            # driver's own answer: it printed nothing. Its log says why, a JSON error would not.
+            message = f"agent-browser printed no answer to the first open\n{self._log_tail()}"
+            raise SessionError(message)
+        return parse_response(text)
 
     def _log_tail(self) -> str:
         try:

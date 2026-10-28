@@ -73,6 +73,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- A browser whose first open answers with nothing now fails with the driver's log, not a JSON error.
 - A microphone session starts at full volume with the mute off, whatever an earlier session's page set and your audio server saved.
 - `valetkey doctor` no longer warns that agent-browser 0.40.0 is newer than the version valetkey was tested with; valetkey is now tested with 0.40.0.
 - A click that opens a very large menu now lists it, as lines with their references, and not as a new page; this holds with or without an expectation.

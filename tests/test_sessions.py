@@ -1483,6 +1483,16 @@ def test_close_keeps_a_proxy_directory_that_is_still_in_use(
     assert session.paths.proxy_socket.exists()
 
 
+def ready_with(text: str) -> str:
+    """Return a shell command that writes ``text`` to the ready file as the holder does.
+
+    The holder writes the answer to a file of its own and renames it, so the ready file never
+    exists half written. A fake that redirects straight to it creates it empty first, and a
+    session that looks at that moment finds an empty file.
+    """
+    return f'echo \'{text}\' > "$READY.tmp" && mv "$READY.tmp" "$READY"'
+
+
 class FakeStart:
     """Replaces the launch of the holder with a local command, so no browser is needed."""
 
@@ -1592,7 +1602,7 @@ def test_a_watched_session_is_gone_when_the_driver_stops_answering(
 
 def test_start_can_watch_the_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     page = json.dumps({"success": True, "data": {"url": "http://site.test/", "title": "Hi"}})
-    FakeStart(monkeypatch, f"echo '{page}' > \"$READY\"; sleep 60")
+    FakeStart(monkeypatch, f"{ready_with(page)}; sleep 60")
     lines: list[list[str]] = []
     monkeypatch.setattr(procs, "command_lines", lambda: lines)
     session = sessions.Session.start(
@@ -1608,7 +1618,7 @@ def test_start_can_watch_the_browser(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 def test_start_waits_for_the_first_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     page = json.dumps({"success": True, "data": {"url": "http://site.test/", "title": "Hi"}})
-    fake = FakeStart(monkeypatch, f"echo '{page}' > \"$READY\"; sleep 60")
+    fake = FakeStart(monkeypatch, f"{ready_with(page)}; sleep 60")
     with start(tmp_path, timeout=10) as session:
         assert session.first_page == sessions.Page("http://site.test/", "Hi")
         assert [json.loads(text) for text in fake.policies] == [sandbox.CHROME_POLICY]
@@ -1650,7 +1660,7 @@ def graphs(monkeypatch: pytest.MonkeyPatch) -> list[FakeGraph]:
 
 
 PAGE = json.dumps({"success": True, "data": {"url": "http://site.test/", "title": "Hi"}})
-READY = f"echo '{PAGE}' > \"$READY\"; sleep 60"
+READY = f"{ready_with(PAGE)}; sleep 60"
 
 
 def save_policy(tmp_path: Path) -> None:
@@ -1734,7 +1744,7 @@ def test_a_graph_ends_with_a_session_that_fails_to_load_its_first_page(
 ) -> None:
     save_policy(tmp_path)
     failure = json.dumps({"success": False, "error": "Navigation failed: net::ERR_X"})
-    FakeStart(monkeypatch, f"echo '{failure}' > \"$READY\"; sleep 60")
+    FakeStart(monkeypatch, f"{ready_with(failure)}; sleep 60")
     with pytest.raises(sessions.AgentBrowserError):
         sessions.Session.start(
             make_roots(tmp_path), "demo", "http://site.test/", timeout=10, microphone=True
@@ -1748,7 +1758,7 @@ def test_start_reports_a_first_page_that_failed(
     page = json.dumps(
         {"success": False, "error": "Navigation failed: net::ERR_PROXY_CONNECTION_FAILED"}
     )
-    FakeStart(monkeypatch, f"echo '{page}' > \"$READY\"; sleep 60")
+    FakeStart(monkeypatch, f"{ready_with(page)}; sleep 60")
     with pytest.raises(sessions.AgentBrowserError, match="ERR_PROXY_CONNECTION_FAILED"):
         start(tmp_path, timeout=10)
     assert not (tmp_path / "rt" / "agent-browser" / "namespaces" / "demo").exists()
@@ -1766,8 +1776,8 @@ def test_a_launch_agent_browser_stopped_waiting_for_is_tried_once_more(
     seen = tmp_path / "seen"
     FakeStart(
         monkeypatch,
-        f"if [ -e '{seen}' ]; then echo '{page}' > \"$READY\"; else touch '{seen}'; "
-        f"echo '{SLOW}' > \"$READY\"; fi; sleep 60",
+        f"if [ -e '{seen}' ]; then {ready_with(page)}; else touch '{seen}'; "
+        f"{ready_with(SLOW)}; fi; sleep 60",
     )
     with start(tmp_path, timeout=10) as session:
         assert session.first_page == sessions.Page("http://site.test/", "Hi")
@@ -1778,10 +1788,23 @@ def test_a_launch_that_is_never_answered_fails_after_the_second_try(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     starts = tmp_path / "starts"
-    FakeStart(monkeypatch, f"echo x >> '{starts}'; echo '{SLOW}' > \"$READY\"; sleep 60")
+    FakeStart(monkeypatch, f"echo x >> '{starts}'; {ready_with(SLOW)}; sleep 60")
     with pytest.raises(sessions.LaunchTimeoutError, match="Failed to read"):
         start(tmp_path, timeout=10)
     assert len(starts.read_text().split()) == sessions.LAUNCH_ATTEMPTS
+    assert not (tmp_path / "rt" / "agent-browser" / "namespaces" / "demo").exists()
+
+
+def test_start_reports_an_empty_answer_with_the_log_not_a_json_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    FakeStart(
+        monkeypatch,
+        'echo \'driver said: no browser to open\'; : > "$READY.tmp" && mv "$READY.tmp" "$READY"; '
+        "sleep 60",
+    )
+    with pytest.raises(sessions.SessionError, match=r"(?s)printed no answer.*no browser to open"):
+        start(tmp_path, timeout=10)
     assert not (tmp_path / "rt" / "agent-browser" / "namespaces" / "demo").exists()
 
 
@@ -1813,7 +1836,7 @@ def test_start_uses_the_proxy_socket_it_is_given(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     page = json.dumps({"success": True, "data": {"url": "u", "title": ""}})
-    fake = FakeStart(monkeypatch, f"echo '{page}' > \"$READY\"; sleep 60")
+    fake = FakeStart(monkeypatch, f"{ready_with(page)}; sleep 60")
     seen: list[Path] = []
     original = fake.__call__
     monkeypatch.setattr(
@@ -1840,7 +1863,7 @@ def test_start_clears_what_an_earlier_session_left(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     page = json.dumps({"success": True, "data": {"url": "u", "title": ""}})
-    FakeStart(monkeypatch, f'test ! -e "$READY" && echo \'{page}\' > "$READY"; sleep 60')
+    FakeStart(monkeypatch, f'test ! -e "$READY" && {ready_with(page)}; sleep 60')
     stale = sessions.session_paths(make_roots(tmp_path), "demo")
     stale.driver_dir.mkdir(parents=True)
     stale.ready_file.write_text("old")
