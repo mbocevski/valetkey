@@ -586,6 +586,8 @@ def sites_text(listing: list[dict[str, Any]], *, full: bool = False) -> str:
         lines = [f"- {entry['site']}: {state}; starts at {entry['start'] or 'unknown'}"]
         learned = (entry.get("learned") or "").replace("T", " ").removesuffix(":00Z")
         lines.append(f"  Logged in: {learned + ' UTC' if learned else 'never'}")
+        if entry.get("microphone"):
+            lines.append("  microphone: on")
         if full:
             lines.append(_hosts_line("May reach", entry["allow"], full=True))
             lines.append(_hosts_line("Left out", entry.get("excluded") or [], full=True))

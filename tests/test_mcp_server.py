@@ -228,6 +228,14 @@ def test_sites_text() -> None:
     assert text.count("Left out") == 1
 
 
+@pytest.mark.parametrize("full", [False, True])
+def test_a_site_with_the_microphone_on_says_so_and_one_without_says_nothing(*, full: bool) -> None:
+    on = mcp_server.sites_text([listing(microphone=True)], full=full)
+    assert "  Logged in: 2026-10-25 21:40 UTC\n  microphone: on\n  May reach" in on
+    for off in (listing(), listing(microphone=False)):
+        assert "microphone" not in mcp_server.sites_text([off], full=full)
+
+
 def test_denied_hosts_are_listed_apart_from_the_ones_left_out() -> None:
     text = mcp_server.sites_text([listing(excluded=["t.test"], denied=["no.test"])])
     assert "  Left out (1): t.test\n  Denied (1): no.test" in text

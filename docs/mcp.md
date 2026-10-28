@@ -243,7 +243,7 @@ results are `denied`, `declined` (you said no: the agent must not ask again), `e
 A session has no microphone until you turn one on for its site with `valetkey mic SITE on`. The
 agent can ask with `browser_microphone`, giving the site and a reason. You are asked the way
 `browser_allow` asks: a form in the client with one box, then your `approve_command`, then a
-notification. Only a yes turns it on. A site that has it on answers `allowed` without asking.
+notification. Only a yes turns it on. A site that has it on answers `allowed` without asking. `browser_sites` shows `microphone: on` for such a site, and nothing for the rest.
 
 The approval command gets `{"site": ..., "permission": "microphone", "reason": ...}`, with no
 `host` and no `seen_during_login`. Exit status 0 means yes. The notification has Allow and Deny
