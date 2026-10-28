@@ -48,3 +48,4 @@ libpulse
 Yubico
 microphone_source
 refused_more
+no_wait

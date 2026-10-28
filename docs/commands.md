@@ -18,6 +18,8 @@ Commands:
   doctor: Check that this machine can run valetkey.
   forget: Delete a site's policy, login profile and downloads.
   install-units: Write the systemd user units that run the valetkey daemon.
+  login: Open a login window for a site, wait for it to close, and say what it
+learned.
   mcp: Serve the browser tools to an MCP client over standard input and output.
   mic: Show, turn on or turn off the microphone for a site.
   sites: List the sites valetkey knows.
@@ -170,6 +172,44 @@ off]
 copies.
 ```
 <!-- end: valetkey mic --help -->
+
+## Logging in
+
+`valetkey login TARGET` opens a login window, as the `browser_login` tool does, but for you to
+run. TARGET is a site from `valetkey sites`, or a host or URL for a new site. The window opens on
+your screen, on your laptop through a bridge, or in a web browser. It works the same as the
+tool's: it is contained, the hosts it uses are recorded, and a running session of the site is
+closed first. The command waits. When you close the window the login is saved, and it prints the
+site and the hosts it now allows, with what was left out and what the window refused. The exit status is 0 when the login was
+saved, and 1 when it was not or could not be opened.
+
+`--no-wait` returns once the window is open. Ctrl-C closes the window and ends the login without
+saving it. `--account work` adds another account to the site. A site whose window is already open
+is refused, as it is for the tool.
+
+<!-- begin: valetkey login --help -->
+```text
+Usage: valetkey login [OPTIONS] TARGET
+
+Open a login window for a site, wait for it to close, and say what it learned.
+
+TARGET is a site from valetkey sites, or a host or URL for a new site, as for
+the browser_login tool. The window opens on your screen, on your laptop through
+a bridge, or in a web browser (see valetkey status), and works the same as one
+an agent asks for: it is contained, the hosts it uses are recorded, and a
+running session of the site is closed first. When you close the window the login
+is saved, and this prints the site and the hosts it now allows, with what was
+left out. With --no-wait it returns once the window is open. Ctrl-C closes the
+window and ends the login without saving it. The exit status is 0 when the login
+was saved and 1 when it was not or could not be opened. Only you can run this:
+an agent has browser_login, which opens the same window.
+
+Parameters:
+  TARGET, --target: A site name, or a host or URL. [required]
+  --account STR: Add this account to the site, such as work.
+  --no-wait: Return once the window is open. [default: False]
+```
+<!-- end: valetkey login --help -->
 
 ## Adding a site
 

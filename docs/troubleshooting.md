@@ -119,11 +119,11 @@ script shows with no response even when the worker started, so do not read it as
 
 If a page stays on a spinner, no host is refused and `browser_console` shows nothing else, the
 site's own stored state may be stuck. That could be a service worker or a cache it left in the
-profile that waits for something it never gets. Ask the agent to call `browser_login` for the site,
-so that a login window opens. In that window open the developer tools, go to Application and choose
-Clear site data with its cookies box unchecked, so you stay signed in. Then close the window and
-open the site again. If the page still spins, run `valetkey forget` for the site and log in again.
-That deletes the profile, so it is the last resort.
+profile that waits for something it never gets. Run `valetkey login SITE` so that a login window
+opens. In that window open the developer tools, go to Application and choose Clear site data with
+its cookies box unchecked, so you stay signed in. Then close the window and open the site again. If
+the page still spins, run `valetkey forget` for the site and log in again. That deletes the
+profile, so it is the last resort.
 
 ## A tool says the session was closed
 

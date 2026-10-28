@@ -806,6 +806,135 @@ def forget(site: str, *, yes: Annotated[bool, Parameter(name="--yes", negative="
     return 0
 
 
+def _internal_name(shown: str) -> str:
+    """Return the daemon's name for ``shown``, which writes a first account as ``site:main``."""
+    site, _, account = shown.partition(sites.ACCOUNT_SEPARATOR)
+    return site if account == sites.FIRST_ACCOUNT else shown
+
+
+def _refused_text(closed: dict[str, Any]) -> str:
+    """Name what the login window's proxy refused, as the ``login_closed`` event lists it."""
+    listed = [f"{r['host']}:{r['port']} ({r['reason']})" for r in closed.get("refused", [])]
+    if not listed:
+        return ""
+    more = closed.get("refused_more", 0)
+    return f"The login window refused: {', '.join(listed)}" + (
+        f" and {more} more." if more else "."
+    )
+
+
+def _login_opened_text(opened: dict[str, Any]) -> list[str]:
+    """Say where a login window is, as the daemon's answer tells it."""
+    site = opened["site"]
+    lines = []
+    if opened.get("closed_session"):
+        lines.append(f"The running {site} session was closed to open the login.")
+    if remote := opened.get("remote"):
+        lines.append(f"The {site} login is shown in a web browser.")
+        lines.append(f"On the machine you will use, run: {remote['ssh']}")
+        lines.append(f"Then open: {remote['url']}")
+    else:
+        where = "laptop" if opened.get("route") == "bridge" else "screen"
+        lines.append(f"A login window for {site} is open on your {where}.")
+    return lines
+
+
+async def _login_in_the_cli(target: str, account: str | None, *, wait: bool) -> int:
+    """Open the login window of ``target`` through the daemon; with ``wait``, see it through.
+
+    The daemon is started if it is not running. A second connection watches for the window to
+    close before the login is asked for, so the close cannot be missed. When the window has
+    closed the daemon has finished the login, and what it learned is read the way ``sites`` shows
+    it. Ending the wait early, with Ctrl-C, closes the window.
+    """
+    bridge = mcp_server.Bridge()
+    try:
+        await bridge.call("status")  # starts valetkeyd when it is not running
+    finally:
+        await bridge.close()
+    arguments = {"target": target, **({"account": account} if account else {})}
+    async with await client.Client.connect() as watcher, await client.Client.connect() as asking:
+        stream = watcher.watch()
+        await anext(stream)  # the snapshot: from here on what happens is kept for us
+        try:
+            opened = await asking.call("login", **arguments)
+        except client.DaemonError as error:
+            return _fail(CommandError(error.message))
+        for line in _login_opened_text(opened):
+            _say(line)
+        site = opened["site"]
+        if not wait:
+            _say(f"Close it when you are done. `valetkey sites {site}` then shows what it learned.")
+            return 0
+        _say("Waiting for the window to close; Ctrl-C ends the login.")
+        closed: dict[str, Any] = {}
+        try:
+            async for event in stream:
+                if event["event"] == "login_closed" and event.get("site") == _internal_name(site):
+                    closed = event
+                    break
+        except asyncio.CancelledError:
+            with contextlib.suppress(client.DaemonError, OSError):
+                await asking.call("close", site=site)
+            raise
+        try:
+            summary = (await asking.call("sites", site=site))["sites"][0].get("summary")
+        except client.DaemonError as error:
+            if error.code != "unknown_site":  # a new site that nothing was saved for
+                raise
+            summary = None
+    _say(summary or f"The {site} login ended without being saved.")
+    if refused := _refused_text(closed):
+        _say(refused)
+    return 0 if summary and "could not be saved" not in summary else 1
+
+
+@app.command(name="login")
+def login_command(
+    target: str,
+    *,
+    account: Annotated[
+        str | None,
+        Parameter(name="--account", help="Add this account to the site, such as `work`."),
+    ] = None,
+    no_wait: Annotated[
+        bool,
+        Parameter(name="--no-wait", negative="", help="Return once the window is open."),
+    ] = False,
+) -> int:
+    """Open a login window for a site, wait for it to close, and say what it learned.
+
+    TARGET is a site from `valetkey sites`, or a host or URL for a new site, as for the
+    `browser_login` tool. The window opens on your screen, on your laptop through a bridge, or in
+    a web browser (see `valetkey status`), and works the same as one an agent asks for: it is
+    contained, the hosts it uses are recorded, and a running session of the site is closed first.
+    When you close the window the login is saved, and this prints the site and the hosts it now
+    allows, with what was left out. With `--no-wait` it returns once the window is open. Ctrl-C
+    closes the window and ends the login without saving it. The exit status is 0 when the login
+    was saved and 1 when it was not or could not be opened. Only you can run this: an agent has
+    `browser_login`, which opens the same window.
+
+    Parameters
+    ----------
+    target
+        A site name, or a host or URL.
+    account
+        Another account of the site to add, such as `work` (`sitex:work`).
+    no_wait
+        Return once the window is open, without waiting for it to close.
+
+    """
+    try:
+        return asyncio.run(_login_in_the_cli(target, account, wait=not no_wait))
+    except KeyboardInterrupt:
+        _say("The login was ended; nothing was saved.")
+        return 1
+    except client.DaemonError as error:
+        return _fail(CommandError(error.message))
+    except sites.RuntimeDirUnavailableError as error:
+        return _fail(CommandError(str(error)))
+
+
 @app.command(name="mcp")
 def run_mcp(
     *,
