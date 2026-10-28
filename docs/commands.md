@@ -334,7 +334,9 @@ notification if it is installed.
 
 A session that nothing uses is closed after `session_idle_minutes` minutes, 15 unless you set it
 in `config.json` to a whole number from 1 to 1440. `status` shows each session's idle time and the
-time it will close, and `microphone` on a session that has one.
+time it will close, and `microphone` on a session that has one. A session whose browser is
+recording is in use: its idle time is 0, `closes_at` is null, and the limit counts from the end of
+the recording.
 
 For a session with the microphone, `status --json` also gives its capture stream: the session's
 private audio socket and the node the browser records with. A recorder that wants the call's audio
@@ -364,7 +366,8 @@ a UTC time like 2026-10-26T09:00:00Z. contained is always true. host is the host
 of the page the browser was last reported at, never the whole address, which may
 carry a token. idle_seconds is how long nothing has used the session, and
 closes_at is the UTC time the daemon will close it if nothing does: after
-session_idle_minutes in config.json, 15 by default.
+session_idle_minutes in config.json, 15 by default. While the browser records,
+idle_seconds is 0 and closes_at is null.
 
 A login shown in a web browser has a link that works like a password: whoever
 opens it can type into the login window. The table prints it under the table,

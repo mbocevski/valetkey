@@ -94,7 +94,8 @@ page is refused, and adds that no session is running.
 A session that nothing uses for 15 minutes is closed, the same way `browser_close` does it. The
 login, the profile and the downloads stay, so `browser_open` starts it again, logged in, in a few
 seconds. These count as use: any tool call that names the site, a call that is still running, a
-question waiting for you, and a download that is still being written.
+question waiting for you, and a download that is still being written. So does a recording through
+the microphone, which keeps a meeting open without tool calls. The time counts from its end.
 
 The next call on that site, other than `browser_open`, returns an ordinary result, not an error:
 `The sitex session was closed after 15 minutes without use. Call browser_open to start it again.`

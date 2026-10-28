@@ -242,8 +242,9 @@ silent output. The setting shows in `status`, `watch`, `sites` and the start not
 
 ## Sessions that nobody uses
 
-A session closes by itself after 15 minutes without use, so an agent that forgets to close one, or
-a client that crashes, does not leave a logged-in browser running for good. The limit is
+A session closes by itself after 15 minutes without use, so an agent that forgets to close one,
+or a client that crashes, does not leave a logged-in browser running for good. A recording through
+the microphone counts as use. The limit is
 `session_idle_minutes` in `config.json`, at most 1440 (a day), and it cannot be switched off. The
 site's own login expiry still applies, and the saved login stays on disk for the next open.
 

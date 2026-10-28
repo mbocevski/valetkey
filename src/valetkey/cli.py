@@ -1543,7 +1543,8 @@ def show_status(
     host is the host of the page the browser was last reported at, never the whole address,
     which may carry a token. idle_seconds is how long nothing has used the session, and
     closes_at is the UTC time the daemon will close it if nothing does: after
-    session_idle_minutes in config.json, 15 by default.
+    session_idle_minutes in config.json, 15 by default. While the browser records,
+    idle_seconds is 0 and closes_at is null.
 
     A login shown in a web browser has a link that works like a password: whoever opens it can
     type into the login window. The table prints it under the table, with the ssh command that

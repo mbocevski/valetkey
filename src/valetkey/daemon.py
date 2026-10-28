@@ -125,7 +125,9 @@ per-site lock, so two clients never interleave a click and a snapshot.
 1440, 15 unless set) is ended like ``close`` does it: the profile, cookies and downloads stay,
 ``session_ended`` carries ``"reason": "idle"`` and one line is logged. Using it means a request
 that names the site, a call still running, a question waiting for the person, or a download
-still being written. The next call that needs the session fails with ``session_idle`` and a
+still being written, and a browser that records through the microphone (checked every poll, so
+``idle_seconds`` is 0 and ``closes_at`` null meanwhile, and the limit counts from the end of the
+recording). The next call that needs the session fails with ``session_idle`` and a
 message that says so, until the site is opened or closed.
 
 **Refusal cursors** are kept per connection and site: each client is told about each refusal

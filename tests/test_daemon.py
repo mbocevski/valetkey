@@ -6895,6 +6895,56 @@ def test_status_shows_the_idle_time_and_when_the_session_closes(roots: sites.Roo
     run(scenario())
 
 
+def test_a_session_that_records_stays_open_and_its_idle_time_starts_when_it_stops(
+    roots: sites.Roots,
+) -> None:
+    sites.save_policy(
+        roots, sites.Policy("sitex", "https://sitex.test/", ("sitex.test",), microphone=True)
+    )
+    ticks = Ticks()
+    recording: dict[str, object] = {"socket": "/s", "node": 42, "directory": "/d"}
+    stopped = recording | {"node": None}
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.capture = recording
+            assert await still_open(rig, ticks, IDLE * 3)  # long past the limit
+            (entry,) = (await c.call("status"))["sessions"]
+            assert (entry["idle_seconds"], entry["closes_at"]) == (0, None)
+            session.capture = stopped
+            assert await still_open(rig, ticks, IDLE * 4 - 1)  # the time starts at the stop
+            (entry,) = (await c.call("status"))["sessions"]
+            assert entry["idle_seconds"] == IDLE - 1
+            assert entry["closes_at"] is not None
+            assert not await still_open(rig, ticks, IDLE * 4)
+            assert session.closed
+
+    run(scenario())
+
+
+def test_a_session_without_the_microphone_is_not_asked_whether_it_records(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    ticks = Ticks()
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, idle_clock=ticks, idle_limit=IDLE) as rig,
+            await rig.connect() as c,
+        ):
+            await c.call("open", site="sitex")
+            rig.factory.made[0].capture = {"socket": "/s", "node": 1, "directory": "/d"}
+            assert not await still_open(rig, ticks, IDLE)
+
+    run(scenario())
+
+
 def test_a_call_that_arrives_while_the_session_is_being_checked_keeps_it_open(
     roots: sites.Roots,
 ) -> None:

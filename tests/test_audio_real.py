@@ -382,6 +382,7 @@ listen();
 <p>a call</p>
 """
 PAGES = {"/": RECORDING_PAGE}
+QUIET_PAGES = {**PAGES, "/quiet": "<title>quiet</title><p>no call</p>"}
 
 
 def site_roots(server: throwaway_audio.ThrowawayAudio) -> sites.Roots:
@@ -478,6 +479,8 @@ def test_the_jail_is_gone_after_an_idle_close(server: throwaway_audio.ThrowawayA
             (entry,) = (await c.call("status"))["sessions"]
             assert entry["microphone"] is True
             assert entry["capture"]["directory"] == str(graph_directory(roots))
+            # A recording keeps the session open, so the page stops before the limit counts.
+            await c.call("navigate", site="demo", url="http://localhost/quiet")
             for _ in range(200):  # the idle limit is a few seconds
                 if not (await c.call("status"))["sessions"]:
                     break
@@ -490,9 +493,45 @@ def test_the_jail_is_gone_after_an_idle_close(server: throwaway_audio.ThrowawayA
             assert under(graph_directory(roots)) == []
             assert not graph_directory(roots).exists()
 
-    with PageServer(PAGES) as pages:
+    with PageServer(QUIET_PAGES) as pages:
         roots, rig_context = build_daemon_rig(server, pages, idle_limit=3.0)
         run(scenario(roots, rig_context))
+
+
+@pytest.mark.integration
+@needs_browser
+def test_a_session_that_records_outlives_the_idle_limit_and_closes_after_it_stops(
+    server: throwaway_audio.ThrowawayAudio,
+) -> None:
+    limit = 3.0
+
+    async def scenario(
+        rig_context: contextlib.AbstractAsyncContextManager[Rig],
+    ) -> None:
+        async with rig_context as rig, await rig.connect() as c:
+            await c.call("open", site="demo")
+            for _ in range(200):
+                (entry,) = (await c.call("status"))["sessions"]
+                if entry["capture"]["node"] is not None:
+                    break
+                await asyncio.sleep(0.1)
+            assert entry["capture"]["node"] is not None
+            await asyncio.sleep(limit * 2)  # twice the limit with no call that uses the site
+            (entry,) = (await c.call("status"))["sessions"]
+            assert (entry["idle_seconds"], entry["closes_at"]) == (0, None)
+            # Leaving the page ends the recording; then the limit counts.
+            await c.call("navigate", site="demo", url="http://localhost/quiet")
+            stopped = time.monotonic()
+            for _ in range(200):
+                if not (await c.call("status"))["sessions"]:
+                    break
+                await asyncio.sleep(0.1)
+            assert (await c.call("status"))["sessions"] == []
+            assert time.monotonic() - stopped >= limit - 1  # the call itself restarts the count
+
+    with PageServer(QUIET_PAGES) as pages:
+        _roots, rig_context = build_daemon_rig(server, pages, idle_limit=limit)
+        run(scenario(rig_context))
 
 
 @pytest.mark.integration

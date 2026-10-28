@@ -509,6 +509,7 @@ class Sessions:
             state.kind = "idle"
             state.microphone = False
             state.microphone_source = None
+            state.recording = False
             if session is not None:
                 try:
                     await asyncio.to_thread(session.close)
@@ -869,11 +870,28 @@ class Sessions:
         for state, session in checked:
             try:
                 if await asyncio.to_thread(session.is_alive, lines):
+                    if await self._recording(state, session):
+                        continue
                     await self._close_if_idle(state, session)
                     continue
                 await self.end_if_current(state, session)
             except Exception:
                 logger.exception("checking the %s session failed", state.name)
+
+    async def _recording(self, state: Site, session: BrowserSession) -> bool:
+        """Say whether the session's browser records, which keeps it open as use does.
+
+        Only a session with the microphone is asked. While it records its idle time stays at
+        zero, so the limit counts from when the recording stops.
+        """
+        recording = False
+        if state.microphone:
+            capture = await asyncio.to_thread(session.capture_stream)
+            recording = capture is not None and capture.get("node") is not None
+        state.recording = recording
+        if recording:
+            self.registry.touch(state.name)
+        return recording
 
     async def _in_use(self, state: Site) -> bool:
         """Say whether something is happening on the site that keeps its session open.
@@ -908,7 +926,12 @@ class Sessions:
                 await self.end(state)
 
     def idle_fields(self, state: Site) -> dict[str, Any]:
-        """Say how long the session has been unused and when that will close it."""
+        """Say how long the session has been unused and when that will close it.
+
+        A session whose browser records is in use: no idle time, and nothing to close it.
+        """
+        if state.recording:
+            return {"idle_seconds": 0, "closes_at": None}
         limit = self.idle_limit
         idle = max(0.0, self._idle_clock() - state.last_used)
         closes = self._now() + timedelta(seconds=max(0.0, limit - idle))

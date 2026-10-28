@@ -77,6 +77,8 @@ class Site:
     """One question at a time per site."""
     last_used: float = 0.0
     """When a client last used the site, on the daemon's idle clock."""
+    recording: bool = False
+    """Whether the running session's browser was recording the last time it was checked."""
     idle_closed: int | None = None
     """How many minutes unused ended the last session, until the site is opened or closed."""
 

@@ -54,6 +54,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Changed
 
+- A session whose browser is recording through the microphone is not closed for lack of use; `status` shows idle time 0 and no close time, and the limit counts from when the recording stops.
 - The audio graph for the microphone runs in a process namespace of its own, so it can no longer see or signal your other processes.
 - `browser_click` by text now clicks the one element whose name holds the text as whole words, such as `icon_user Orders icon_arrow` for `Orders`. An exact name still wins, and an ambiguous text is refused.
 - The browser starts with Chromium's page tools (WebMCP) turned off, so pages see no `ModelContext`; `valetkey doctor` fails an agent-browser that does not accept the option.
