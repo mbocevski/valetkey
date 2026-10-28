@@ -16,6 +16,10 @@ exactly like a click that worked.
 * **Expectation.** The caller may say what should follow: some text appears, some text goes, or
   the URL changes. The click is then checked against it. An outcome that was already true before
   the click verifies nothing, and is reported as such.
+* **Hovering first.** Some pages show a row's actions only while the pointer is over the row. With
+  ``hover``, a list of texts, the first that names exactly one element is hovered, and the target
+  is looked for in a snapshot taken after that, so a click on what the hover revealed is one call.
+  The pointer stays where the hover left it.
 * **Retry.** With an expectation, and only when the first click provably changed nothing (same
   URL, same page outline after a short grace period), the click is made once more. A click that
   changed anything is waited on and never repeated. Without an expectation there is no retry,
@@ -54,6 +58,10 @@ second."""
 MAX_CHECKS = 15
 """The most checks of an expectation after one click, whatever time is left."""
 MAX_CANDIDATES = 5
+MAX_HOVER = 5
+"""The most entries ``hover`` may list."""
+MAX_HOVER_LENGTH = 200
+"""The longest an entry of ``hover`` may be."""
 
 type Kind = Literal["text_appears", "text_gone", "url_changes"]
 type Outcome = Literal["met", "not_met", "already_true", "unchecked"]
@@ -87,6 +95,9 @@ class Page(Protocol):
 
     def click(self, ref: str) -> None:
         """Click ``ref``."""
+
+    def hover(self, ref: str) -> None:
+        """Move the pointer over ``ref`` and leave it there."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +233,29 @@ def parse_expectation(raw: object) -> Expect | None:
     )
 
 
+def parse_hover(raw: object) -> tuple[str, ...]:
+    """Parse the ``hover`` argument: ``None``, or one to five non-empty texts.
+
+    Raises:
+        ClickError: ``bad_request`` for anything else, including a text over 200 characters.
+
+    """
+    if raw is None:
+        return ()
+    if (
+        not isinstance(raw, list)
+        or not 1 <= len(raw) <= MAX_HOVER
+        or not all(isinstance(item, str) and item.strip() for item in raw)
+        or any(len(item) > MAX_HOVER_LENGTH for item in raw)
+    ):
+        _refuse(
+            "bad_request",
+            f"hover takes one to {MAX_HOVER} texts, each not empty and at most "
+            f"{MAX_HOVER_LENGTH} characters",
+        )
+    return tuple(raw)
+
+
 def normalize(text: str) -> str:
     """Return ``text`` with runs of whitespace made single spaces, as accessible names are read."""
     return " ".join(text.split())
@@ -321,6 +355,37 @@ def resolve(refs: Mapping[str, sessions.Ref], target: Target) -> tuple[str, sess
     )
 
 
+def hover_over(page: Page, entries: tuple[str, ...], *, exact: bool = False) -> sessions.Ref:
+    """Hover over the first of ``entries`` that names exactly one element, and return it.
+
+    Each entry is matched like the text of a click (the exact name, then the name that holds it
+    as whole words), with no role. With ``exact`` only a name equal to the entry, case included,
+    matches. An entry that matches nothing, or several elements, is passed over; none of them left
+    is a ``hover_not_found``.
+
+    Raises:
+        ClickError: ``hover_not_found``, naming the entries tried and the names that came close.
+
+    """
+    refs = page.snapshot().refs
+    close: list[dict[str, str]] = []
+    for entry in entries:
+        try:
+            ref, element = resolve(refs, Target(name=normalize(entry), fold=not exact))
+        except ClickError as error:
+            close.extend(c for c in error.details.get("candidates", []) if c not in close)
+            continue
+        page.hover(ref)
+        return element
+    tried = ", ".join(json.dumps(entry) for entry in entries)
+    _refuse(
+        "hover_not_found",
+        f"nothing to hover over was found: {tried} matched no single element, so nothing was "
+        "clicked; take a new snapshot to see what is there now",
+        {"candidates": close[:MAX_CANDIDATES], "tried": list(entries)},
+    )
+
+
 # -- waiting and expecting ---------------------------------------------------------------------
 
 
@@ -391,8 +456,14 @@ def _was_already_true(page: Page, expect: Expect, clock: Clock) -> bool:
 # -- the click -------------------------------------------------------------------------------
 
 
-def verified_click(
-    page: Page, target: Target, expect: Expect | None = None, clock: Clock = REAL_CLOCK
+def verified_click(  # noqa: PLR0913 - one click, described by its parts
+    page: Page,
+    target: Target,
+    expect: Expect | None = None,
+    clock: Clock = REAL_CLOCK,
+    hover: tuple[str, ...] = (),
+    *,
+    exact: bool = False,
 ) -> ClickResult:
     """Click ``target`` on ``page`` once, or twice if the first click provably did nothing.
 
@@ -405,15 +476,34 @@ def verified_click(
     resolved again and clicked once more. If the page changed in any way, the click took effect
     and the expectation gets the rest of :data:`SETTLE_SECONDS` without another click.
 
+    With ``hover``, the first of those texts that names one element is hovered first (see
+    :func:`hover_over`; ``exact`` is for those texts, as it is for the target's text in
+    :class:`Target`), and everything after is as above, on the page as the hover left it.
+
     Raises:
-        ClickError: when the target cannot be found, or matches more than one element.
+        ClickError: when the target cannot be found, or matches more than one element, or when
+            nothing named by ``hover`` can be found.
 
     """
+    hovered = hover_over(page, hover, exact=exact) if hover else None
+
+    def find() -> tuple[str, sessions.Ref]:
+        try:
+            return resolve(page.snapshot().refs, target)
+        except ClickError as error:
+            if hovered is None or error.code != "target_not_found":
+                raise
+            message = (
+                f"hovering over the {hovered.role} named {json.dumps(hovered.name)} worked, but "
+                f"{error}"
+            )
+            raise ClickError(error.code, message, error.details) from None
+
     already_true = False
     if expect is not None:
-        resolve(page.snapshot().refs, target)  # refuse now, before any waiting, if it is not there
+        find()  # refuse now, before any waiting, if it is not there
         already_true = _was_already_true(page, expect, clock)
-    ref, element = resolve(page.snapshot().refs, target)  # (again, because the page kept moving)
+    ref, element = find()  # (again, because the page kept moving)
     url_before, outline_before = page.look()
     page.click(ref)
     attempts = 1
@@ -429,7 +519,7 @@ def verified_click(
     unchanged = watch.url == url_before and watch.outline == outline_before
     budget = SETTLE_SECONDS - GRACE_SECONDS
     if unchanged:
-        ref, element = resolve(page.snapshot().refs, target)
+        ref, element = find()
         page.click(ref)
         attempts = 2
     met = watch.until(test, budget, look_now=unchanged)

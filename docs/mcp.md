@@ -155,6 +155,22 @@ such as `icon_user Orders icon_arrow` for `Orders`, and refuses when several do.
 to the text matches, case included, and there is no whole-word fallback. A text that matches no
 element is `target_not_found`, with the near names. `exact` needs `text`, and `role` still narrows.
 
+## Hovering before a click
+
+Some pages show a row's actions only while the pointer is over the row, so the action is not in
+a snapshot until something is hovered. `browser_click` takes `hover`, a list of one to five texts
+(each an element's visible text or accessible name, at most 200 characters). It hovers the first
+text that names exactly one element, takes a fresh snapshot, and then looks up the target
+(`text` or `ref`) and clicks it, all in one call. A text is matched like the `text` of a click, and
+`role` does not apply to it, and `exact` applies to it as it does to `text`. The pointer stays where the hover left it, and `expect` is checked
+after the click as usual.
+
+If no text names one element, the click fails with `hover_not_found`, naming the texts it tried and
+the closest names, and nothing is clicked. If the target is not on the page after the hover, the
+click fails with `target_not_found`, saying the hover worked and over which element. A reference
+from before the hover is used only if it still names the same element. Without `hover` a click
+works as before.
+
 ## Reading one part of a page
 
 `browser_snapshot` takes a `selector`: a CSS selector of 1 to 500 characters, with no newline, that

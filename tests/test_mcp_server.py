@@ -320,7 +320,7 @@ EXPECTED_TOOLS = {
     "browser_login": {"site_or_url", "account"},
     "browser_open": {"site"},
     "browser_snapshot": {"site", "images", "interactive", "selector", "start_line"},
-    "browser_click": {"site", "ref", "text", "role", "expect", "exact"},
+    "browser_click": {"site", "ref", "text", "role", "expect", "hover", "exact"},
     "browser_type": {"site", "ref", "text", "submit"},
     "browser_navigate": {"site", "url"},
     "browser_save": {"site", "ref", "url"},
@@ -493,6 +493,15 @@ def test_open_snapshot_click_type_navigate_close(short_dir: Path) -> None:
             assert '- button "Go" [ref=e1]' in snapshot
             assert snapshot.index("untrusted") < snapshot.index("[ref=e1]")
             clicked = text_of(await mcp.call_tool("browser_click", {"site": "sitex", "ref": "e1"}))
+            assert "hover" not in fake.requests[-1]["args"]
+            await mcp.call_tool(
+                "browser_click", {"site": "sitex", "text": "Go", "hover": ["Row 2", "Row"]}
+            )
+            assert fake.requests[-1]["args"]["hover"] == ["Row 2", "Row"]
+            too_many = await mcp.call_tool(
+                "browser_click", {"site": "sitex", "text": "Go", "hover": ["a"] * 6}
+            )
+            assert too_many.is_error
             assert "Clicked: a button, named:" in clicked
             assert clicked.endswith(
                 "No expectation was given, so nothing says the click had an effect."

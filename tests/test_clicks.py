@@ -311,6 +311,8 @@ class FakePage:
     url: str = "https://s.test/"
     clicks: list[tuple[str, float]] = field(default_factory=list)
     on_click: Callable[[FakePage, str], None] | None = None
+    on_hover: Callable[[FakePage, str], None] | None = None
+    hovers: list[str] = field(default_factory=list)
     scheduled: list[tuple[float, Callable[[FakePage], None]]] = field(default_factory=list)
     looks: list[tuple[float, int]] = field(default_factory=list)
     """Each look (a full snapshot with the URL): when, and how many clicks came before it."""
@@ -343,6 +345,12 @@ class FakePage:
         if self.on_click is not None:
             self.on_click(self, ref)
 
+    def hover(self, ref: str) -> None:
+        self._advance()
+        self.hovers.append(ref)
+        if self.on_hover is not None:
+            self.on_hover(self, ref)
+
     def current_url(self) -> str:
         self._advance()
         return self.url
@@ -353,8 +361,10 @@ def page_with(**elements: tuple[str, str]) -> FakePage:
     return FakePage(time, refs(**elements))
 
 
-def run(page: FakePage, target: Target, expect: Expect | None = None) -> clicks.ClickResult:
-    return verified_click(page, target, expect, page.time.clock())
+def run(
+    page: FakePage, target: Target, expect: Expect | None = None, hover: tuple[str, ...] = ()
+) -> clicks.ClickResult:
+    return verified_click(page, target, expect, page.time.clock(), hover)
 
 
 SAVE = Target("Save", "button", fold=True)
@@ -598,7 +608,21 @@ document.getElementById('form').onsubmit = (e) => {
 };
 </script>
 """
-PAGES = {"/": FIXTURE, "/two": "<title>Two</title><h1>second page</h1>"}
+ROWS = """<!doctype html><title>Rows</title>
+<style>.act { display: none; } .row:hover .act { display: inline; }</style>
+<div class="row"><a href="#one">Row 1</a> <button class="act">Delete</button></div>
+<div class="row"><a href="#two">Row 2</a> <button class="act">Delete</button></div>
+<script>
+// The action is on the page only while the pointer is over its row; the click reports itself.
+document.querySelectorAll('.row').forEach((row, i) => {
+  row.querySelector('.act').onclick = () => {
+    const line = encodeURIComponent('row ' + (i + 1) + ' deleted');
+    new Image().src = '/hit/' + line + '?' + Math.random();
+  };
+});
+</script>
+"""
+PAGES = {"/": FIXTURE, "/two": "<title>Two</title><h1>second page</h1>", "/rows": ROWS}
 
 
 START = "http://site.test/"
@@ -929,3 +953,184 @@ def test_a_page_that_looks_the_same_after_the_grace_is_clicked_again_and_looked_
     assert len(page.clicks) == 2
     assert page.clicks[1][1] == pytest.approx(page.clicks[0][1] + clicks.GRACE_SECONDS)
     assert any(moment == page.clicks[1][1] and clicked == 2 for moment, clicked in page.looks)
+
+
+# -- hovering first ------------------------------------------------------------------------
+
+
+def shows_delete_on_hover(page: FakePage, hovered: str) -> None:
+    """Make the page show a Delete button once ``hovered`` is the pointer's element."""
+    page.elements["e9"] = sessions.Ref("button", f"Delete {page.elements[hovered].name}")
+
+
+def test_a_click_can_hover_first_and_then_click_what_the_hover_showed() -> None:
+    page = page_with(e1=("link", "Row 1"), e2=("link", "Row 2"))
+    page.on_hover = shows_delete_on_hover
+    result = run(page, Target("Delete Row 2", "button", fold=True), hover=("Row 2",))
+    assert (result.role, result.name, result.outcome) == ("button", "Delete Row 2", "unchecked")
+    assert page.hovers == ["e2"]
+    assert [ref for ref, _ in page.clicks] == ["e9"]
+
+
+def test_without_a_hover_the_action_is_not_there_to_click() -> None:
+    page = page_with(e1=("link", "Row 1"), e2=("link", "Row 2"))
+    page.on_hover = shows_delete_on_hover
+    with pytest.raises(clicks.ClickError) as info:
+        run(page, Target("Delete Row 2", "button", fold=True))
+    assert info.value.code == "target_not_found"
+    assert page.hovers == []
+    assert page.clicks == []
+
+
+def test_the_first_entry_that_names_one_element_is_the_one_hovered() -> None:
+    page = page_with(e1=("link", "Row 1"), e2=("link", "Row 2"), e3=("link", "Row 2 (old)"))
+    page.on_hover = shows_delete_on_hover
+    page.elements["e4"] = sessions.Ref("link", "Row 1")  # a second "Row 1": not one element
+    run(
+        page,
+        Target("Delete Row 2", "button", fold=True),
+        hover=("No such row", "Row 1", "Row 2"),
+    )
+    assert page.hovers == ["e2"]
+    assert [ref for ref, _ in page.clicks] == ["e9"]
+
+
+def test_a_hover_entry_matches_a_name_that_holds_it_as_whole_words() -> None:
+    page = page_with(e1=("link", "icon_row Orders icon_arrow"))
+    page.on_hover = shows_delete_on_hover
+    run(page, Target("Delete icon_row Orders icon_arrow", "button", fold=True), hover=("orders",))
+    assert page.hovers == ["e1"]
+
+
+def test_no_entry_that_matches_clicks_nothing_and_names_what_it_tried() -> None:
+    page = page_with(e1=("link", "Row 1"), e2=("link", "Row 2"), e3=("link", "Row 2 again"))
+    page.on_hover = shows_delete_on_hover
+    with pytest.raises(clicks.ClickError) as info:
+        run(page, SAVE, hover=("Row 3", "Row"))  # none; and "Row" names three elements
+    assert info.value.code == "hover_not_found"
+    assert str(info.value) == (
+        'nothing to hover over was found: "Row 3", "Row" matched no single element, so nothing '
+        "was clicked; take a new snapshot to see what is there now"
+    )
+    assert info.value.details["tried"] == ["Row 3", "Row"]
+    names = [c["name"] for c in info.value.details["candidates"]]
+    assert names == ["Row 1", "Row 2", "Row 2 again"]
+    assert page.hovers == []
+    assert page.clicks == []
+
+
+def test_a_target_that_does_not_appear_after_the_hover_says_the_hover_worked() -> None:
+    page = page_with(e1=("link", "Row 1"))
+    with pytest.raises(clicks.ClickError) as info:
+        run(page, Target("Delete", "button", fold=True), hover=("Row 1",))
+    assert info.value.code == "target_not_found"
+    assert str(info.value).startswith('hovering over the link named "Row 1" worked, but nothing')
+    assert page.hovers == ["e1"]
+    assert page.clicks == []
+
+
+def test_exact_makes_a_hover_entry_match_a_whole_name_with_its_case() -> None:
+    page = page_with(e1=("link", "Row 2"), e2=("link", "icon_row Row 2 icon_arrow"))
+    page.on_hover = shows_delete_on_hover
+    target = Target("Delete Row 2", "button", fold=True)
+    run(page, target, hover=("row 2",))
+    assert page.hovers == ["e1"]  # the text matches ignoring case; the other name holds it too
+    page = page_with(e1=("link", "Row 2"))
+    page.on_hover = shows_delete_on_hover
+    with pytest.raises(clicks.ClickError) as info:
+        verified_click(page, target, clock=page.time.clock(), hover=("row 2",), exact=True)
+    assert info.value.code == "hover_not_found"
+    assert page.hovers == []
+    verified_click(page, target, clock=page.time.clock(), hover=("Row 2",), exact=True)
+    assert page.hovers == ["e1"]
+
+
+def test_an_ambiguous_target_after_the_hover_is_refused_as_before() -> None:
+    page = page_with(e1=("link", "Row 1"), e2=("button", "Delete"), e3=("button", "Delete"))
+    with pytest.raises(clicks.ClickError) as info:
+        run(page, Target("Delete", "button", fold=True), hover=("Row 1",))
+    assert info.value.code == "target_ambiguous"
+    assert page.clicks == []
+
+
+def test_a_reference_from_before_the_hover_is_used_only_if_it_names_the_same_element() -> None:
+    page = page_with(e1=("link", "Row 1"), e5=("button", "Menu"))
+    page.on_hover = lambda p, _ref: p.elements.__setitem__("e5", sessions.Ref("button", "Other"))
+    with pytest.raises(clicks.ClickError) as info:
+        run(page, Target("Menu", "button", ref="e5"), hover=("Row 1",))
+    assert info.value.code == "target_not_found"
+    assert page.clicks == []
+
+
+def test_the_expectation_is_checked_after_a_click_that_followed_a_hover() -> None:
+    page = page_with(e1=("link", "Row 1"))
+    page.on_hover = shows_delete_on_hover
+    page.on_click = lambda p, _ref: p.texts.append("Deleted")
+    result = run(
+        page,
+        Target("Delete Row 1", "button", fold=True),
+        Expect("text_appears", "Deleted"),
+        hover=("Row 1",),
+    )
+    assert (result.attempts, result.outcome) == (1, "met")
+    assert page.hovers == ["e1"]
+
+
+def test_a_click_that_did_nothing_is_repeated_on_the_page_as_the_hover_left_it() -> None:
+    page = page_with(e1=("link", "Row 1"))
+    page.on_hover = shows_delete_on_hover
+    result = run(
+        page,
+        Target("Delete Row 1", "button", fold=True),
+        Expect("text_appears", "Deleted"),
+        hover=("Row 1",),
+    )
+    assert (result.attempts, result.outcome) == (2, "not_met")
+    assert page.hovers == ["e1"]  # hovered once
+
+
+@pytest.mark.parametrize("raw", [None])
+def test_no_hover_argument_means_no_hover(raw: object) -> None:
+    assert clicks.parse_hover(raw) == ()
+
+
+def test_the_hover_argument_is_one_to_five_texts_of_at_most_200_characters() -> None:
+    assert clicks.parse_hover(["a", "b" * 200]) == ("a", "b" * 200)
+    assert clicks.parse_hover(["a"] * 5) == ("a",) * 5
+    for bad in ([], ["a"] * 6, "Row 2", [5], [""], ["  "], ["x" * 201], {"a": 1}):
+        with pytest.raises(clicks.ClickError) as info:
+            clicks.parse_hover(bad)
+        assert info.value.code == "bad_request", bad
+
+
+DELETE = Target("Delete", "button", fold=True)
+
+
+@pytest.mark.integration
+@needs_everything
+def test_a_click_hovers_a_row_first_to_reach_the_action_it_shows(browser: Browser) -> None:
+    browser.session.open(START + "rows")
+    # The action is not on the page until the pointer is over its row.
+    with pytest.raises(clicks.ClickError) as info:
+        verified_click(browser.session, DELETE)
+    assert info.value.code == "target_not_found"
+    assert browser.hits() == []
+    # Hovering the second row first clicks the second row's action, and the first entry that
+    # names nothing is passed over.
+    result = verified_click(browser.session, DELETE, hover=("No such row", "Row 2"))
+    assert (result.role, result.name, result.outcome) == ("button", "Delete", "unchecked")
+    assert browser.hits() == ["row 2 deleted"]
+
+
+@pytest.mark.integration
+@needs_everything
+def test_a_hover_that_finds_nothing_clicks_nothing(browser: Browser) -> None:
+    browser.session.open(START + "rows")
+    with pytest.raises(clicks.ClickError) as info:
+        verified_click(browser.session, DELETE, hover=("Row 9",))
+    assert info.value.code == "hover_not_found"
+    assert info.value.details["tried"] == ["Row 9"]
+    assert browser.hits() == []
+    # The page is unchanged: the first row can still be hovered and its action clicked.
+    verified_click(browser.session, DELETE, hover=("Row 1",))
+    assert browser.hits() == ["row 1 deleted"]

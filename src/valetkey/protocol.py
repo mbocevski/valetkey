@@ -51,6 +51,9 @@ class BrowserSession(Protocol):
     def click(self, ref: str) -> None:
         """Click ``ref``."""
 
+    def hover(self, ref: str) -> None:
+        """Move the pointer over ``ref`` and leave it there."""
+
     def password_fields(self) -> int:
         """Count the password fields on the page."""
 

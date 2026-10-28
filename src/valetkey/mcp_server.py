@@ -805,7 +805,10 @@ DESCRIPTIONS = {
         "that is not a whole name still matches an element whose name holds it as whole words "
         "(an icon label around it), but only if exactly one does; set exact to click only an "
         "element whose whole name equals the text, case included. If the name matches nothing or "
-        "several elements, nothing is clicked. Say what should follow "
+        "several elements, nothing is clicked. For a control that appears only while the pointer "
+        "is over something (a row's actions), give hover: texts of elements to hover over, the "
+        "first that names one element is hovered, and the target is looked up after that, in the "
+        "same call. Say what should follow "
         "in expect (text_appears, text_gone or url_changes) and the result says whether it "
         "happened. Only a click with an expect is ever repeated, and only if the first changed "
         "nothing. If the click starts a download, the new files are listed. Once you have read "
@@ -1296,7 +1299,7 @@ class _Tools:
             ]
         )
 
-    async def browser_click(  # noqa: PLR0913 - the arguments are the tool's schema
+    async def browser_click(  # noqa: PLR0913, PLR0917 - the arguments are the tool's schema
         self,
         site: SITE,
         ref: Annotated[
@@ -1311,16 +1314,31 @@ class _Tools:
         expect: Annotated[
             Expectation | None, Field(description="What should happen after the click.")
         ] = None,
+        hover: Annotated[
+            list[str] | None,
+            Field(
+                description="Texts of elements to hover over first: the first that names one "
+                "element is hovered, then the target is looked up and clicked.",
+                max_length=5,
+            ),
+        ] = None,
         *,
         exact: Annotated[
             bool,
             Field(
                 description="With text: click only an element whose whole name equals the text, "
-                "case included, never one whose name merely holds it."
+                "case included, never one whose name merely holds it. The same for the texts "
+                "of hover."
             ),
         ] = False,
     ) -> str:
-        arguments: dict[str, Any] = {"site": site, "ref": ref, "text": text, "role": role}
+        arguments: dict[str, Any] = {
+            "site": site,
+            "ref": ref,
+            "text": text,
+            "role": role,
+            "hover": hover,
+        }
         arguments = {k: v for k, v in arguments.items() if v is not None}
         if exact:
             arguments["exact"] = True

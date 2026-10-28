@@ -350,6 +350,9 @@ class FakeSession:
         if self.on_click is not None:
             self.on_click()
 
+    def hover(self, ref: str) -> None:
+        self._use("hover", ref)
+
     def press_enter(self) -> None:
         self._use("press_enter")
 
@@ -1587,6 +1590,34 @@ def test_a_click_with_no_snapshot_before_it_still_reports_the_change(roots: site
             # A whole tree was taken first, silently, and kept: it is the baseline of the change.
             assert session.delta_calls == [(False, True), (False, False)]
             assert "snapshot" not in result
+
+    run(scenario())
+
+
+def test_a_click_can_hover_first_and_a_bad_hover_is_refused_before_anything_is_done(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            for bad in ([], ["a"] * 6, "Go", [""], ["x" * 201]):
+                with pytest.raises(DaemonError) as info:
+                    await c.call("click", site="sitex", text="Go", hover=bad)
+                assert info.value.code == "bad_request", bad
+            assert not [call for call in session.calls if call[0] in {"hover", "click"}]
+            with pytest.raises(DaemonError) as lost:
+                await c.call("click", site="sitex", text="Go", hover=["Nothing here"])
+            assert lost.value.code == "hover_not_found"
+            assert not [call for call in session.calls if call[0] in {"hover", "click"}]
+            with pytest.raises(DaemonError) as exact:
+                await c.call("click", site="sitex", text="Go", hover=["go"], exact=True)
+            assert exact.value.code == "hover_not_found"
+            await c.call("click", site="sitex", text="Go", hover=["Nothing here", "Go"])
+            actions = [call for call in session.calls if call[0] in {"hover", "click"}]
+            assert actions == [("hover", "e1"), ("click", "e1")]
 
     run(scenario())
 

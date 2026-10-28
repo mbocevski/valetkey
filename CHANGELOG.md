@@ -9,6 +9,7 @@ Changes that affect users of valetkey. The format follows
 ### Added
 
 - `browser_click` takes `exact: true` with `text`, to click only an element whose whole name equals the text, case included, never one whose name merely holds it as whole words.
+- `browser_click` takes `hover`, a list of texts: it hovers the first that names one element, then clicks the target that appears, in one call, for controls a page shows only under the pointer.
 - An approval command exits with 75 when nobody answered, which expires the question and remembers nothing, or 69 when it could not ask, which hands the question to a notification. 0 is yes and any other status is no.
 - `valetkey watch --wait` waits for a daemon instead of exiting, prints `{"event":"daemon_stopped"}` when it ends, and prints the snapshot again when the next one runs; it never starts one.
 - `valetkey mic SITE on --source NAME` makes a site's microphone copy the audio source you name instead of your default, and a session fails to open if that source is missing. Only you can set it.

@@ -431,6 +431,7 @@ def test_call_command_carries_the_session_name_and_no_launch_option(tmp_path: Pa
     verbs = [
         ("snapshot", "-i"),
         ("click", "@e1"),
+        ("hover", "@e1"),
         ("fill", "@e1", "x"),
         ("get", "url"),
         ("close",),
@@ -476,6 +477,7 @@ def test_no_session_method_lets_a_leading_dash_reach_the_arguments(
     methods = {
         "open": session.open,
         "click": session.click,
+        "hover": session.hover,
         "screenshot": session.screenshot,
     }
     for name, method in methods.items():
@@ -649,6 +651,7 @@ def test_every_verb_goes_through_call_command(
     session.snapshot()
     session.snapshot(interactive=False)
     session.click("e1")
+    session.hover("e1")
     session.fill("@e1", "plain text")
     session.fill("@e1", "--proxy http://evil")
     session.press_enter()
@@ -660,6 +663,7 @@ def test_every_verb_goes_through_call_command(
         ["snapshot", "-i"],
         ["snapshot"],
         ["click", "@e1"],
+        ["hover", "@e1"],
         ["fill", "@e1", "plain text"],
         ["fill", "@e1", " --proxy http://evil"],
         ["press", "Control+Home"],
@@ -764,7 +768,7 @@ def test_the_session_has_no_eval_or_passthrough() -> None:
     public = {n for n in dir(sessions.Session) if not n.startswith("_")}
     assert public == {
         "start", "is_alive", "watches_browser", "capture_stream", "close", "open", "snapshot",
-        "outline", "click", "fill", "press_enter",
+        "outline", "click", "hover", "fill", "press_enter",
         "current_url", "screenshot", "clear_requests", "started_downloads", "password_fields",
         "resource_url", "images", "fetch", "look", "snapshot_delta", "title", "match_count",
     }  # fmt: skip

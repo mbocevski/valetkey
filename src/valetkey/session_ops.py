@@ -598,12 +598,17 @@ class Sessions:
         generation, known, _url = connection.refs.get(state.name, (-1, {}, ""))
         target = clicks.build_target(args, known if generation == state.generation else {})
         expect = clicks.parse_expectation(args.get("expect"))
+        hover = clicks.parse_hover(args.get("hover"))
         seen = await self.downloads.seen_downloads(connection, state.name)
         await self.ensure_view(connection, state)
         result = await self.session_op(
             connection,
             state,
-            _watching(lambda session: clicks.verified_click(session, target, expect)),
+            _watching(
+                lambda session: clicks.verified_click(
+                    session, target, expect, hover=hover, exact=args.get("exact") is True
+                )
+            ),
         )
         done: clicks.ClickResult = result.pop("_value")
         result["clicked"] = {"role": done.role, "name": untrusted(done.name)}

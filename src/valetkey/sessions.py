@@ -1160,6 +1160,10 @@ class Session:
         """Click the element ``ref`` (``e3`` or ``@e3``) from the latest snapshot."""
         self._call("click", _check_ref(ref))
 
+    def hover(self, ref: str) -> None:
+        """Move the pointer over the element ``ref`` (``e3`` or ``@e3``) and leave it there."""
+        self._call("hover", _check_ref(ref))
+
     def fill(self, ref: str, text: str) -> None:
         """Replace the contents of the field ``ref`` with ``text``.
 
