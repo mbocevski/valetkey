@@ -89,14 +89,15 @@ def jail(tmp_path: Path, **options: Any) -> list[str]:  # noqa: ANN401
     )
 
 
-def test_the_jail_has_no_network_devices_or_home_and_shares_the_pid_namespace(
+def test_the_jail_has_no_network_devices_home_or_host_processes_and_no_parent_tie(
     tmp_path: Path,
 ) -> None:
     argv = jail(tmp_path)
     for flag in ("--unshare-user", "--unshare-ipc", "--unshare-net", "--unshare-uts"):
         assert flag in argv
     assert "--unshare-cgroup" in argv
-    assert "--unshare-pid" not in argv  # the graph cannot tell its clients apart in one
+    assert "--unshare-pid" in argv
+    assert "--die-with-parent" not in argv  # the pipe to the supervisor does that
     assert "--unshare-all" not in argv
     assert "--new-session" in argv
     binds = [(argv[i + 1], argv[i + 2]) for i, word in enumerate(argv) if word == "--bind"]

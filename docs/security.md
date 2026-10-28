@@ -202,10 +202,10 @@ changes. Chrome may record without a prompt, because nobody sees one, but only o
 
 The graph runs in a jail of its own: no network, no devices, a read-only system, its own
 directory, your audio socket, and the same syscall filter as the browser. When the browser is
-killed, the daemon ends the session within a second or two, and the graph with it. The jail shares
-the host's process namespace, because the audio server cannot tell its clients apart in one of its own. A
-compromised audio server could therefore signal your other processes, and it has the full reach of
-your audio socket. The browser has neither.
+killed, the daemon ends the session within a second or two, and the graph with it. Like the
+browser, the jail has a process namespace of its own, so it sees none of your processes and cannot
+signal them. A compromised audio server still has the full reach of your audio socket, which the
+browser does not.
 
 A recorder on your machine can find the capture stream of a session in `valetkey status --json`
 (see [commands](commands.md#seeing-what-runs)), and listens to what the call plays through the

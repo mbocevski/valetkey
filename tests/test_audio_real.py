@@ -264,9 +264,33 @@ def test_the_graph_runs_in_a_jail_and_ends_whole(
             continue  # bubblewrap's own helper, before it enters the jail
         for kind in ("net", "ipc", "uts", "user"):
             assert namespaces.joinpath(kind).readlink() != mine.joinpath(kind).readlink(), kind
-        assert namespaces.joinpath("pid").readlink() == mine.joinpath("pid").readlink()
+        assert namespaces.joinpath("pid").readlink() != mine.joinpath("pid").readlink()
     started.close()
     wait_until(lambda: under(started.directory) == [])
+
+
+@pytest.mark.integration
+@needs_audio
+def test_a_program_in_the_jail_sees_and_signals_none_of_the_persons_processes(
+    tmp_path: Path,
+) -> None:
+    victim = subprocess.Popen(["sleep", "60"])  # noqa: S607  # from PATH
+    (tmp_path / "up").touch()
+    probe = (
+        "ls /proc | grep -c '^[0-9]'; "
+        f"kill -0 {victim.pid} 2>/dev/null && echo signalled || echo unreachable"
+    )
+    argv = audio.jail_argv(tmp_path, tmp_path / "up", "demo")
+    argv[-1] = probe
+    try:
+        ran = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=30)  # noqa: S603
+        count, outcome = ran.stdout.split("\n")[:2]
+        assert int(count) < 20  # the jail's own, not the machine's
+        assert outcome == "unreachable"
+        assert victim.poll() is None  # it was not touched
+    finally:
+        victim.kill()
+        victim.wait()
 
 
 @pytest.mark.integration

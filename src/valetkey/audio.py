@@ -14,9 +14,8 @@ off, and its socket is the only thing the browser's sandbox gets. A browser, and
 has taken it over, sees two nodes: it cannot list the person's devices or applications, record
 what they play, change a default, or load a module.
 
-The jail shares the host's PID namespace. In a PID namespace of its own PipeWire cannot tell which
-client is which, and WirePlumber is left with no permissions. The cost is that a process in the jail
-is a process of the same user as seen from the host, which the browser's sandbox is not.
+The jail has a PID namespace of its own, as the browser's sandbox does. It sees only its own
+processes, and a program in it cannot signal one of the person's.
 
 Everything the jail starts lives as long as the supervisor script that runs first. That script
 stops them when the pipe it reads from is closed, which is what happens when valetkey dies, and
@@ -191,10 +190,12 @@ def jail_argv(
     ``directory`` is the graph's own directory, bound read-write at the same path inside, and
     ``upstream`` the person's pulse socket, bound too. ``tag`` marks the stream the graph opens on
     the person's server, so that it can be found there. Nothing else of the host is visible: no
-    network, no devices, no home directory, no session bus. The jail shares the host's PID namespace
-    (see the module's text), so it gets every other namespace but that one.
+    network, no devices, no home directory, no session bus, no process. Every namespace is
+    unshared, the PID namespace too. ``--die-with-parent`` is left out on purpose: it follows the
+    thread that started the jail, and the supervisor's pipe already ends the graph with the daemon.
     """
-    argv = ["bwrap", "--unshare-user", "--unshare-ipc", "--unshare-net", "--unshare-uts"]
+    argv = ["bwrap", "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-net"]
+    argv += ["--unshare-uts"]
     argv += ["--unshare-cgroup", "--new-session", "--hostname", "valetkey-audio"]
     if seccomp_fd is not None:
         argv += ["--seccomp", str(seccomp_fd)]
