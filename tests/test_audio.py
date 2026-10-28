@@ -153,6 +153,7 @@ class Pactl:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
         self.default_source = "vk_mic"
+        self.sources = ["test_mic", "mix.monitor"]
         self.stream_appears_after = 0
         self.fail = False
         self.nodes: list[dict[str, Any]] = []
@@ -168,6 +169,11 @@ class Pactl:
         words = argv[3:]
         if words == ["info"]:
             return f"Server Name: PipeWire\nDefault Source: {self.default_source}\n"
+        if words == ["list", "short", "sources"]:
+            return "".join(
+                f"{n}\t{name}\tPipeWire\ts16le 2ch 48000Hz\tIDLE\n"
+                for n, name in enumerate(self.sources)
+            )
         if words == ["list", "source-outputs"]:
             if self.stream_appears_after > 0:
                 self.stream_appears_after -= 1
@@ -437,6 +443,7 @@ def test_the_capture_stream_is_the_node_of_the_program_that_records(
             "socket": str(graph.socket),
             "node": 48,
             "directory": str(graph.directory),
+            "source": None,
         }
         pactl.nodes = [node(31, "Audio/Sink")]
         assert graph.capture_stream()["node"] is None
@@ -473,3 +480,60 @@ def test_resetting_finds_the_stream_by_its_tag_only(pactl: Pactl) -> None:
         ["set-source-output-mute", "17", "0"],
         ["set-source-output-volume", "17", "100%"],
     ]
+
+
+def test_the_microphone_copies_the_default_source_unless_one_is_named(tmp_path: Path) -> None:
+    audio.write_config(tmp_path, Path("/up"))
+    plain = (tmp_path / "config/pipewire/pipewire.conf.d/10-valetkey.conf").read_text()
+    assert "target.object" not in plain
+    audio.write_config(tmp_path, Path("/up"), "mix.monitor")
+    named = (tmp_path / "config/pipewire/pipewire.conf.d/10-valetkey.conf").read_text()
+    assert 'target.object = "mix.monitor"' in named
+    assert named.count("target.object") == 1
+    with pytest.raises(ValueError, match="not an audio source name"):
+        audio.write_config(tmp_path, Path("/up"), 'x"\n}')
+
+
+def test_the_sources_of_the_persons_server_are_listed_by_name(pactl: Pactl) -> None:
+    assert audio.source_names(Path("/up")) == ["test_mic", "mix.monitor"]
+    pactl.fail = True
+    with pytest.raises(audio.AudioError, match="no server"):
+        audio.source_names(Path("/up"))
+
+
+def test_a_named_source_is_copied_and_reported(tmp_path: Path, pactl: Pactl) -> None:
+    del pactl
+    graph = audio.AudioGraph.start(
+        tmp_path / "graph",
+        tmp_path / "up",
+        "demo",
+        source="mix.monitor",
+        argv=stand_in("cat >/dev/null"),
+    )
+    try:
+        config = (graph.directory / "config/pipewire/pipewire.conf.d/10-valetkey.conf").read_text()
+        assert 'target.object = "mix.monitor"' in config
+        assert graph.source == "mix.monitor"
+        assert graph.capture_stream()["source"] == "mix.monitor"
+    finally:
+        graph.close()
+
+
+def test_a_source_the_server_does_not_have_starts_nothing_and_never_falls_back(
+    tmp_path: Path, pactl: Pactl
+) -> None:
+    del pactl
+    started: list[object] = []
+
+    def argv(*_args: object) -> list[str]:
+        started.append(1)
+        return ["true"]
+
+    with pytest.raises(audio.MissingSourceError) as info:
+        audio.AudioGraph.start(
+            tmp_path / "graph", tmp_path / "up", "demo", source="gone.monitor", argv=argv
+        )
+    assert str(info.value) == 'microphone source "gone.monitor" does not exist on your audio server'
+    assert info.value.source == "gone.monitor"
+    assert started == []  # no jail was started
+    assert not (tmp_path / "graph").exists()  # and no directory left

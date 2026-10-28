@@ -147,6 +147,7 @@ def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]
             "learned": None,
             "private_networks": [],
             "microphone": False,
+            "microphone_source": None,
             "profile": True,
         },
         {
@@ -159,6 +160,7 @@ def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]
             "learned": "2026-10-26T09:00:00Z",
             "private_networks": [],
             "microphone": False,
+            "microphone_source": None,
             "profile": False,
         },
     ]
@@ -2357,6 +2359,7 @@ def test_sites_with_a_site_as_json_is_one_object(
         "learned": "2026-10-26T09:00:00Z",
         "private_networks": ["10.0.0.0/8"],
         "microphone": False,
+        "microphone_source": None,
         "profile": True,
     }
 
@@ -2503,3 +2506,99 @@ def test_doctor_ignores_a_site_whose_policy_cannot_be_read(tmp_path: Path) -> No
     fake = microphone_system(tmp_path)
     sites.policy_path(fake.roots, "other").write_text("{")
     assert "microphone" in results(fake)
+
+
+def test_mic_names_a_source_and_on_or_off_clears_it(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    named = run(capsys, "mic", "sitex", "on", "--source", "mix.monitor")
+    assert named == (0, "sitex: the microphone is now on, copying mix.monitor.\n", "")
+    assert sites.load_policy(roots, "sitex").microphone_source == "mix.monitor"
+    assert run(capsys, "mic", "sitex")[1] == "sitex: the microphone is on, copying mix.monitor.\n"
+    again = run(capsys, "mic", "sitex", "on", "--source", "mix.monitor")
+    assert (
+        again[1] == "sitex: the microphone was already on, copying mix.monitor. Nothing changed.\n"
+    )
+    other = run(capsys, "mic", "sitex", "on", "--source", "other.monitor")
+    assert other[1] == "sitex: the microphone is now on, copying other.monitor.\n"
+    plain = run(capsys, "mic", "sitex", "on")
+    assert plain[1] == "sitex: the microphone is now on.\n"
+    assert sites.load_policy(roots, "sitex").microphone_source is None
+    run(capsys, "mic", "sitex", "on", "--source", "mix.monitor")
+    assert run(capsys, "mic", "sitex", "off")[1] == "sitex: the microphone is now off.\n"
+    cleared = sites.load_policy(roots, "sitex")
+    assert (cleared.microphone, cleared.microphone_source) == (False, None)
+    assert "microphone" not in sites.policy_path(roots, "sitex").read_text()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "words"),
+    [
+        (["off", "--source", "mix.monitor"], "--source goes with on"),
+        (["--source", "mix.monitor"], "--source goes with on"),
+        (["on", "--source", "bad name"], "not an audio source name"),
+    ],
+)
+def test_mic_refuses_a_source_that_does_not_go_with_on_or_is_not_a_name(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str], arguments: list[str], words: str
+) -> None:
+    make_site(roots)
+    status, out, err = run(capsys, "mic", "sitex", *arguments)
+    assert (status, out) == (1, "")
+    assert words in err
+    assert sites.load_policy(roots, "sitex").microphone is False
+
+
+def test_sites_shows_the_source_in_the_lists_and_json(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    main(["mic", "sitex", "on", "--source", "mix.monitor"])
+    capsys.readouterr()
+    assert json.loads(run(capsys, "sites", "--json")[1])[0]["microphone_source"] == "mix.monitor"
+    assert (
+        json.loads(run(capsys, "sites", "sitex", "--json")[1])["microphone_source"] == "mix.monitor"
+    )
+    assert (
+        run(capsys, "sites", "sitex")[1].splitlines()[-1] == "Microphone: on, copying mix.monitor."
+    )
+
+
+def test_doctor_warns_about_a_named_source_the_audio_server_does_not_have(tmp_path: Path) -> None:
+    tools = {name: f"/usr/bin/{name}" for name in ("bwrap", "chromium", "agent-browser")}
+    tools |= {name: f"/usr/bin/{name}" for name in cli.audio.PROGRAMS}
+    fake = microphone_system(tmp_path, tools=tools)
+    other = make_site(fake.roots, "other")
+    sites.save_policy(fake.roots, replace(other, microphone=True, microphone_source="mix.monitor"))
+    sites.save_policy(
+        fake.roots,
+        replace(
+            sites.load_policy(fake.roots, "sitex"),
+            microphone=True,
+            microphone_source="here.monitor",
+        ),
+    )
+    assert fake.roots.runtime is not None
+    socket_path = cli.audio.upstream_socket(fake.roots.runtime)
+    asked = f"pactl --server=unix:{socket_path} list short sources"
+    listing = "1\there.monitor\tPipeWire\ts16le 2ch 48000Hz\tIDLE\n"
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(socket_path))
+        fake.outputs[asked] = (0, listing)
+        found = [(c.name, c.status, c.detail) for c in cli.run_checks(fake.system())]
+        fake.outputs[asked] = (1, "")
+        quiet = [c.name for c in cli.run_checks(fake.system())]
+    warned = [item for item in found if item[0] == "microphone-source"]
+    assert warned == [
+        (
+            "microphone-source",
+            "warn",
+            (
+                "other copies the audio source mix.monitor, which your audio server does not "
+                "have now; its sessions will not start. Create it, or run: valetkey mic other on"
+            ),
+        )
+    ]
+    assert "microphone" in quiet
+    assert "microphone-source" not in quiet  # an audio server that cannot be asked says nothing

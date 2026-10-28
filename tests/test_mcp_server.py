@@ -3589,3 +3589,22 @@ def test_the_microphone_tool_is_a_change_that_is_safe_to_repeat() -> None:
         True,
     )
     assert hints.open_world_hint is False
+
+
+def test_the_microphone_tool_has_no_source_and_a_source_given_anyway_reaches_nothing(
+    short_dir: Path,
+) -> None:
+    async def scenario() -> None:
+        async with asking(short_dir, Person("accept")) as (mcp, fake):
+            tool = next(t for t in (await mcp.list_tools()).tools if t.name == "browser_microphone")
+            assert set(tool.input_schema["properties"]) == {"site", "reason"}
+            # The SDK drops an argument a tool does not declare, before the tool runs.
+            await mcp.call_tool(
+                "browser_microphone", {"site": "sitex", "reason": "r", "source": "system.monitor"}
+            )
+            sent = [request["args"] for request in fake.requests]
+            assert sent
+            assert all("source" not in args for args in sent)
+            assert "system.monitor" not in json.dumps(sent)
+
+    run(scenario())

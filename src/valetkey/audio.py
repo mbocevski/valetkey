@@ -67,7 +67,7 @@ context.modules = [
       args = {{
         tunnel.mode = source
         pulse.server.address = "unix:{upstream}"
-        pulse.latency = 100
+        pulse.latency = 100{target}
         audio.position = [ FL FR ]
         node.name = {source}
         node.description = "Microphone"
@@ -133,6 +133,26 @@ class AudioError(RuntimeError):
     """The private graph could not be started or asked."""
 
 
+class MissingSourceError(AudioError):
+    """The source the person named for the microphone is not on their audio server."""
+
+    def __init__(self, source: str) -> None:
+        """Remember ``source``, the name that was not found."""
+        super().__init__(f'microphone source "{source}" does not exist on your audio server')
+        self.source = source
+
+
+def source_names(upstream: Path) -> list[str]:
+    """Return the names of the sources on the person's audio server, which include monitors.
+
+    Raises:
+        AudioError: when the server cannot be asked.
+
+    """
+    listing = _ask([*_server_args(upstream), "list", "short", "sources"])
+    return [line.split("\t")[1] for line in listing.splitlines() if line.count("\t") >= 1]
+
+
 def upstream_socket(runtime: Path) -> Path:
     """Return the person's pulse socket, which the graph pulls the microphone from."""
     return runtime / "pulse" / "native"
@@ -164,14 +184,23 @@ def missing_programs(which: Callable[[str], str | None] = shutil.which) -> list[
     return [name for name in PROGRAMS if which(name) is None]
 
 
-def write_config(directory: Path, upstream: Path) -> None:
-    """Write the graph's configuration under ``directory``, which must exist."""
+def write_config(directory: Path, upstream: Path, source: str | None = None) -> None:
+    """Write the graph's configuration under ``directory``, which must exist.
+
+    The microphone copies the person's default source, or ``source`` when one is named. The name
+    is checked with :func:`valetkey.sites.validate_source` first, which keeps it safe to write.
+    """
+    target = (
+        "" if source is None else f'\n        target.object = "{sites.validate_source(source)}"'
+    )
     pipewire = directory / "config" / "pipewire" / "pipewire.conf.d"
     wireplumber = directory / "config" / "wireplumber" / "wireplumber.conf.d"
     for path in (pipewire, wireplumber):
         path.mkdir(parents=True, exist_ok=True)
     (pipewire / "10-valetkey.conf").write_text(
-        PIPEWIRE_CONFIG.format(upstream=upstream, source=SOURCE_NODE, sink=SINK_NODE),
+        PIPEWIRE_CONFIG.format(
+            upstream=upstream, source=SOURCE_NODE, sink=SINK_NODE, target=target
+        ),
         encoding="utf-8",
     )
     (wireplumber / "10-valetkey.conf").write_text(WIREPLUMBER_CONFIG, encoding="utf-8")
@@ -278,6 +307,8 @@ class AudioGraph:
     upstream: Path
     process: subprocess.Popen[bytes]
     tag: str
+    source: str | None = None
+    """The source on the person's server that the microphone copies; ``None`` is the default."""
 
     @property
     def socket(self) -> Path:
@@ -290,12 +321,13 @@ class AudioGraph:
         return self.directory / "audio.log"
 
     @classmethod
-    def start(
+    def start(  # noqa: PLR0913  # each is a distinct thing the caller decides
         cls,
         directory: Path,
         upstream: Path,
         tag: str,
         *,
+        source: str | None = None,
         timeout: float = START_TIMEOUT,
         argv: Callable[[Path, Path, str, int | None], list[str]] = jail_argv,
     ) -> AudioGraph:
@@ -304,9 +336,12 @@ class AudioGraph:
         ``directory`` must be short, because a socket's path is limited to about a hundred bytes,
         and ``tag`` unique among the graphs that ever ran against the person's server: a stream
         left over from a graph that has just ended must not be taken for this one's. ``argv``
-        builds the command.
+        builds the command. ``source`` names the source the microphone copies instead of the
+        default one. It must exist, and nothing is started when it does not: there is no falling
+        back to the default, which would hear something else than the person asked for.
 
         Raises:
+            MissingSourceError: when ``source`` is not on the person's audio server.
             AudioError: when the graph does not come up in ``timeout`` seconds, or ends meanwhile.
                 The message ends with the graph's log.
 
@@ -314,9 +349,11 @@ class AudioGraph:
         if len(str(directory / "pulse" / "native")) > MAX_SOCKET_PATH:
             message = f"{directory} is too long for the graph's socket"
             raise AudioError(message)
+        if source is not None and source not in source_names(upstream):
+            raise MissingSourceError(source)
         shutil.rmtree(directory, ignore_errors=True)  # what a graph that was killed left behind
         directory.mkdir(parents=True, mode=0o700)
-        write_config(directory, upstream)
+        write_config(directory, upstream, source)
         filter_fd = seccomp.open_filter()
         try:
             with (directory / "audio.log").open("ab") as log:
@@ -331,7 +368,7 @@ class AudioGraph:
         finally:
             if filter_fd is not None:
                 os.close(filter_fd)
-        graph = cls(directory, upstream, process, tag)
+        graph = cls(directory, upstream, process, tag, source)
         try:
             graph._await_ready(timeout)
         except BaseException:
@@ -416,6 +453,7 @@ class AudioGraph:
     def capture_stream(self) -> dict[str, object]:
         """Describe where a recorder finds the browser's capture stream.
 
+        ``source`` is the source the microphone copies (``None`` for the person's default),
         ``socket`` is the graph's PulseAudio socket and ``node`` the number of the capture node
         (the oldest, when the browser records twice), or ``None`` while nothing records or when the
         graph cannot be asked. The graph's PipeWire socket is in ``directory``.
@@ -428,6 +466,7 @@ class AudioGraph:
             "socket": str(self.socket),
             "node": nodes[0] if nodes else None,
             "directory": str(self.directory),
+            "source": self.source,
         }
 
     def close(self) -> None:

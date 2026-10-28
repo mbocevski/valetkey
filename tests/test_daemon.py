@@ -1049,6 +1049,7 @@ def test_a_login_learns_a_policy_and_reports_it_once(roots: sites.Roots) -> None
                     "denied": [],
                     "learned": None,
                     "microphone": False,
+                    "microphone_source": None,
                     "summary": None,
                 }
             ]
@@ -3761,6 +3762,7 @@ def test_status_without_a_site_says_what_is_running(roots: sites.Roots) -> None:
                         "contained": True,
                         "host": "sitex.test",
                         "microphone": False,
+                        "source": None,
                         "idle_seconds": 0,
                         "closes_at": "2026-10-27T12:15:00Z",
                     }

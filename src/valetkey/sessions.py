@@ -830,14 +830,15 @@ class Session:
         binary_path = _resolve_binary(binary)
         runtime = sites.runtime_path(roots).parent
         chrome_major = sandbox.installed_chrome_major(executable)
+        heard = sites.load_policy(roots, site) if microphone else None
         for attempt in range(LAUNCH_ATTEMPTS):
             _prepare(roots, paths)
             open_command = launch_command(binary_path, paths, start_url, executable, chrome_major)
             script = holder_script(paths, binary_path, open_command, runtime)
             session = cls(paths, runtime, binary_path, timeout, Page(start_url, ""))
             try:
-                if microphone:
-                    session._audio = session._start_audio()
+                if heard is not None:
+                    session._audio = session._start_audio(heard.microphone_source)
                 box = sandbox.Sandbox(
                     profile_dir=paths.profile_dir,
                     writable_dirs=(paths.incoming_dir, paths.screenshots_dir),
@@ -847,7 +848,7 @@ class Session:
                     shared_dir=paths.driver_dir,
                     policy_dir=sandbox.write_chrome_policy(
                         paths.directory / "chrome-policy",
-                        audio.capture_urls(sites.load_policy(roots, site)) if microphone else (),
+                        audio.capture_urls(heard) if heard is not None else (),
                     ),
                     audio_socket=None if session._audio is None else session._audio.socket,
                     allow_ptrace=allow_ptrace,
@@ -869,14 +870,22 @@ class Session:
 
     # -- lifecycle --
 
-    def _start_audio(self) -> audio.AudioGraph:
-        """Start the private audio graph for the microphone, from the person's pulse socket."""
+    def _start_audio(self, source: str | None) -> audio.AudioGraph:
+        """Start the private audio graph for the microphone, from the person's pulse socket.
+
+        ``source`` is the source the person named for the site, or ``None`` for their default. A
+        named source that is not there fails the start, and says how to put it right.
+        """
         try:
             return audio.AudioGraph.start(
                 self.paths.audio_dir,
                 audio.upstream_socket(self._runtime),
                 f"{sites.storage_key(self.paths.site)}-{secrets.token_hex(4)}",
+                source=source,
             )
+        except audio.MissingSourceError as error:
+            message = f"{error}; create it, or run: valetkey mic {self.paths.site} on"
+            raise SessionError(message) from error
         except audio.AudioError as error:
             message = (
                 f"the microphone is on for {self.paths.site}, but its audio did not start: {error}"

@@ -205,7 +205,7 @@ for it and ended with it. The graph has two nodes: a microphone that pulls from 
 source, and a silent output for the call. Only that graph's socket is in the browser's sandbox.
 Anything that has taken over the browser sees those two nodes. It cannot list yours, record
 your sound, change a default or load a module, and nothing in your own audio configuration
-changes. Chrome may record without a prompt, because nobody sees one, but only on the start page's origin and the site's own domain with its subdomains. A sign-in provider or CDN the site may reach cannot.
+changes. Chrome may record without a prompt, because nobody sees one, but only on the start page's origin and the site's own domain with its subdomains. A sign-in provider or CDN cannot.
 
 The graph runs in a jail of its own: no network, no devices, a read-only system, its own
 directory, your audio socket, and the same syscall filter as the browser. When the browser is
@@ -213,6 +213,12 @@ killed, the daemon ends the session within a second or two, and the graph with i
 browser, the jail has a process namespace of its own, so it sees none of your processes and cannot
 signal them. A compromised audio server still has the full reach of your audio socket, which the
 browser does not.
+
+The microphone copies your default source. You can name another with
+`valetkey mic SITE on --source NAME`, such as the monitor of an output that mixes a call with your
+microphone. A named source can carry anything you hear, system sound included. So only you can set
+it: `browser_microphone` has no such argument, and an agent cannot ask for one. If the source is
+missing, the session does not start, and it never falls back to your default.
 
 A recorder on your machine can find the capture stream of a session in `valetkey status --json`
 (see [commands](commands.md#seeing-what-runs)), and listens to what the call plays through the

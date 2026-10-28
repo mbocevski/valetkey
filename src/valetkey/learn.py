@@ -567,6 +567,7 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
         ),
         private_networks=existing.private_networks if existing else (),
         microphone=existing.microphone if existing else False,
+        microphone_source=existing.microphone_source if existing else None,
     )
 
 

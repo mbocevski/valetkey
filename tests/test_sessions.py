@@ -1634,8 +1634,10 @@ class FakeGraph:
 
     made: ClassVar[list[FakeGraph]] = []
 
-    def __init__(self, directory: Path, upstream: Path, tag: str) -> None:
-        self.directory, self.upstream, self.tag = directory, upstream, tag
+    def __init__(
+        self, directory: Path, upstream: Path, tag: str, *, source: str | None = None
+    ) -> None:
+        self.directory, self.upstream, self.tag, self.source = directory, upstream, tag, source
         self.socket = directory / "pulse" / "native"
         self.alive = True
         self.closed = 0
@@ -1645,7 +1647,12 @@ class FakeGraph:
         return self.alive
 
     def capture_stream(self) -> dict[str, object]:
-        return {"socket": str(self.socket), "node": 52, "directory": str(self.directory)}
+        return {
+            "socket": str(self.socket),
+            "node": 52,
+            "directory": str(self.directory),
+            "source": self.source,
+        }
 
     def close(self) -> None:
         self.closed += 1
@@ -1724,7 +1731,7 @@ def test_a_graph_that_does_not_start_fails_the_session_and_starts_no_browser(
     save_policy(tmp_path)
     fake = FakeStart(monkeypatch, READY)
 
-    def broken(*_args: object) -> None:
+    def broken(*_args: object, **_options: object) -> None:
         message = "the audio graph ended at start"
         raise audio.AudioError(message)
 
@@ -1737,6 +1744,36 @@ def test_a_graph_that_does_not_start_fails_the_session_and_starts_no_browser(
         "the microphone is on for demo, but its audio did not start: the audio graph ended at start"
     )
     assert fake.boxes == []
+
+
+def test_a_named_source_goes_to_the_graph_and_a_missing_one_fails_the_open_with_the_fix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graphs: list[FakeGraph]
+) -> None:
+    roots = make_roots(tmp_path)
+    policy = sites.Policy("demo", "http://site.test/", ("site.test",))
+    sites.save_policy(roots, replace(policy, microphone=True, microphone_source="mix.monitor"))
+    fake = FakeStart(monkeypatch, READY)
+    session = sessions.Session.start(
+        roots, "demo", "http://site.test/", timeout=10, microphone=True
+    )
+    try:
+        assert graphs[0].source == "mix.monitor"
+        assert (session.capture_stream() or {})["source"] == "mix.monitor"
+    finally:
+        session.close()
+
+    def missing(*_args: object, **_options: object) -> None:
+        raise audio.MissingSourceError("mix.monitor")  # noqa: EM101
+
+    monkeypatch.setattr(audio.AudioGraph, "start", staticmethod(missing))
+    fake.boxes.clear()
+    with pytest.raises(sessions.SessionError) as info:
+        sessions.Session.start(roots, "demo", "http://site.test/", timeout=10, microphone=True)
+    assert str(info.value) == (
+        'microphone source "mix.monitor" does not exist on your audio server; '
+        "create it, or run: valetkey mic demo on"
+    )
+    assert fake.boxes == []  # no browser was started
 
 
 def test_a_graph_ends_with_a_session_that_fails_to_load_its_first_page(

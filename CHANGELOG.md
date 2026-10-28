@@ -10,6 +10,7 @@ Changes that affect users of valetkey. The format follows
 
 - An approval command exits with 75 when nobody answered, which expires the question and remembers nothing, or 69 when it could not ask, which hands the question to a notification. 0 is yes and any other status is no.
 - `valetkey watch --wait` waits for a daemon instead of exiting, prints `{"event":"daemon_stopped"}` when it ends, and prints the snapshot again when the next one runs; it never starts one.
+- `valetkey mic SITE on --source NAME` makes a site's microphone copy the audio source you name instead of your default, and a session fails to open if that source is missing. Only you can set it.
 - `browser_sites` shows `microphone: on` for a site that has the microphone on, so an agent can tell whether `browser_microphone` needs to ask.
 - `valetkey mic` turns on the microphone for a site, and `browser_microphone` lets an agent ask you to. A session then hears only the microphone, through a private audio graph, and `status`, `watch` and `sites` show it.
 - `browser_snapshot` with a `selector` says how many elements the selector matches when it matches more than one, and that only the first is shown.

@@ -71,6 +71,7 @@ _OPTIONAL_POLICY_KEYS = (
     "login_cookies",
     "login_pages",
     "microphone",
+    "microphone_source",
     "private_networks",
 )
 
@@ -676,6 +677,9 @@ class Policy:
     ``microphone`` says that the site's sessions may record the person's microphone, through a
     private audio graph (see :mod:`valetkey.audio`). Only the person turns it on, and it is off
     when the key is missing. It is written only when it is on.
+    ``microphone_source`` names the source on the person's audio server that the microphone
+    copies, instead of the default one. Only the person sets it, with ``valetkey mic``; it is
+    only ever set while ``microphone`` is on, and is written only when set.
     ``ignored`` are the ``allow`` entries that :func:`load_policy` dropped because each is a
     public suffix (``github.io``), which would let the site reach every unrelated host under
     it. It is never written to the file.
@@ -693,6 +697,7 @@ class Policy:
     denied: tuple[str, ...] = ()
     login_cookies: tuple[str, ...] = ()
     microphone: bool = False
+    microphone_source: str | None = None
     ignored: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -720,10 +725,36 @@ class Policy:
         ):
             msg = "login_cookies must be at most 20 entries like 'host name'"
             raise ValueError(msg)
+        _validate_source(self.microphone, self.microphone_source)
         for network in self.private_networks:
             if not (isinstance(network, str) and private_network(network) == network):
                 msg = f"not a private range written as 10.20.0.0/16: {network!r}"
                 raise ValueError(msg)
+
+
+_SOURCE_RE = re.compile(r"[A-Za-z0-9_.:@+-]{1,200}")
+
+
+def validate_source(name: str) -> str:
+    """Return ``name`` if it can name a source on an audio server, else raise ``ValueError``.
+
+    Source names are letters, digits and ``_ . : @ + -``, as the names of devices and of the
+    monitor of an output are (``alsa_input.usb-Mic-00.analog-stereo``, ``mix.monitor``). The
+    limit also keeps the name safe to write into a configuration file.
+    """
+    if not (isinstance(name, str) and _SOURCE_RE.fullmatch(name)):
+        msg = f"not an audio source name (letters, digits and _ . : @ + - only): {name!r}"
+        raise ValueError(msg)
+    return name
+
+
+def _validate_source(microphone: bool, source: str | None) -> None:  # noqa: FBT001
+    if source is None:
+        return
+    validate_source(source)
+    if not microphone:
+        msg = "microphone_source is only for a site with the microphone on"
+        raise ValueError(msg)
 
 
 def _validate_start(start: str) -> None:
@@ -887,7 +918,7 @@ def load_policy(roots: Roots, site: str, suffixes: SuffixList | None = None) -> 
 
     The file must be a JSON object with the keys ``site``, ``start``, ``allow``, ``excluded``
     and ``learned``, and may also have ``denied``, ``login_cookies``, ``login_pages``,
-    ``microphone`` and ``private_networks``. A
+    ``microphone``, ``microphone_source`` and ``private_networks``. A
     file without ``denied`` is one from before it existed: it has none, and its ``excluded``
     entries stay what a login left out, built again by the next login. Missing keys and
     unknown keys are both errors, and ``site`` must equal the file name. An ``allow`` entry that
@@ -930,6 +961,7 @@ def load_policy(roots: Roots, site: str, suffixes: SuffixList | None = None) -> 
                 _hosts(data, "private_networks") if "private_networks" in data else ()
             ),
             microphone=_flag(data, "microphone"),
+            microphone_source=data.get("microphone_source"),
         )
     except ValueError as exc:
         msg = f"{path}: {exc}"
@@ -1001,6 +1033,8 @@ def policy_json(policy: Policy) -> str:
         data["private_networks"] = list(policy.private_networks)
     if policy.microphone:
         data["microphone"] = True
+    if policy.microphone_source is not None:
+        data["microphone_source"] = policy.microphone_source
     return json.dumps(data, indent=2) + "\n"
 
 

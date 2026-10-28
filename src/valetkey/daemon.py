@@ -608,6 +608,7 @@ class Daemon:
                     "contained": True,
                     "host": state.host,
                     "microphone": state.microphone,
+                    "source": state.microphone_source,
                 }
                 if captures is not None and name in captures:
                     entry_now["capture"] = captures[name]
@@ -666,6 +667,7 @@ class Daemon:
                     if policy and policy.learned
                     else None,
                     "microphone": policy.microphone if policy else False,
+                    "microphone_source": policy.microphone_source if policy else None,
                     "summary": state.summary,
                 }
             )
@@ -719,6 +721,7 @@ class Daemon:
         result.pop("_value")
         result["state"] = "session"
         result["microphone"] = state.microphone
+        result["source"] = state.microphone_source
         if state.microphone and (capture := (await self._captures()).get(site)) is not None:
             result["capture"] = capture
         return result

@@ -49,8 +49,9 @@ learned, the private address ranges it may reach (a dash for none), and whether
 a login profile exists. With --json, each site is an object with the keys site,
 account (the part after the colon of sitex:work, or null), host, allowed,
 excluded, denied, learned (a UTC time, or null), private_networks (a list),
-microphone (true or false) and profile (true or false). A site with several
-accounts has a line for each.
+microphone (true or false), microphone_source (a name, or null for the default
+source) and profile (true or false). A site with several accounts has a line for
+each.
 
 With a site, it prints that one site's complete lists instead: the hosts it may
 reach, the hosts its last login left out and the hosts you denied, one to a
@@ -132,9 +133,16 @@ microphone and a silent output in it, and nothing else of your audio (see [Secur
 It needs PipeWire with its PulseAudio server, and WirePlumber, on your machine. `valetkey doctor`
 checks for them when some site has the microphone on.
 
+The microphone copies your default source. `valetkey mic SITE on --source NAME` makes it copy the
+source you name instead, such as the monitor of an output that mixes a call with your microphone.
+A session of a site whose source does not exist fails to open and says so, and never falls back to
+the default. `valetkey mic SITE on` without `--source` goes back to the default, and `off` clears
+it. `valetkey doctor` warns about a source your audio server does not have. Only you can name a
+source (see [Security](security.md)).
+
 <!-- begin: valetkey mic --help -->
 ```text
-Usage: valetkey mic SITE [ARGS]
+Usage: valetkey mic [OPTIONS] SITE [ARGS]
 
 Show, turn on or turn off the microphone for a site.
 
@@ -145,12 +153,21 @@ sessions that start afterwards; a running one keeps its setting until it is
 closed. The setting is off for every site until you turn it on, and an agent can
 only ask you to. Without a setting this prints the current one.
 
+With --source NAME the microphone copies that source of your audio server
+instead of the default one, such as the monitor of an output that mixes a call
+with your microphone. A named source can carry anything you hear, so only you
+can set it: an agent cannot ask for one. A session fails to start, and says so,
+when the source does not exist; it never falls back to the default. on without
+--source goes back to the default, and off clears it.
+
 Parameters:
   SITE, --site: The site name, as shown by valetkey sites, with its account
 (sitex:work) when
   the site has more than one. [required]
   SETTING, --setting: on or off. Leave it out to show the setting. [choices: on,
 off]
+  --source STR: With on: the source on your audio server that the microphone
+copies.
 ```
 <!-- end: valetkey mic --help -->
 
@@ -335,9 +352,10 @@ session from it. A browser that was killed disappears within a second or two.
 The daemon is not started: when none runs, this says so and exits 0.
 
 With --json the output is an object with three lists. "sessions" holds objects
-with the keys site, since, contained, host, microphone, idle_seconds and
-closes_at. A session with the microphone on also has "capture", where a recorder
-finds its capture stream: "socket" is the session's private PulseAudio socket,
+with the keys site, since, contained, host, microphone, source, idle_seconds and
+closes_at. "source" is the source the microphone copies, or null for the default
+one. A session with the microphone on also has "capture", where a recorder finds
+its capture stream: "socket" is the session's private PulseAudio socket,
 "directory" holds its PipeWire socket, and "node" is the number of the PipeWire
 node the browser records with, or null while nothing records. "logins" holds
 objects with the keys site and since. "bridges" holds objects with the keys

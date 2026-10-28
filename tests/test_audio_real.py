@@ -28,6 +28,7 @@ from test_cli_daemon import local_proxy_options
 from test_daemon import Rig, run, serving
 
 from valetkey import audio, sessions, sites
+from valetkey.client import DaemonError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -388,10 +389,16 @@ def site_roots(server: throwaway_audio.ThrowawayAudio) -> sites.Roots:
     return sites.Roots(server.base / "cfg", server.base / "state", server.runtime)
 
 
-def save_site(roots: sites.Roots, *, microphone: bool) -> None:
+def save_site(roots: sites.Roots, *, microphone: bool, source: str | None = None) -> None:
     sites.save_policy(
         roots,
-        sites.Policy("demo", "http://localhost/", ("localhost",), microphone=microphone),
+        sites.Policy(
+            "demo",
+            "http://localhost/",
+            ("localhost",),
+            microphone=microphone,
+            microphone_source=source,
+        ),
     )
 
 
@@ -441,10 +448,11 @@ def test_a_session_with_the_microphone_records_and_one_without_cannot(
 def build_daemon_rig(
     server: throwaway_audio.ThrowawayAudio,
     pages: PageServer,
+    source: str | None = None,
     **options: float,
 ) -> tuple[sites.Roots, contextlib.AbstractAsyncContextManager[Rig]]:
     roots = site_roots(server)
-    save_site(roots, microphone=True)
+    save_site(roots, microphone=True, source=source)
     return roots, serving(
         roots,
         session_factory=None,
@@ -517,4 +525,74 @@ def test_the_jail_is_gone_after_the_browser_is_killed(
 
     with PageServer(PAGES) as pages:
         roots, rig_context = build_daemon_rig(server, pages)
+        run(scenario(roots, rig_context))
+
+
+# -- the source the microphone copies -------------------------------------------------------
+
+
+@pytest.mark.integration
+@needs_audio
+def test_a_named_source_is_what_the_session_hears_instead_of_the_default(
+    server: throwaway_audio.ThrowawayAudio,
+) -> None:
+    default = audio.AudioGraph.start(server.base / "g", server.socket, "plain")
+    try:
+        assert abs(tone(record(default.socket))[1] - throwaway_audio.TONE_HERTZ) < 40
+        assert default.capture_stream()["source"] is None
+    finally:
+        default.close()
+    named = audio.AudioGraph.start(
+        server.base / "g", server.socket, "named", source=f"{throwaway_audio.DESKTOP}.monitor"
+    )
+    try:
+        level, pitch = tone(record(named.socket))
+        assert level > 0.05
+        assert (
+            abs(pitch - throwaway_audio.DESKTOP_HERTZ) < 60
+        )  # the desktop tone, not the microphone's
+        # Nothing else changed: still the two nodes, and the person's server is as it was.
+        assert names(named.socket, "sources") == ["vk_mic", "vk_out.monitor"]
+        assert names(named.socket, "sinks") == ["vk_out"]
+        assert pactl(named.socket, "load-module", "module-null-sink").returncode != 0
+        assert f"Default Source: {throwaway_audio.MICROPHONE}" in server.pactl("info")
+        assert named.capture_stream()["source"] == f"{throwaway_audio.DESKTOP}.monitor"
+    finally:
+        named.close()
+
+
+@pytest.mark.integration
+@needs_audio
+def test_a_source_that_is_not_there_starts_no_graph_and_does_not_fall_back(
+    server: throwaway_audio.ThrowawayAudio,
+) -> None:
+    directory = server.base / "g"
+    with pytest.raises(audio.MissingSourceError, match=r'"gone.monitor" does not exist'):
+        audio.AudioGraph.start(directory, server.socket, "demo", source="gone.monitor")
+    assert not directory.exists()
+    assert under(directory) == []
+
+
+@pytest.mark.integration
+@needs_browser
+def test_opening_a_site_whose_source_is_gone_fails_with_the_fix_and_leaves_nothing(
+    server: throwaway_audio.ThrowawayAudio,
+) -> None:
+    async def scenario(
+        roots: sites.Roots, rig_context: contextlib.AbstractAsyncContextManager[Rig]
+    ) -> None:
+        async with rig_context as rig, await rig.connect() as c:
+            with pytest.raises(DaemonError) as info:
+                await c.call("open", site="demo")
+            assert (
+                'microphone source "gone.monitor" does not exist on your audio server; '
+                "create it, or run: valetkey mic demo on"
+            ) in info.value.message
+            assert (await c.call("status"))["sessions"] == []
+            assert under(graph_directory(roots)) == []
+            assert not graph_directory(roots).exists()
+            assert (await c.call("status", site="demo"))["state"] == "idle"
+
+    with PageServer(PAGES) as pages:
+        roots, rig_context = build_daemon_rig(server, pages, source="gone.monitor")
         run(scenario(roots, rig_context))

@@ -78,12 +78,14 @@ async def announce_session(
     site: str,
     *,
     microphone: bool = False,
+    source: str | None = None,
     which: Callable[[str], str | None] = shutil.which,
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = asyncio.create_subprocess_exec,
 ) -> None:
     """Tell the person, with ``notify-send``, that a session for ``site`` started.
 
-    With ``microphone`` the message says that the session can hear the microphone.
+    With ``microphone`` the message says that the session can hear the microphone, and with
+    ``source`` which source of the person's audio server it copies.
 
     Nothing happens when ``notify-send`` is not installed. Only the site name, which valetkey
     validated, goes into the message; nothing from a page does. A notification that does not
@@ -96,6 +98,8 @@ async def announce_session(
     message = f"valetkey: a browser session for {site} started"
     if microphone:
         message += ", with the microphone on"
+        if source is not None:
+            message += f" (source {source})"
     try:
         process = await spawn(
             program,
@@ -447,8 +451,16 @@ class Sessions:
         state.last_used = self._idle_clock()
         state.host = host_of(policy.start)
         state.microphone = policy.microphone
-        self.registry.emit("session_started", state.name, microphone=state.microphone)
-        task = asyncio.ensure_future(self._announce(state.name, microphone=state.microphone))
+        state.microphone_source = policy.microphone_source
+        self.registry.emit(
+            "session_started",
+            state.name,
+            microphone=state.microphone,
+            source=state.microphone_source,
+        )
+        task = asyncio.ensure_future(
+            self._announce(state.name, microphone=state.microphone, source=state.microphone_source)
+        )
         self.background.add(task)
         task.add_done_callback(self.background.discard)
         self._end_startup_burst(state, proxy)
@@ -496,6 +508,7 @@ class Sessions:
             state.session = state.proxy = None
             state.kind = "idle"
             state.microphone = False
+            state.microphone_source = None
             if session is not None:
                 try:
                     await asyncio.to_thread(session.close)
@@ -816,10 +829,14 @@ class Sessions:
         message = f"the {state.name} browser has exited; open the site again"
         raise DaemonError(code, message)
 
-    async def _announce(self, site: str, *, microphone: bool = False) -> None:
+    async def _announce(
+        self, site: str, *, microphone: bool = False, source: str | None = None
+    ) -> None:
         """Run the announcer; a failure to tell the person never reaches the session."""
         try:
-            if microphone:
+            if source is not None:
+                await self._announcer(site, microphone=True, source=source)
+            elif microphone:
                 await self._announcer(site, microphone=True)
             else:
                 await self._announcer(site)

@@ -40,6 +40,8 @@ class Site:
     kind: str = "idle"
     microphone: bool = False
     """Whether the running session has the microphone: what the policy said when it started."""
+    microphone_source: str | None = None
+    """The source the running session's microphone copies; ``None`` is the default one."""
     session: BrowserSession | None = None
     proxy: Proxy | None = None
     window: LoginWindow | None = None
@@ -194,7 +196,7 @@ class Registry:
         if (state := self.sites.get(name)) is not None:
             state.last_used = self._idle_clock()
 
-    def emit(
+    def emit(  # noqa: PLR0913  # what happened, to whom, and the details of it
         self,
         event: str,
         site: str | None = None,
@@ -202,16 +204,18 @@ class Registry:
         bridge: str | None = None,
         reason: str | None = None,
         microphone: bool | None = None,
+        source: str | None = None,
     ) -> None:
         """Tell every `watch` client that ``event`` happened to ``site`` or to ``bridge``.
 
-        A session that started says whether it has the microphone.
+        A session that started says whether it has the microphone, and the source it copies.
         """
         message: dict[str, Any] = {"event": event}
         if site is not None:
             message["site"] = site
         if microphone is not None:
             message["microphone"] = microphone
+            message["source"] = source
         if reason is not None:
             message["reason"] = reason
         if bridge is not None:

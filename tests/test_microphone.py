@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from test_daemon import (
+    NOW,
     FakeNotifier,
     Notifier,
     add_site,
@@ -17,7 +18,7 @@ from test_daemon import (
     write_approver,
 )
 
-from valetkey import approvals, notify, session_ops, sites
+from valetkey import approvals, learn, notify, session_ops, sites
 from valetkey.client import DaemonError
 
 if TYPE_CHECKING:
@@ -450,3 +451,168 @@ def test_the_question_for_the_microphone_in_a_client_says_what_turning_it_on_doe
     assert "The agent says: (nothing)" in text
     assert "valetkey mic" in text
     assert approvals.manual_microphone_command("sitex:work") == "valetkey mic sitex:work on"
+
+
+# -- the source the microphone copies -----------------------------------------------------
+
+
+def with_source(roots: sites.Roots, source: str | None) -> None:
+    policy = sites.load_policy(roots, "sitex")
+    sites.save_policy(roots, replace(policy, microphone=True, microphone_source=source))
+
+
+def test_a_named_source_is_kept_in_the_policy_and_written_only_when_set(roots: sites.Roots) -> None:
+    add_site(roots)
+    with_source(roots, None)
+    assert "microphone_source" not in sites.policy_path(roots, "sitex").read_text()
+    with_source(roots, "alsa_input.usb-Mic-00.analog-stereo")
+    written = json.loads(sites.policy_path(roots, "sitex").read_text())
+    assert written["microphone_source"] == "alsa_input.usb-Mic-00.analog-stereo"
+    assert (
+        sites.load_policy(roots, "sitex").microphone_source == "alsa_input.usb-Mic-00.analog-stereo"
+    )
+
+
+@pytest.mark.parametrize("name", ["", "a b", 'a"b', "a\nb", "a/b", "a;b", "x" * 201, "ö", "a]b"])
+def test_a_source_name_that_could_not_be_written_safely_is_refused(name: str) -> None:
+    with pytest.raises(ValueError, match="not an audio source name"):
+        sites.validate_source(name)
+    with pytest.raises(ValueError, match="not an audio source name"):
+        replace(
+            sites.Policy("sitex", "https://x.test/", ("x.test",)),
+            microphone=True,
+            microphone_source=name,
+        )
+
+
+@pytest.mark.parametrize("name", ["mix.monitor", "bluez_input.AA:BB:CC", "a-b_c+d@e.f", "x" * 200])
+def test_the_names_of_devices_and_monitors_are_accepted(name: str) -> None:
+    assert sites.validate_source(name) == name
+
+
+def test_a_source_needs_the_microphone_on_and_a_policy_file_with_one_is_refused(
+    roots: sites.Roots,
+) -> None:
+    with pytest.raises(ValueError, match="only for a site with the microphone on"):
+        sites.Policy("sitex", "https://x.test/", ("x.test",), microphone_source="mix.monitor")
+    add_site(roots)
+    path = sites.policy_path(roots, "sitex")
+    data = json.loads(path.read_text()) | {"microphone_source": "mix.monitor"}
+    path.write_text(json.dumps(data))
+    with pytest.raises(sites.PolicyError, match="only for a site with the microphone on"):
+        sites.load_policy(roots, "sitex")
+    path.write_text(json.dumps(data | {"microphone": True, "microphone_source": 7}))
+    with pytest.raises(sites.PolicyError, match="not an audio source name"):
+        sites.load_policy(roots, "sitex")
+
+
+def test_a_login_keeps_the_source(roots: sites.Roots) -> None:
+    add_site(roots)
+    with_source(roots, "mix.monitor")
+    policy = sites.load_policy(roots, "sitex")
+    assert sites.allow_host(policy, "cdn.assets.test")[0].microphone_source == "mix.monitor"
+    merged = learn.merge(
+        policy, learn.Classification(("sitex.test",), ()), "https://sitex.test/", NOW
+    )
+    assert merged.microphone_source == "mix.monitor"
+
+
+def test_a_session_says_which_source_it_copies_everywhere_it_says_it_has_the_microphone(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots, "sitex")
+    add_site(roots, "another")
+    with_source(roots, "mix.monitor")
+    told: list[tuple[str, dict[str, Any]]] = []
+
+    async def announcer(site: str, **options: Any) -> None:  # noqa: ANN401
+        told.append((site, options))
+
+    async def scenario() -> None:
+        async with (
+            serving(roots, announcer=announcer) as rig,
+            await rig.connect() as c,
+            await rig.connect() as w,
+        ):
+            stream = w.watch()
+            await next_event(stream)
+            await c.call("open", site="another")
+            started = await next_event(stream)
+            assert (started["microphone"], started["source"]) == (False, None)
+            await c.call("open", site="sitex")
+            started = await next_event(stream)
+            assert (started["microphone"], started["source"]) == (True, "mix.monitor")
+            rig.factory.made[1].capture = {"socket": "/s", "node": 52, "source": "mix.monitor"}
+            listing = {s["site"]: s for s in (await c.call("status"))["sessions"]}
+            assert listing["another"]["source"] is None
+            assert listing["sitex"]["source"] == "mix.monitor"
+            assert listing["sitex"]["capture"]["source"] == "mix.monitor"
+            assert (await c.call("status", site="sitex"))["source"] == "mix.monitor"
+            assert (await c.call("status", site="another"))["source"] is None
+            async with await rig.connect() as late:
+                snapshot = await next_event(late.watch())
+            assert {s["site"]: s["source"] for s in snapshot["sessions"]} == {
+                "another": None,
+                "sitex": "mix.monitor",
+            }
+            sites_now = {
+                s["site"]: s["microphone_source"] for s in (await c.call("sites"))["sites"]
+            }
+            assert sites_now == {"another": None, "sitex": "mix.monitor"}
+            await c.call("close", site="sitex")
+            assert rig.daemon.registry.state("sitex").microphone_source is None
+            await stream.aclose()
+
+    run(scenario())
+    assert sorted(told) == [
+        ("another", {}),
+        ("sitex", {"microphone": True, "source": "mix.monitor"}),
+    ]
+
+
+def test_the_start_notification_names_the_source(
+    real_announce: Callable[..., Awaitable[None]],
+) -> None:
+    messages: list[str] = []
+
+    async def spawn(*args: Any, **_kwargs: Any) -> FakeNotifier:  # noqa: ANN401
+        messages.append(args[-1])
+        return FakeNotifier()
+
+    run(real_announce("sitex", microphone=True, which=lambda _n: "/x", spawn=spawn))
+    run(
+        real_announce(
+            "sitex", microphone=True, source="mix.monitor", which=lambda _n: "/x", spawn=spawn
+        )
+    )
+    assert messages == [
+        "valetkey: a browser session for sitex started, with the microphone on",
+        (
+            "valetkey: a browser session for sitex started, with the microphone on "
+            "(source mix.monitor)"
+        ),
+    ]
+
+
+def test_asking_for_the_microphone_never_carries_a_source_and_never_sets_one(
+    roots: sites.Roots, tmp_path: Path
+) -> None:
+    add_site(roots)
+    seen = tmp_path / "stdin.json"
+    write_approver(roots, f"cat > {seen}\nexit 0")
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            answer = await c.call(
+                "microphone_ask", site="sitex", reason="r", source="system.monitor"
+            )
+            assert answer["result"] == "allowed"
+
+    run(scenario())
+    assert json.loads(seen.read_text()) == {
+        "site": "sitex",
+        "permission": "microphone",
+        "reason": "r",
+    }
+    policy = sites.load_policy(roots, "sitex")
+    assert (policy.microphone, policy.microphone_source) == (True, None)

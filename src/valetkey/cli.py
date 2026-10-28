@@ -223,7 +223,8 @@ def list_sites(
     may reach (a dash for none), and whether a login profile exists. With --json, each site is an
     object with the keys site, account (the part after the colon of ``sitex:work``, or null),
     host, allowed, excluded, denied, learned (a UTC time, or null), ``private_networks`` (a list),
-    microphone (true or false) and profile (true or false). A site with several accounts has a
+    microphone (true or false), microphone_source (a name, or null for the default source) and
+    profile (true or false). A site with several accounts has a
     line for each.
 
     With a site, it prints that one site's complete lists instead: the hosts it may reach, the
@@ -266,6 +267,7 @@ def list_sites(
                 "learned": _learned(policy),
                 "private_networks": list(policy.private_networks),
                 "microphone": policy.microphone,
+                "microphone_source": policy.microphone_source,
                 "profile": sites.profile_path(roots, name).is_dir(),
             }
         )
@@ -296,6 +298,7 @@ def _show_site(roots: sites.Roots, policy: sites.Policy, *, as_json: bool) -> in
                     "learned": _learned(policy),
                     "private_networks": list(policy.private_networks),
                     "microphone": policy.microphone,
+                    "microphone_source": policy.microphone_source,
                     "profile": sites.profile_path(roots, policy.site).is_dir(),
                 },
                 indent=2,
@@ -314,7 +317,7 @@ def _show_site(roots: sites.Roots, policy: sites.Policy, *, as_json: bool) -> in
         _say(f"{label} ({len(hosts)}):")
         for host in hosts:
             _say(f"  {host}")
-    _say(f"Microphone: {'on' if policy.microphone else 'off'}.")
+    _say(f"Microphone: {_mic_text(policy)}.")
     return 0
 
 
@@ -597,8 +600,25 @@ def deny(site: str, host: str | None = None, *, network: PrivateNetwork = None) 
     return 0
 
 
+MicSource = Annotated[
+    str | None,
+    Parameter(
+        name="--source",
+        help="With on: the source on your audio server that the microphone copies.",
+    ),
+]
+
+
+def _mic_text(policy: sites.Policy) -> str:
+    if not policy.microphone:
+        return "off"
+    if policy.microphone_source is None:
+        return "on"
+    return f"on, copying {policy.microphone_source}"
+
+
 @app.command
-def mic(site: str, setting: Literal["on", "off"] | None = None) -> int:
+def mic(site: str, setting: Literal["on", "off"] | None = None, *, source: MicSource = None) -> int:
     """Show, turn on or turn off the microphone for a site.
 
     With the microphone on, the site's browser sessions can record what the microphone hears, and
@@ -607,6 +627,12 @@ def mic(site: str, setting: Literal["on", "off"] | None = None) -> int:
     one keeps its setting until it is closed. The setting is off for every site until you turn it
     on, and an agent can only ask you to. Without a setting this prints the current one.
 
+    With ``--source NAME`` the microphone copies that source of your audio server instead of the
+    default one, such as the monitor of an output that mixes a call with your microphone. A named
+    source can carry anything you hear, so only you can set it: an agent cannot ask for one. A
+    session fails to start, and says so, when the source does not exist; it never falls back to
+    the default. ``on`` without ``--source`` goes back to the default, and ``off`` clears it.
+
     Parameters
     ----------
     site
@@ -614,23 +640,37 @@ def mic(site: str, setting: Literal["on", "off"] | None = None) -> int:
         the site has more than one.
     setting
         ``on`` or ``off``. Leave it out to show the setting.
+    source
+        The name of a source on your audio server, with ``on``.
 
     """
     roots = sites.roots_from_env()
     try:
         policy = _load(roots, site)
+        if source is not None:
+            if setting != "on":
+                message = "--source goes with on: valetkey mic SITE on --source NAME"
+                raise CommandError(message)  # noqa: TRY301  # reported like every other mistake
+            try:
+                sites.validate_source(source)
+            except ValueError as error:
+                raise CommandError(str(error)) from error
     except CommandError as error:
         return _fail(error)
     site = policy.site
-    state = "on" if policy.microphone else "off"
     if setting is None:
-        _say(f"{site}: the microphone is {state}.")
+        _say(f"{site}: the microphone is {_mic_text(policy)}.")
         return 0
-    if (setting == "on") == policy.microphone:
-        _say(f"{site}: the microphone was already {state}. Nothing changed.")
+    wanted = replace(
+        policy,
+        microphone=setting == "on",
+        microphone_source=source if setting == "on" else None,
+    )
+    if wanted == policy:
+        _say(f"{site}: the microphone was already {_mic_text(policy)}. Nothing changed.")
         return 0
-    live = save_and_reload(roots, site, replace(policy, microphone=setting == "on"))
-    _say(f"{site}: the microphone is now {setting}.")
+    live = save_and_reload(roots, site, wanted)
+    _say(f"{site}: the microphone is now {_mic_text(wanted)}.")
     if live:
         _say(f"{site}: the running session keeps its setting. Close it and open it again.")
     return 0
@@ -1260,12 +1300,20 @@ def check_seccomp(system: System) -> Check:
 
 
 def check_microphone(system: System) -> list[Check]:
-    """Check what the microphone needs, if any site has it on; nothing is reported otherwise."""
+    """Check what the microphone needs, if any site has it on; nothing is reported otherwise.
+
+    A site that names a source for its microphone is also checked against the sources your audio
+    server has right now: a session of that site cannot start without it.
+    """
     names = []
+    named: dict[str, str] = {}
     for name in sites.known_sites(system.roots):
         with contextlib.suppress(OSError, sites.PolicyError):
-            if sites.load_policy(system.roots, name).microphone:
+            policy = sites.load_policy(system.roots, name)
+            if policy.microphone:
                 names.append(name)
+                if policy.microphone_source is not None:
+                    named[name] = policy.microphone_source
     if not names:
         return []
     listed = ", ".join(names)
@@ -1274,10 +1322,25 @@ def check_microphone(system: System) -> list[Check]:
         detail = f"the microphone is on for {listed}, but {', '.join(missing)} is not installed"
         return [Check("microphone", "fail", detail)]
     runtime = system.roots.runtime
-    if runtime is None or not audio.upstream_socket(runtime).is_socket():
+    if runtime is None or not (socket := audio.upstream_socket(runtime)).is_socket():
         detail = f"the microphone is on for {listed}, but the audio server's socket is missing"
         return [Check("microphone", "warn", detail)]
-    return [Check("microphone", "ok", f"the microphone is on for {listed}, and audio is running")]
+    checks = [Check("microphone", "ok", f"the microphone is on for {listed}, and audio is running")]
+    status, output = system.run(["pactl", f"--server=unix:{socket}", "list", "short", "sources"])
+    if status != 0:
+        return checks
+    present = {line.split("\t")[1] for line in output.splitlines() if "\t" in line}
+    checks += [
+        Check(
+            "microphone-source",
+            "warn",
+            f"{name} copies the audio source {source}, which your audio server does not have "
+            f"now; its sessions will not start. Create it, or run: valetkey mic {name} on",
+        )
+        for name, source in named.items()
+        if source not in present
+    ]
+    return checks
 
 
 def check_suffix_list(_system: System) -> Check:
@@ -1446,7 +1509,8 @@ def show_status(
     when none runs, this says so and exits 0.
 
     With --json the output is an object with three lists. "sessions" holds objects with the keys
-    site, since, contained, host, microphone, idle_seconds and closes_at. A session with the
+    site, since, contained, host, microphone, source, idle_seconds and closes_at. "source" is the
+    source the microphone copies, or null for the default one. A session with the
     microphone on also has "capture", where a recorder finds its capture stream: "socket" is the
     session's private PulseAudio socket, "directory" holds its PipeWire socket, and
     "node" is the number of the PipeWire node the browser records with, or null while nothing

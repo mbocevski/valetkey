@@ -264,7 +264,8 @@ and Deny buttons.
 The results are `allowed`, `denied` (you said no), `expired` (nobody answered, or the question was
 dismissed) and `could_not_ask` (nobody could be asked from here, so the agent tells you to run
 `valetkey mic SITE on`). A no is not remembered: the agent may ask again, and you can say no
-again. The browser may record on the start page's origin and the site's own domain with its subdomains, and on no other host the site reaches. The setting applies to sessions that start afterwards. A running session keeps what it
+again. The agent cannot name an audio source: the microphone copies your default source, or the one you
+set with `valetkey mic SITE on --source NAME`. The browser may record on the start page's origin and the site's own domain with its subdomains, and on no other host the site reaches. The setting applies to sessions that start afterwards. A running session keeps what it
 started with, so the agent closes the site's browser and opens it again.
 
 What the browser can hear, and nothing else it can reach, is described in

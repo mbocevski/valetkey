@@ -46,3 +46,4 @@ PulseAudio
 pactl
 libpulse
 Yubico
+microphone_source
