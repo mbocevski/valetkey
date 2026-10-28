@@ -1342,7 +1342,7 @@ def test_bubblewrap_still_works_under_the_service_hardening() -> None:
 
 def test_mcp_command_serves_over_stdio(monkeypatch: pytest.MonkeyPatch) -> None:
     served: list[bool] = []
-    monkeypatch.setattr(mcp_server, "serve", lambda: served.append(True))
+    monkeypatch.setattr(mcp_server, "serve", lambda **_options: served.append(True))
     assert main(["mcp"]) == 0
     assert served == [True]
 

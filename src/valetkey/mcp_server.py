@@ -615,12 +615,16 @@ class Bridge:
 
     ``socket`` overrides the daemon's socket path. ``daemon_command`` is what starts a daemon
     (default: this interpreter running ``valetkey daemon``). ``start_timeout`` bounds the wait.
+    ``scope`` is the sites this server may act on (``site`` or ``site:account``): the bridge tells
+    the daemon on every connection it opens, before any request, and the daemon enforces it. A
+    daemon that cannot take a scope makes the bridge fail rather than serve every site.
     """
 
     def __init__(
         self,
         socket: Path | None = None,
         *,
+        scope: Sequence[str] | None = None,
         daemon_command: Sequence[str] | None = None,
         start_timeout: float = START_TIMEOUT,
         exit_grace: float = EXIT_GRACE,
@@ -630,6 +634,7 @@ class Bridge:
         self._command = list(daemon_command or [sys.executable, "-m", "valetkey", "daemon"])
         self._timeout = start_timeout
         self._grace = exit_grace
+        self._scope = list(scope) if scope else None
         self._client: Client | None = None
         self._lock = asyncio.Lock()
         self.started: subprocess.Popen[bytes] | None = None
@@ -674,11 +679,28 @@ class Bridge:
             code = "no_runtime_dir"
             raise DaemonError(code, str(error)) from error
         try:
-            return await Client.connect(path)
+            connection = await Client.connect(path)
         except DaemonError:
             pass  # nothing is listening: start a daemon below
+        else:
+            return await self._limited(connection)
         await asyncio.to_thread(self._spawn)
-        return await self._await_daemon(path)
+        return await self._limited(await self._await_daemon(path))
+
+    async def _limited(self, connection: Client) -> Client:
+        """Declare the scope on a new connection, if there is one, before anything else is sent."""
+        if self._scope is None:
+            return connection
+        try:
+            await connection.call("scope", sites=self._scope)
+        except DaemonError as error:
+            await connection.close()
+            if error.code == "unknown_op":
+                code = "daemon_too_old"
+                message = "the running valetkeyd is too old for --site: restart it"
+                raise DaemonError(code, message) from error
+            raise
+        return connection
 
     def _spawn(self) -> None:
         """Start the daemon detached: its own session, no stdin, output to a log file."""
@@ -1695,7 +1717,10 @@ def build_server(bridge: Bridge) -> MCPServer:
     return server
 
 
-def serve(socket: Path | None = None) -> None:
-    """Run the MCP server on stdin and stdout until the client disconnects."""
+def serve(socket: Path | None = None, scope: Sequence[str] | None = None) -> None:
+    """Run the MCP server on stdin and stdout until the client disconnects.
+
+    With ``scope``, a list of ``site`` and ``site:account`` names, it acts on those sites only.
+    """
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="valetkey mcp: %(message)s")
-    build_server(Bridge(socket)).run("stdio")
+    build_server(Bridge(socket, scope=scope)).run("stdio")

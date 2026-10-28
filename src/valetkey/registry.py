@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from valetkey.protocol import BrowserSession, LoginWindow
+    from valetkey.scope import Scope
 
 MAX_REFUSED_HOSTS = 2000
 """How many refused hosts are remembered per site."""
@@ -107,6 +108,9 @@ class Connection:
     """For each site, the finished downloads this client has already been told about."""
     bridges: set[str] = field(default_factory=set)
     """The bridges this connection registered. They end with the connection."""
+    scope: Scope | None = None
+    """The sites this client may act on, once it has declared them; ``None`` means all of them.
+    It is set once (see :mod:`valetkey.scope`)."""
 
 
 def host_of(url: str) -> str | None:

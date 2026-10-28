@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from valetkey.client import DaemonError
     from valetkey.protocol import LoginWindow
     from valetkey.registry import Connection, Registry, Site
+    from valetkey.scope import Scope
     from valetkey.session_ops import Sessions
 
 logger = logging.getLogger("valetkey.daemon")  # the daemon's one log
@@ -158,13 +159,14 @@ class Logins:
         """Return the sockets of the registered bridges, the newest last."""
         return [bridge.path for bridge in self.bridges.values()]
 
-    async def op_login(self, _connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+    async def op_login(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         """Answer ``login``: open a login window for the site, and return at once."""
         target = string_arg(args, "target")
         account = args.get("account")
         if account is not None and not isinstance(account, str):
             fail("bad_request", '"account" must be a string')
         await asyncio.to_thread(sites.system_suffixes)  # no list, no login: see SuffixListError
+        await self._check_login_scope(connection.scope, target, account)
         site, start = await self._login_target(target, account)
         existing = await self._existing_policy(site)
         await self._refuse_private_start(site, start, existing)
@@ -322,6 +324,38 @@ class Logins:
             "narrowest range that holds its address (one address such as 10.20.0.7/32, or a /24), "
             "and then log in again.",
         )
+
+    async def _check_login_scope(
+        self, scope: Scope | None, target: str, account: str | None
+    ) -> None:
+        """Refuse a login whose account is outside ``scope`` (``None`` has no limit).
+
+        Nothing is read or made before it.
+
+        The account is worked out the way :meth:`_login_target` does, without reading a policy,
+        so a refusal says nothing about sites the scope does not cover. A name or a host that
+        cannot be read is left to :meth:`_login_target`, which refuses it.
+        """
+        if scope is None:
+            return
+        try:
+            if "." not in target and self._names_a_site(target):
+                site, current = sites.split_site_name(target)
+                name = target if account is None or current is not None else None
+                if name is None:
+                    name = sites.account_name(site, account)
+            else:
+                base = await asyncio.to_thread(
+                    sites.choose_site_name, self.roots, login.normalize_start_url(target)
+                )
+                name = base if account is None else sites.account_name(base, account)
+            resolved = sites.resolve_account(self.roots, name)
+        except sites.AmbiguousAccountError:
+            raise scope.refusal(target) from None
+        except ValueError:
+            return
+        if not scope.covers(resolved):
+            raise scope.refusal(target)
 
     async def _login_target(self, target: str, account: str | None) -> tuple[str, str]:
         """Return the account name and start URL for a known site name, a host or a URL.

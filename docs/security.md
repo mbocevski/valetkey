@@ -111,6 +111,22 @@ A process of your user can edit the policy files with `valetkey allow` anyway. I
 shell on your account, it can do that too. Give the agent browser tools without a shell if that
 matters to you.
 
+## Limiting a client to some sites
+
+`valetkey mcp --site SITE` limits one MCP server to the sites named. The daemon enforces it, not
+the `valetkey mcp` process. The process tells the daemon its sites when it connects, before any
+request, and the daemon keeps them with that connection. It refuses every request for another
+site. It cuts `sites`, `status` and the `watch` stream to the sites listed. It refuses a login
+that would make a site or an account outside the list, and the operations that name no site, such
+as registering a bridge. A connection declares its sites once: a second try is refused, so
+nothing the client sends widens them. If the daemon is too old to take a scope, the server fails
+instead of serving every site.
+
+The limit holds for the server that declared it. A process of your user that opens the daemon
+socket itself declares nothing, so nothing limits it, and it can do what `valetkey` commands can
+(see [the trust boundary](#trust-boundary)). It is a way to give one agent less, not to keep an
+agent away from a shell on your account.
+
 ## What containment does not cover
 
 - Pages the browser already cached still render. A host that is no longer allowed does not have to

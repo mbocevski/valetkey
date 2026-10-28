@@ -53,6 +53,23 @@ Start with `browser_sites`. The others act on one site by its name.
 There is no script evaluation, no launch option, no upload, no cookie access and no way to delete
 a site. Page text is labelled as untrusted.
 
+## Limiting a server to some sites
+
+`valetkey mcp --site sitex` serves the same tools but acts only on `sitex`. Repeat `--site` for
+more sites. A bare site covers all its accounts, including ones added later; `sitex:work` covers
+that one account. Without `--site` a server acts on every site.
+
+```json
+{"mcpServers": {"sitex": {"command": "valetkey", "args": ["mcp", "--site", "sitex"]}}}
+```
+
+`browser_sites` lists only those sites. Every tool that names another site fails with an error
+that names the allowed ones, for example `site "other" is outside this server's scope (allowed:
+sitex)`. `browser_login` cannot make a site or an account outside the list, and
+`browser_allow`, `browser_deny` and `browser_microphone` work only for listed sites. The list is
+fixed when the server starts, and no tool can change it. [Security](security.md#limiting-a-client-to-some-sites)
+says how it is enforced and what it does not stop.
+
 ## What a result starts with
 
 Every result starts with the site's name and the page's address. The address line shows only the

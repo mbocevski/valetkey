@@ -180,6 +180,7 @@ from valetkey.registry import (
     Registry,
     Watcher,
 )
+from valetkey.scope import Scope
 from valetkey.session_ops import (
     POLL_INTERVAL,
     STARTUP_GRACE,
@@ -198,6 +199,33 @@ SD_LISTEN_FDS_START = 3
 """The first file descriptor systemd passes to a socket-activated service."""
 STATES = ("idle", "login", "session")
 _ACTIVATION_VARIABLES = ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES")
+_SITE_OPS = frozenset(
+    {
+        "open",
+        "snapshot",
+        "click",
+        "type",
+        "navigate",
+        "save",
+        "screenshot",
+        "close",
+        "reload_policy",
+        "downloads",
+        "allow_check",
+        "allow_apply",
+        "allow_ask",
+        "deny_check",
+        "deny_apply",
+        "deny_ask",
+        "microphone_check",
+        "microphone_apply",
+        "microphone_ask",
+    }
+)
+"""The operations that name one site in ``site``, and that a scope checks before they run."""
+_LISTING_OPS = frozenset({"sites", "status"})
+"""The operations that list every site, or tell about one named in ``site``: a scope cuts the
+list to its sites, and checks the name when there is one."""
 
 
 class AlreadyRunningError(RuntimeError):
@@ -374,6 +402,7 @@ class Daemon:
             "microphone_apply": self.approvals.op_microphone_apply,
             "microphone_ask": self.approvals.op_microphone_ask,
             "bridge_register": self.logins.op_bridge_register,
+            "scope": self._op_scope,
         }
 
     # -- serving --
@@ -520,7 +549,7 @@ class Daemon:
                 await send(writer, error_response(request_id_of(error), error))
                 continue
             if request.op == "watch":
-                await self._stream(reader, writer, request.id)
+                await self._stream(connection, reader, writer, request.id)
                 return
             await send(writer, await self._dispatch(connection, request))
 
@@ -533,15 +562,73 @@ class Daemon:
                 identifier, DaemonError("unknown_op", f"no such operation: {request.op}")
             )
         try:
+            self._enforce_scope(connection, request)
             return ok_response(identifier, await handler(connection, request.args))
         except Exception as error:
             mapped = map_error(error)
             if mapped.code == "internal":
                 logger.exception("request failed: %s", request.op)
+            if mapped.code == "unknown_site" and connection.scope is not None:
+                # The message lists every known site, and a scoped client may not learn them.
+                allowed = connection.scope.allowed()
+                mapped = DaemonError(
+                    "unknown_site", f"no such site in this server's scope (allowed: {allowed})"
+                )
             return error_response(identifier, mapped)
+
+    def _enforce_scope(self, connection: Connection, request: Request) -> None:
+        """Refuse a request that a connection with a scope may not make.
+
+        Only the operations that name their site, ``sites`` and ``status`` (which list, and cut
+        their answer to the scope), ``login`` (which checks the account it would use) and ``scope``
+        itself pass. Anything else, such as a bridge, is refused, so an operation added later is
+        closed to a scope until it is listed.
+        """
+        scope = connection.scope
+        if scope is None or request.op in {"login", "scope"}:
+            return
+        if request.op not in _SITE_OPS | _LISTING_OPS:
+            raise scope.refuse_operation(request.op)
+        if request.op in _LISTING_OPS and request.args.get("site") is None:
+            return  # a list of every site: the answer is cut to the scope
+        self._require_in_scope(connection, request.args.get("site"))
+
+    def _require_in_scope(self, connection: Connection, requested: object) -> None:
+        """Raise unless the site that ``requested`` names is in the connection's scope."""
+        scope = connection.scope
+        assert scope is not None  # noqa: S101 - callers check
+        if not isinstance(requested, str):
+            return  # the operation says what is wrong with it
+        try:
+            name = sites.resolve_account(self.roots, requested)
+        except sites.AmbiguousAccountError:
+            raise scope.refusal(requested) from None
+        except ValueError:
+            return  # not a site name; the operation says so
+        if not scope.covers(name):
+            raise scope.refusal(requested)
+
+    async def _op_scope(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+        """Answer ``scope``: limit this connection to ``sites``, once.
+
+        The list holds ``site`` and ``site:account`` names. A connection that has a scope cannot
+        be given another, so no request can widen it. One that has made other requests first may
+        still declare one, which only narrows what it can do.
+        """
+        if connection.scope is not None:
+            fail("scope_set", "this connection's scope is already set and cannot be changed")
+        listed = args.get("sites")
+        if not isinstance(listed, list):
+            fail("bad_request", '"sites" must be a list of site names')
+        try:
+            connection.scope = Scope.parse(listed)
+        except ValueError as error:
+            fail("bad_request", str(error))
+        return {"allowed": connection.scope.allowed()}
 
     async def _stream(
         self,
+        connection: Connection,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         identifier: int | str | None,
@@ -551,13 +638,18 @@ class Daemon:
         The watcher is added before the snapshot is read, and neither step awaits, so no change
         falls between the two. A client that stops reading and falls
         :data:`valetkey.registry.WATCH_QUEUE` events behind is disconnected rather than allowed to
-        hold memory.
+        hold memory. A connection with a scope is sent only the sites in it.
         """
+        scope = connection.scope
         watcher = Watcher()
         self.registry.watchers.add(watcher)
         gone = asyncio.ensure_future(reader.read())  # finishes at end-of-file: the client left
         try:
-            await send(writer, ok_response(identifier, self._activity("snapshot")))
+            first = self._activity("snapshot")
+            await send(
+                writer,
+                ok_response(identifier, first if scope is None else scope.filter_activity(first)),
+            )
             while True:
                 event = asyncio.ensure_future(watcher.queue.get())
                 await asyncio.wait({event, gone}, return_when=asyncio.FIRST_COMPLETED)
@@ -567,7 +659,8 @@ class Daemon:
                 item = event.result()
                 if item is None:
                     return
-                await send(writer, ok_response(identifier, item))
+                if scope is None or scope.allows_event(item):
+                    await send(writer, ok_response(identifier, item))
         finally:
             gone.cancel()
             self.registry.watchers.discard(watcher)
@@ -635,7 +728,7 @@ class Daemon:
 
     # -- operations: sites and policies --
 
-    async def _op_sites(self, _connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+    async def _op_sites(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
         entries = []
         found = self.registry.known_sites()
         only: str | None = None
@@ -645,6 +738,8 @@ class Daemon:
                 await self.registry.load_policy(only)  # says that the site is not known
         for name in found:
             if only is not None and name != only:
+                continue
+            if connection.scope is not None and not connection.scope.covers(name):
                 continue
             state = self.registry.state(name)
             try:
@@ -710,7 +805,9 @@ class Daemon:
             links = args.get("links", False)
             if not isinstance(links, bool):
                 fail("bad_request", '"links" must be true or false')
-            return self._activity(links=links, captures=await self._captures())
+            activity = self._activity(links=links, captures=await self._captures())
+            scope = connection.scope
+            return activity if scope is None else scope.filter_activity(activity)
         site = self.registry.site_of(args)
         state = self.registry.state(site)
         if state.kind != "session":

@@ -4886,7 +4886,7 @@ def test_no_operation_widens_a_policy_except_the_ones_that_ask(roots: sites.Root
             denying = {"deny_check", "deny_apply", "deny_ask"}
             # The microphone operations change one setting of the site and never a host.
             microphone = {"microphone_check", "microphone_apply", "microphone_ask"}
-            assert set(rig.daemon._ops) - set(ops) == {"login", *denying, *microphone}  # noqa: SLF001 - every other op is listed
+            assert set(rig.daemon._ops) - set(ops) == {"login", "scope", *denying, *microphone}  # noqa: SLF001 - every other op is listed
             for op in ops:
                 with contextlib.suppress(DaemonError):
                     await c.call(op, **arguments)

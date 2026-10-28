@@ -29,6 +29,7 @@ from valetkey import (
     mcp_server,
     procs,
     sandbox,
+    scope,
     seccomp,
     sessions,
     sites,
@@ -806,12 +807,33 @@ def forget(site: str, *, yes: Annotated[bool, Parameter(name="--yes", negative="
 
 
 @app.command(name="mcp")
-def run_mcp() -> int:
+def run_mcp(
+    *,
+    site: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--site",
+            help="Act only on this site, or `site:account` for one account. Repeat for more.",
+        ),
+    ] = None,
+) -> int:
     """Serve the browser tools to an MCP client over standard input and output.
 
     Point an MCP client at this command. It starts valetkeyd if that is not running yet.
+
+    With `--site`, the server acts only on the sites named, and the daemon refuses every other
+    site for it: `browser_sites` lists only those, every tool that names a site refuses the rest
+    with an error naming the allowed ones, and `browser_login` cannot make a site or account
+    outside the list. A bare site covers all its accounts, including ones added later;
+    `site:account` covers that one. The list is fixed for as long as the server runs. Without
+    `--site` it acts on every site.
     """
-    mcp_server.serve()
+    if site:
+        try:
+            scope.Scope.parse(site)
+        except ValueError as error:
+            return _fail(CommandError(str(error)))
+    mcp_server.serve(scope=site)
     return 0
 
 
