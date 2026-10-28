@@ -141,6 +141,11 @@ It still shows pages, takes your typing and does ordinary copy and paste, includ
 password manager. The compositor lists the window as a sandboxed client of `valetkey`, with the
 site as its instance name. The socket is removed when the window closes.
 
+The window has no USB or HID devices. A FIDO2 or U2F security key, or a passkey stored on a key,
+cannot answer it, although Chrome still shows its "insert your security key" dialog. Codes work:
+an authenticator app, a text message or email, and a key that types a one-time code (for
+example Yubico OTP). Use one of those at the site, or choose "try another way".
+
 Not every compositor can do this. When yours cannot, the login still opens on the compositor's own
 socket, the daemon logs a warning, and `valetkey doctor` shows `warn` on the security-context line:
 the window is then not restricted.

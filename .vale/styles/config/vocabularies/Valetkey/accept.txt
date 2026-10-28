@@ -45,3 +45,4 @@ WirePlumber
 PulseAudio
 pactl
 libpulse
+Yubico

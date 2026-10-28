@@ -22,7 +22,8 @@ as contained and recorded as a local one, and closing the window finishes it the
   server. The bridge cannot ask for a password.
 - Your ssh agent, or a key without a passphrase, available to the service.
 
-A hardware security key cannot be used this way, because the key is not forwarded.
+A hardware security key cannot be used this way, because the key is not forwarded. No login
+window can use one: see [the login window](security.md#the-login-window).
 
 ## Set up the bridge
 

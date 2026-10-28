@@ -66,6 +66,13 @@ Check the three parts. `valetkey status` on the server must list the bridge. The
 fails with `no_display` even with a bridge connected. And the machine must have no screen of its
 own, since a local screen comes first. [Remote logins](remote.md) has the steps.
 
+## The login window asks for my security key and nothing happens
+
+The login window has no USB devices, so a FIDO2 or U2F security key cannot answer it. Choose
+"try another way" at the site and use a code: an authenticator app, a text message or email, or a
+key that types a one-time code (for example Yubico OTP). [Security](security.md#the-login-window)
+says why.
+
 ## The login has expired
 
 `browser_open` says the saved login has expired when the start page sent the browser to a sign-in
