@@ -53,8 +53,8 @@ STOP_GRACE = 5.0
 """Seconds the graph gets to end on its own, once told to, before the group is killed."""
 ASK_TIMEOUT = 10.0
 """Seconds one question to the graph (or to the person's server) may take."""
-UNMUTE_TIMEOUT = 5.0
-"""Seconds to look for the stream that carries the microphone, to unmute it."""
+RESET_TIMEOUT = 5.0
+"""Seconds to look for the stream that carries the microphone, to unmute it and set its volume."""
 MAX_SOCKET_PATH = 100
 """The longest path a unix socket may have, with some room under the kernel's limit of 107."""
 _LOG_TAIL = 1500
@@ -251,18 +251,21 @@ def _ask(argv: Sequence[str], environment: dict[str, str] | None = None) -> str:
     return result.stdout
 
 
-def unmute_stream(upstream: Path, tag: str) -> bool:
-    """Take the mute off the stream with ``tag`` on the person's server; tell whether it was found.
+def reset_stream(upstream: Path, tag: str) -> bool:
+    """Take the mute off the stream with ``tag`` on the person's server and set it to full volume.
 
-    PipeWire remembers the volume and mute of a stream by the name of the program that opened it,
-    and the tunnel is always the same program, so a stream that was once muted on the person's
-    server (by them, or by a tool) starts muted every time and the microphone arrives silent.
+    Tells whether the stream was found. PipeWire remembers the volume and mute of a stream by the
+    name of the program that opened it, and the tunnel is always the same program. A client of the
+    graph can set the volume and mute of ``vk_mic``, which the tunnel passes on to this stream, so
+    a stream left muted or turned down would start so every time, and the microphone would arrive
+    silent. Only this stream is touched, never another one or a device.
     """
     listing = _ask([*_server_args(upstream), "list", "source-outputs"])
     for block in listing.split("Source Output #")[1:]:
         if f'{_TAG} = "{tag}"' in block:
             number = block.split("\n", 1)[0].strip()
             _ask([*_server_args(upstream), "set-source-output-mute", number, "0"])
+            _ask([*_server_args(upstream), "set-source-output-volume", number, "100%"])
             return True
     return False
 
@@ -350,7 +353,7 @@ class AudioGraph:
                 )
                 raise AudioError(message)
             time.sleep(0.05)
-        self._unmute(deadline=time.monotonic() + UNMUTE_TIMEOUT)
+        self._reset(deadline=time.monotonic() + RESET_TIMEOUT)
 
     def _default_source(self) -> str | None:
         try:
@@ -362,11 +365,11 @@ class AudioGraph:
                 return line.partition(":")[2].strip()
         return None
 
-    def _unmute(self, *, deadline: float) -> None:
-        """Take the mute off the graph's stream on the person's server, as soon as it is there."""
+    def _reset(self, *, deadline: float) -> None:
+        """Take the mute off the graph's stream on the person's server and set its volume."""
         while time.monotonic() < deadline:
             try:
-                if unmute_stream(self.upstream, self.tag):
+                if reset_stream(self.upstream, self.tag):
                     return
             except AudioError:
                 pass

@@ -201,7 +201,7 @@ def alive(pid: int) -> bool:
     return stat.rpartition(")")[2].split()[0] != "Z"
 
 
-def test_the_graph_is_ready_when_the_microphone_is_the_default_and_its_stream_is_unmuted(
+def test_the_graph_is_ready_when_the_microphone_is_the_default_and_its_stream_is_reset(
     tmp_path: Path, pactl: Pactl
 ) -> None:
     upstream = tmp_path / "pulse" / "native"
@@ -215,8 +215,17 @@ def test_the_graph_is_ready_when_the_microphone_is_the_default_and_its_stream_is
         assert graph.log_file == tmp_path / "graph" / "audio.log"
         server = f"unix:{upstream}"
         assert ["pactl", "--server", server, "set-source-output-mute", "17", "0"] in pactl.calls
-        asked_about = [call for call in pactl.calls if "set-source-output-mute" in call]
-        assert len(asked_about) == 1  # the other session's stream is not touched
+        assert [
+            "pactl",
+            "--server",
+            server,
+            "set-source-output-volume",
+            "17",
+            "100%",
+        ] in pactl.calls
+        for command in ("set-source-output-mute", "set-source-output-volume"):
+            asked_about = [call for call in pactl.calls if command in call]
+            assert len(asked_about) == 1  # the other session's stream is not touched
         assert (tmp_path / "graph").stat().st_mode & 0o777 == 0o700
     finally:
         graph.close()
@@ -343,7 +352,7 @@ def test_a_directory_too_long_for_a_socket_is_refused(tmp_path: Path) -> None:
 def test_the_stream_is_looked_for_until_the_time_is_up(
     tmp_path: Path, pactl: Pactl, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(audio, "UNMUTE_TIMEOUT", 0.3)
+    monkeypatch.setattr(audio, "RESET_TIMEOUT", 0.3)
     pactl.stream_appears_after = 10_000  # never
     graph = audio.AudioGraph.start(
         tmp_path / "graph", tmp_path / "up", "demo", argv=stand_in("cat >/dev/null")
@@ -362,7 +371,7 @@ def test_a_person_s_server_that_cannot_be_asked_does_not_keep_the_graph_from_sta
             raise audio.AudioError(message)
         return "Default Source: vk_mic\n"
 
-    monkeypatch.setattr(audio, "UNMUTE_TIMEOUT", 0.3)
+    monkeypatch.setattr(audio, "RESET_TIMEOUT", 0.3)
     monkeypatch.setattr(audio, "_ask", ask)
     graph = audio.AudioGraph.start(
         tmp_path / "graph", tmp_path / "up", "demo", argv=stand_in("cat >/dev/null")
@@ -457,9 +466,10 @@ def test_a_program_that_cannot_run_or_fails_is_an_audio_error(tmp_path: Path) ->
     del tmp_path
 
 
-def test_unmuting_finds_the_stream_by_its_tag_only(pactl: Pactl) -> None:
-    assert audio.unmute_stream(Path("/up"), "demo") is True
-    assert audio.unmute_stream(Path("/up"), "someone-else") is False
-    assert [c[3:] for c in pactl.calls if "set-source-output-mute" in c] == [
-        ["set-source-output-mute", "17", "0"]
+def test_resetting_finds_the_stream_by_its_tag_only(pactl: Pactl) -> None:
+    assert audio.reset_stream(Path("/up"), "demo") is True
+    assert audio.reset_stream(Path("/up"), "someone-else") is False
+    assert [c[3:] for c in pactl.calls if "set-source-output" in c[3]] == [
+        ["set-source-output-mute", "17", "0"],
+        ["set-source-output-volume", "17", "100%"],
     ]

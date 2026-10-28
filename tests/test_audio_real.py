@@ -213,6 +213,28 @@ def test_a_microphone_muted_on_the_persons_server_is_unmuted_for_the_next_graph(
 
 @pytest.mark.integration
 @needs_audio
+def test_a_volume_and_mute_a_client_left_on_the_microphone_do_not_reach_the_next_graph(
+    server: throwaway_audio.ThrowawayAudio,
+) -> None:
+    directory = server.base / "g"
+    first = audio.AudioGraph.start(directory, server.socket, "first")
+    # What a page can do through the graph's socket; the tunnel passes it to the stream on the
+    # person's server, where WirePlumber saves it under the tunnel's application id.
+    assert pactl(first.socket, "set-source-volume", "vk_mic", "0%").returncode == 0
+    assert pactl(first.socket, "set-source-mute", "vk_mic", "1").returncode == 0
+    first.close()
+    second = audio.AudioGraph.start(directory, server.socket, "second")
+    try:
+        stream = server.pactl("list", "source-outputs")
+        assert "Mute: no" in stream
+        assert "100%" in stream.split("Volume:")[1].splitlines()[0]
+        assert tone(record(second.socket))[0] > 0.05
+    finally:
+        second.close()
+
+
+@pytest.mark.integration
+@needs_audio
 def test_a_recorder_finds_the_capture_stream_by_the_socket_and_the_node(
     graph: tuple[throwaway_audio.ThrowawayAudio, audio.AudioGraph],
 ) -> None:
