@@ -211,14 +211,21 @@ class Registry:
         reason: str | None = None,
         microphone: bool | None = None,
         source: str | None = None,
+        refused: list[dict[str, Any]] | None = None,
+        refused_more: int = 0,
     ) -> None:
         """Tell every `watch` client that ``event`` happened to ``site`` or to ``bridge``.
 
-        A session that started says whether it has the microphone, and the source it copies.
+        A session that started says whether it has the microphone, and the source it copies. A login
+        window that closed lists what its proxy refused (``refused``, with how many more there were
+        in ``refused_more``), when it refused anything.
         """
         message: dict[str, Any] = {"event": event}
         if site is not None:
             message["site"] = site
+        if refused:
+            message["refused"] = refused
+            message["refused_more"] = refused_more
         if microphone is not None:
             message["microphone"] = microphone
             message["source"] = source

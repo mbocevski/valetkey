@@ -359,7 +359,9 @@ as `10.20.0.7/32` or a `/24`. [Security](security.md) explains the rule.
 `browser_login` follows the same rule. When the site's start host resolves to a private address it
 may not reach, the call fails and tells the agent to ask you. For a site that does not exist yet,
 the command is `valetkey add SITE START --private-network RANGE`. A login that was refused hosts for
-their private address says so in what it learned, so the agent can pass it on.
+their private address says so in what it learned, so the agent can pass it on. So does one that was
+refused a connection for its port, because a login window proxies only port 443, and port 80 for
+plain HTTP.
 
 ## Expired logins
 

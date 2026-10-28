@@ -260,15 +260,19 @@ def test_normalize_start_url_rejects_other_things(value: str) -> None:
 class Upstream:
     """A local server that answers every request on any port with a small page."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        body: bytes = b"<html><head><title>login page</title></head><body>hello</body></html>",
+    ) -> None:
         self.requests: list[str] = []
         self.port = 0
+        self.body = body
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         with contextlib.suppress(OSError, asyncio.IncompleteReadError):
             head = (await reader.readuntil(b"\r\n\r\n")).decode("latin-1")
             self.requests.append(head)
-            body = b"<html><head><title>login page</title></head><body>hello</body></html>"
+            body = self.body
             writer.write(
                 b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n"
                 + f"Content-Length: {len(body)}\r\n\r\n".encode()
@@ -454,6 +458,43 @@ def test_the_login_proxy_lets_a_host_reach_only_the_listed_private_range(
     assert [h.host for h in result.seen_hosts] == ["in.corp.test"]
 
 
+def test_a_login_reports_every_refusal_once_in_the_order_it_was_made(roots: sites.Roots) -> None:
+    fake = FakeSandbox()
+
+    async def scenario() -> login.LoginResult:
+        async with Upstream().serving() as upstream:
+
+            async def resolve(host: str, _port: int) -> list[str]:
+                return ["10.99.0.1" if host.endswith(".corp.test") else "93.184.216.34"]
+
+            options = upstream.proxy_options() | {"resolver": resolve}
+            del options["address_check"]
+            handle = await start(roots, fake, lambda *_: None, upstream, proxy_options=options)
+            proxy_socket = login_dir(roots) / "proxy.sock"
+            requests = [
+                "CONNECT ws.test:8443",  # a port other than 443
+                "CONNECT in.corp.test:443",  # a private address
+                "CONNECT ws.test:8443",  # again: told once
+                "CONNECT ws.test:443",  # let through
+                "CONNECT other.test:9000",
+            ]
+            for line in requests:
+                reader, writer = await asyncio.open_unix_connection(proxy_socket)
+                writer.write(f"{line} HTTP/1.1\r\nHost: {line.split()[1]}\r\n\r\n".encode())
+                await reader.readline()
+                writer.close()
+            fake.processes[0].terminate()
+            return await handle.wait()
+
+    result = run(scenario())
+    assert result.refused == (
+        ("ws.test", 8443, "port 8443 is not allowed (only 443)"),
+        ("in.corp.test", 443, "resolves to a private address"),
+        ("other.test", 9000, "port 9000 is not allowed (only 443)"),
+    )
+    assert result.private_refused == ("in.corp.test",)
+
+
 def test_a_login_with_no_private_refusals_reports_none(roots: sites.Roots) -> None:
     fake = FakeSandbox(["true"])
 
@@ -462,7 +503,8 @@ def test_a_login_with_no_private_refusals_reports_none(roots: sites.Roots) -> No
             handle = await start(roots, fake, lambda *_: None, upstream)
             return await handle.wait()
 
-    assert run(scenario()).private_refused == ()
+    result = run(scenario())
+    assert (result.private_refused, result.refused) == ((), ())
 
 
 def test_the_browser_is_started_in_a_private_sandbox_with_the_display(roots: sites.Roots) -> None:
@@ -984,6 +1026,43 @@ def sway_log(roots: sites.Roots) -> str:
     assert roots.runtime is not None
     path = roots.runtime / "valetkey" / "logins" / "sitex.log"
     return path.read_text(errors="replace")[-3000:] if path.exists() else "(no log)"
+
+
+@integration
+@needs_desktop
+def test_a_login_page_that_opens_a_websocket_on_another_port_leaves_it_in_the_result(
+    sway: Sway, roots: sites.Roots
+) -> None:
+    page = (
+        b"<html><head><title>sockets</title></head><body><script>"
+        b"new WebSocket('ws://ports.test:8443/live');"
+        b"fetch('https://ports.test:9443/data').catch(() => {});"
+        b"</script>hello</body></html>"
+    )
+
+    async def scenario() -> login.LoginResult:
+        async with Upstream(page).serving() as upstream:
+            handle = await login.start_login(
+                "sitex",
+                "http://login.test/",
+                roots,
+                lambda *_: None,
+                wayland_socket=sway.display,
+                proxy_options=upstream.proxy_options(),
+            )
+            deadline = time.monotonic() + 40
+            while not upstream.requests:
+                assert time.monotonic() < deadline, sway_log(roots)
+                await asyncio.sleep(0.2)
+            await asyncio.sleep(4)  # the page has asked by now; a refusal never reaches upstream
+            await sway.msg("[app_id=chromium]", "kill")
+            return await asyncio.wait_for(handle.wait(), 30)
+
+    result = run(scenario())
+    reasons = {(host, port): reason for host, port, reason in result.refused}
+    assert reasons[("ports.test", 8443)] == "port 8443 is not allowed (only 443)"
+    assert reasons[("ports.test", 9443)] == "port 9443 is not allowed (only 443)"
+    assert result.private_refused == ()
 
 
 @integration

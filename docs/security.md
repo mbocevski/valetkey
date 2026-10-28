@@ -137,7 +137,9 @@ agent away from a shell on your account.
   site's downloads folder, not the rest of your files.
 - While a login window is open, it can reach any public host on ports 80 and 443. That is how
   valetkey learns which hosts the site needs. The address checks still apply, so private
-  addresses stay refused unless you listed their range for the site.
+  addresses stay refused unless you listed their range for the site. Any other port is refused
+  too. When the window closes, the refusals are listed in what it learned: every private address
+  and every port, up to 20, so a page that stalls on one leaves a trace.
 - A login window needs a Wayland session. An X11 client can read every keystroke and the whole
   screen, so valetkey refuses to open a login window on X11.
 - Chrome can still make requests of its own. They are refused and listed on a separate line of

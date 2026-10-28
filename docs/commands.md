@@ -395,11 +395,12 @@ The first line is a snapshot of what is open, as status --json shows it, with
 "event" set to "snapshot" and an "at" time. After that each line has the keys
 event, site and at, where event is session_started, session_ended, login_opened
 or login_closed. A session_started line also says whether the session has the
-microphone ("microphone": true or false). For a bridge the key is bridge instead
-of site, and event is bridge_connected or bridge_disconnected. Bars and
-indicators can read the lines as they come. The command runs until it is
-interrupted or the daemon stops; it exits 1 when no daemon is running, and does
-not start one. With --wait it never exits for that: it waits for a daemon,
+microphone ("microphone": true or false), and a login_closed line lists what the
+login window refused, as "refused" and "refused_more". For a bridge the key is
+bridge instead of site, and event is bridge_connected or bridge_disconnected.
+Bars and indicators can read the lines as they come. The command runs until it
+is interrupted or the daemon stops; it exits 1 when no daemon is running, and
+does not start one. With --wait it never exits for that: it waits for a daemon,
 prints {"event":"daemon_stopped"} when the daemon ends, and when another one
 runs it prints the snapshot again. It looks for a daemon every few seconds at
 most, and never starts one.

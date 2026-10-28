@@ -58,7 +58,8 @@ profile.
   "sessions", "logins"}`` as for ``status``; then one answer per change, each
   ``{"event": "session_started" | "session_ended" | "login_opened" | "login_closed",
   "site", "at"}`` (a ``session_ended`` caused by lack of use also has ``"reason": "idle"``, and a
-  ``session_started`` has ``"microphone"``), or
+  ``session_started`` has ``"microphone"``, and a ``login_closed`` lists what the window's proxy
+  refused, as ``"refused"`` (at most 20 of ``{host, port, reason}``) and ``"refused_more"``), or
   ``{"event": "bridge_connected" | "bridge_disconnected", "bridge", "at"}``,
   all with the request's ``id``. Nothing can hide a session from it.
 * ``bridge_register`` ``{rand}``: record the bridge ``bridge-<rand>``, whose socket the ssh

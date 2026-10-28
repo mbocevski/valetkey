@@ -104,6 +104,11 @@ is private. See [Private networks](security.md) and run
 `valetkey allow SITE --private-network RANGE` with the narrowest range that holds the address.
 Before the first login, run `valetkey add SITE START --private-network RANGE` instead.
 
+A page that stalls in the login window and in sessions may need a port other than 443, such as
+`wss://host:8443`. Only 443, and 80 for plain HTTP, are proxied. When the window closes, what it
+learned lists each host and port that was refused (up to 20), and `valetkey watch` shows the same
+under `refused`. Nothing can allow a port: the site has to serve what it needs on 443.
+
 ## A page stalls or stays blank
 
 If no host is refused, the page itself may be failing. The agent can call `browser_console`: it

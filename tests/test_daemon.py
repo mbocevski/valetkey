@@ -476,11 +476,17 @@ class FakeWindow:
         self.done = asyncio.Event()
         self.cancelled = False
         self.private_refused: list[str] = []
+        self.refused: list[tuple[str, int, str]] = []
 
     async def wait(self) -> login.LoginResult:
         await self.done.wait()
         return login.LoginResult(
-            [], Path("/profile"), 0, self.cancelled, tuple(self.private_refused)
+            [],
+            Path("/profile"),
+            0,
+            self.cancelled,
+            tuple(self.private_refused),
+            tuple(self.refused),
         )
 
     async def cancel(self) -> login.LoginResult:
@@ -5411,6 +5417,81 @@ def test_a_login_that_was_refused_private_hosts_says_what_only_the_person_can_do
             assert "private network: h0.corp.test, h1.corp.test" in summary
             assert "and 2 more" in summary
             assert "valetkey allow sitex --private-network RANGE" in summary
+
+    run(scenario())
+
+
+def test_a_login_that_was_refused_ports_names_them_and_says_what_is_proxied(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+    entries = [
+        (f"h{n}.test", 8000 + n, f"port {8000 + n} is not allowed (only 443)") for n in range(23)
+    ]
+
+    async def scenario() -> None:
+        async with (
+            serving(roots) as rig,
+            await rig.connect() as c,
+            await rig.connect() as w,
+        ):
+            stream = w.watch()
+            await next_event(stream)
+            await c.call("login", target="sitex")
+            await next_event(stream)  # login_opened
+            window = rig.logins.windows[0]
+            window.refused = [
+                ("in.corp.test", 443, "resolves to a private address"),
+                *entries,
+                ("evil host", 9001, "port 9001 is not allowed (only 443)"),
+            ]
+            window.private_refused = ["in.corp.test"]
+            await window.close_window([SeenHost("sitex.test", 1)], Path("/profile"))
+            closed = await next_event(stream)
+            assert closed["event"] == "login_closed"
+            assert len(closed["refused"]) == 20
+            assert closed["refused"][0] == {
+                "host": "in.corp.test",
+                "port": 443,
+                "reason": "resolves to a private address",
+            }
+            assert closed["refused_more"] == 5
+            summary = (await c.call("sites"))["sites"][0]["summary"]
+            # The private-address note is as it was; the ports have a note of their own.
+            assert "private network: in.corp.test." in summary
+            assert (
+                "Refused because only port 443 (and port 80 for plain HTTP) is proxied:" in summary
+            )
+            assert "h0.test:8000, h1.test:8001" in summary
+            assert "h19.test:8019 and 4 more." in summary
+            assert "in.corp.test:443" not in summary
+            assert '"evil host":9001' not in summary
+            assert "stalls in a session" in summary
+            await stream.aclose()
+
+    run(scenario())
+
+
+def test_the_note_of_ports_stands_alone_and_a_login_closed_without_refusals_lists_none(
+    roots: sites.Roots,
+) -> None:
+    note = login_ops._port_note(None, (("a.test", 8443, "port 8443 is not allowed"),))  # noqa: SLF001
+    assert note.startswith(
+        "Refused because only port 443 (and port 80 for plain HTTP) is proxied: a.test:8443."
+    )
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c, await rig.connect() as w:
+            stream = w.watch()
+            await next_event(stream)
+            await c.call("login", target="sitex")
+            await next_event(stream)
+            await rig.logins.windows[0].close_window([], Path("/profile"))
+            closed = await next_event(stream)
+            assert "refused" not in closed
+            assert "refused_more" not in closed
+            await stream.aclose()
 
     run(scenario())
 

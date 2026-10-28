@@ -373,7 +373,10 @@ class LoginResult:
     connection counts. ``exit_code`` is the sandbox's exit status. ``cancelled`` is true when
     :meth:`LoginHandle.cancel` ended the login rather than the person closing the window.
     ``private_refused`` are the hosts the proxy refused because of the private address they
-    resolve to, each once: the person may want to list a range for them.
+    resolve to, each once: the person may want to list a range for them. ``refused`` is every
+    refusal, as ``(host, port, reason)`` and each once in the order first made: the private
+    addresses and the ports other than 443 (80 for plain HTTP), the two things a login window
+    refuses. A page that stalls on one of them leaves no other trace.
     """
 
     seen_hosts: list[SeenHost]
@@ -381,6 +384,7 @@ class LoginResult:
     exit_code: int
     cancelled: bool
     private_refused: tuple[str, ...] = ()
+    refused: tuple[tuple[str, int, str], ...] = ()
 
 
 class LoginHandle:
@@ -449,10 +453,11 @@ class LoginHandle:
                 await asyncio.to_thread(self._context.close)
             await self._proxy.close()
             await asyncio.to_thread(shutil.rmtree, self._login_dir, ignore_errors=True)
+        every = tuple(dict.fromkeys((entry.host, entry.port, entry.reason) for entry in refused))
         private = tuple(
             dict.fromkeys(entry.host for entry in refused if entry.reason == PRIVATE_ADDRESS)
         )
-        result = LoginResult(seen, self._profile_dir, exit_code, self._cancelled, private)
+        result = LoginResult(seen, self._profile_dir, exit_code, self._cancelled, private, every)
         if not self._cancelled:
             outcome = self._finish(seen, self._profile_dir)
             if inspect.isawaitable(outcome):

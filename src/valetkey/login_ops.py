@@ -20,7 +20,12 @@ from typing import TYPE_CHECKING, Any
 
 from valetkey import approvals, cookies, display, learn, login, sites
 from valetkey.protocol import fail, map_error, string_arg
-from valetkey.proxy import address_refusal, private_address_allowed, system_resolver
+from valetkey.proxy import (
+    PRIVATE_ADDRESS,
+    address_refusal,
+    private_address_allowed,
+    system_resolver,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -47,6 +52,8 @@ RESOLVE_SECONDS = 10.0
 
 
 _MAX_NAMED_HOSTS = 5
+MAX_REFUSALS_LISTED = 20
+"""The most refusals a login's note and its ``login_closed`` event name; the rest are counted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +74,19 @@ def _private_note(summary: str | None, site: str, hosts: tuple[str, ...]) -> str
         f"Refused because they are on a private network: {named}. Only the person can allow "
         f"that, with `valetkey allow {site} --private-network RANGE` (the narrowest range that "
         "holds the address); then log in again."
+    )
+    return f"{summary} {note}" if summary else note
+
+
+def _port_note(summary: str | None, refused: tuple[tuple[str, int, str], ...]) -> str:
+    """Add to a login's summary the connections refused for their port, and what that means."""
+    named = [f"{sites.shown_host(host)}:{port}" for host, port, _reason in refused]
+    shown = ", ".join(named[:MAX_REFUSALS_LISTED])
+    more = len(named) - MAX_REFUSALS_LISTED
+    listed = f"{shown} and {more} more" if more > 0 else shown
+    note = (
+        "Refused because only port 443 (and port 80 for plain HTTP) is proxied: "
+        f"{listed}. A page that needs one of them stalls in a session as it did here."
     )
     return f"{summary} {note}" if summary else note
 
@@ -462,10 +482,15 @@ class Logins:
         return finish
 
     async def _watch_login(self, state: Site, window: LoginWindow) -> None:
+        refused: tuple[tuple[str, int, str], ...] = ()
         try:
             result = await window.wait()
+            refused = result.refused
             if result.private_refused:
                 state.summary = _private_note(state.summary, state.name, result.private_refused)
+            ports = tuple(e for e in refused if e[2] != PRIVATE_ADDRESS)
+            if ports:
+                state.summary = _port_note(state.summary, ports)
         except Exception:
             logger.exception("login for %s failed", state.name)
         finally:
@@ -474,4 +499,12 @@ class Logins:
                 await shown.close()
             state.window = None
             state.kind = "idle"
-            self.registry.emit("login_closed", state.name)
+            self.registry.emit(
+                "login_closed",
+                state.name,
+                refused=[
+                    {"host": host, "port": port, "reason": reason}
+                    for host, port, reason in refused[:MAX_REFUSALS_LISTED]
+                ],
+                refused_more=max(0, len(refused) - MAX_REFUSALS_LISTED),
+            )

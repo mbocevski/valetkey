@@ -47,3 +47,4 @@ pactl
 libpulse
 Yubico
 microphone_source
+refused_more
