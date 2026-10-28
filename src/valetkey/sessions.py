@@ -783,6 +783,7 @@ class Session:
         self._closed = False
         self._watch_browser = False
         self._audio: audio.AudioGraph | None = None
+        self._errors_seen = 0
 
     @classmethod
     def start(  # noqa: PLR0913  # each argument is a distinct thing a caller decides
@@ -1197,6 +1198,36 @@ class Session:
 
         """
         return int(self._call("get", "count", selector).get("count") or 0)
+
+    def diagnostics(self, *, clear: bool = False) -> dict[str, list[dict[str, Any]]]:
+        """Read what the page has said about itself: errors, console messages and requests.
+
+        ``errors`` are the uncaught exceptions and unhandled rejections since the last clear,
+        ``console`` the messages of level warning and error, and ``requests`` every request
+        agent-browser has logged since the network log was last cleared (a click clears it, to
+        tell what it downloads). They are the page's own words and are not checked here.
+
+        With ``clear`` the console and the network log are emptied after reading. agent-browser's
+        ``errors --clear`` leaves the errors in place (0.40), so the ones read are counted
+        instead, and the next call starts after them.
+        """
+        errors = [e for e in self._call("errors").get("errors") or [] if isinstance(e, dict)]
+        seen = self._errors_seen if self._errors_seen <= len(errors) else 0
+        messages = [
+            m
+            for m in self._call("console").get("messages") or []
+            if isinstance(m, dict) and m.get("type") in {"warning", "error"}
+        ]
+        requests = [
+            r
+            for r in self._call("network", "requests").get("requests") or []
+            if isinstance(r, dict)
+        ]
+        if clear:
+            self._errors_seen = len(errors)
+            self._call("console", "--clear")
+            self._call("network", "requests", "--clear")
+        return {"errors": errors[seen:], "console": messages, "requests": requests}
 
     def clear_requests(self) -> None:
         """Forget the network requests logged so far, so the next count starts from here."""

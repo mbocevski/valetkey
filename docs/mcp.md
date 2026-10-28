@@ -44,6 +44,7 @@ Start with `browser_sites`. The others act on one site by its name.
   [Downloads](#downloads)).
 - `browser_downloads` lists saved files; clicks and navigation list new ones.
 - `browser_screenshot` returns an image.
+- `browser_console` [reads a page's errors](#what-went-wrong-in-a-page).
 - `browser_allow` asks you to let the site reach more hosts.
 - `browser_deny` asks you to stop the site reaching hosts it reaches now (see
   [denying a host](#denying-a-host)).
@@ -154,6 +155,23 @@ such as `icon_user Orders icon_arrow` for `Orders`, and refuses when several do.
 `Archived orders` for `Orders` when the page has no `Orders`. With `exact` true only a name equal
 to the text matches, case included, and there is no whole-word fallback. A text that matches no
 element is `target_not_found`, with the near names. `exact` needs `text`, and `role` still narrows.
+
+## What went wrong in a page
+
+A page that stays on its spinner or stays blank often has a refused host to blame, and the tools
+name those. When none is refused, `browser_console` shows the rest, from the browser's own buffers:
+
+- the page's errors, which are uncaught exceptions and unhandled rejections, with the message,
+  the stack and the line and column;
+- the console's warnings and errors, with the level (plain logs are left out);
+- the requests that failed: no response (they failed or are still going, with how long ago they
+  began), or a status of 400 or more. A request to a host the proxy refused is marked.
+
+Each section lists at most 50 entries, oldest first, cut to 500 characters each, and says how many
+more there were. The requests are those since the agent's last click or `browser_console` with
+`clear`, because a click starts the log again. With `clear` true the buffers are emptied after
+reading, so the next call shows only what came after. Everything in the lists was written by the
+page, so it is fenced and marked as untrusted data. The tool reads only the session's own buffers.
 
 ## Hovering before a click
 

@@ -8,6 +8,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Added
 
+- The `browser_console` tool shows what went wrong inside a page that stalls or stays blank: its errors, the console's warnings and errors, and the requests that failed or got no response.
 - `browser_click` takes `exact: true` with `text`, to click only an element whose whole name equals the text, case included, never one whose name merely holds it as whole words.
 - `browser_click` takes `hover`, a list of texts: it hovers the first that names one element, then clicks the target that appears, in one call, for controls a page shows only under the pointer.
 - An approval command exits with 75 when nobody answered, which expires the question and remembers nothing, or 69 when it could not ask, which hands the question to a notification. 0 is yes and any other status is no.

@@ -222,7 +222,7 @@ class FakeSession:
     capture: dict[str, object] | None = None
     """What the session says about its capture stream; ``None`` for one with no microphone."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0915 - the state of a fake browser
         self, url: str = "https://sitex.test/", title: str = "Start", delay: float = 0
     ) -> None:
         self.first_page = sessions.Page(url, title)
@@ -259,6 +259,12 @@ class FakeSession:
         self.answers: list[sessions.SnapshotDelta] = []
         """What the next delta snapshots answer, first first; after them: unchanged."""
         self.revision = 0
+        self.diagnosed: dict[str, list[dict[str, Any]]] = {
+            "errors": [],
+            "console": [],
+            "requests": [],
+        }
+        """What the page says went wrong: errors, console messages and requests."""
         self.elements = {"e1": sessions.Ref("button", "Go")}
         """The references of the snapshot."""
         self.delta_calls: list[tuple[bool, bool]] = []
@@ -391,6 +397,13 @@ class FakeSession:
         if self.save_to is not None:
             self.save_to.write_bytes(PNG)
         return self.body
+
+    def diagnostics(self, *, clear: bool = False) -> dict[str, list[dict[str, Any]]]:
+        self._use("diagnostics", clear)
+        found = {key: list(value) for key, value in self.diagnosed.items()}
+        if clear:
+            self.diagnosed = {"errors": [], "console": [], "requests": []}
+        return found
 
     def screenshot(self, name: str = "screenshot.png") -> Path:
         self._use("screenshot", name)
@@ -3789,6 +3802,50 @@ def test_a_refused_host_loads_after_the_person_says_yes(roots: sites.Roots) -> N
     assert "other.test" in sites.load_policy(roots, "demo").allow
 
 
+def test_console_reports_the_pages_errors_console_and_failed_requests(roots: sites.Roots) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            with pytest.raises(DaemonError) as none:
+                await c.call("console", site="sitex")
+            assert none.value.code == "no_session"
+            await c.call("open", site="sitex")
+            session = rig.factory.made[0]
+            session.diagnosed = {
+                "errors": [{"text": "Error: kaboom\n    at /a.js:6:24", "line": 5, "column": 23}],
+                "console": [{"type": "error", "text": "it failed"}],
+                "requests": [
+                    {"method": "GET", "url": "https://sitex.test/api", "status": 404},
+                    {"method": "GET", "url": "https://sitex.test/ok", "status": 200},
+                    {"method": "POST", "url": "https://ads.example/b", "resourceType": "Fetch"},
+                ],
+            }
+            result = await c.call("console", site="sitex")
+            assert result["site"] == "sitex"
+            assert result["errors"]["entries"][0]["text"] == {
+                "untrusted": True,
+                "text": "Error: kaboom\n    at /a.js:6:24",
+            }
+            assert [e["level"] for e in result["console"]["entries"]] == ["error"]
+            assert [e["status"] for e in result["requests"]["entries"]] == [404, None]
+            assert result["requests"]["entries"][1]["type"] == "Fetch"
+            # Read, and kept, until it is cleared.
+            again = await c.call("console", site="sitex", clear=True)
+            assert again["errors"]["total"] == 1
+            assert (await c.call("console", site="sitex"))["errors"]["total"] == 0
+            assert [call for call in session.calls if call[0] == "diagnostics"] == [
+                ("diagnostics", False),
+                ("diagnostics", True),
+                ("diagnostics", False),
+            ]
+            with pytest.raises(DaemonError) as bad:
+                await c.call("console", site="sitex", clear="yes")
+            assert bad.value.code == "bad_request"
+
+    run(scenario())
+
+
 # -- what is running: status, watch, liveness, announcements --------------------------------
 
 
@@ -4918,7 +4975,8 @@ def test_no_operation_widens_a_policy_except_the_ones_that_ask(roots: sites.Root
     add_site(roots, excluded=("cdn.assets.test",))
     write_approver(roots, "exit 1")
     ops = [
-        "sites", "open", "snapshot", "click", "type", "navigate", "save", "screenshot", "status",
+        "sites", "open", "snapshot", "click", "type", "navigate", "save", "screenshot", "console",
+        "status",
         "close", "reload_policy", "downloads", "allow_check", "allow_apply", "allow_ask",
         "bridge_register",
     ]  # fmt: skip

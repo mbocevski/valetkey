@@ -771,6 +771,7 @@ def test_the_session_has_no_eval_or_passthrough() -> None:
         "outline", "click", "hover", "fill", "press_enter",
         "current_url", "screenshot", "clear_requests", "started_downloads", "password_fields",
         "resource_url", "images", "fetch", "look", "snapshot_delta", "title", "match_count",
+        "diagnostics",
     }  # fmt: skip
 
 
@@ -855,6 +856,49 @@ def test_a_selector_that_starts_with_a_dash_never_reaches_agent_browser(tmp_path
     sessions.call_command("/usr/bin/ab", paths, tmp_path / "rt", "snapshot", "-s", "#a")
     with pytest.raises(ValueError, match="looks like an option"):
         sessions.call_command("/usr/bin/ab", paths, tmp_path / "rt", "snapshot", "-s", "--json")
+
+
+def test_diagnostics_reads_the_pages_buffers_and_clears_them_on_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = make_session(tmp_path)
+    errors = [{"text": f"e{n}", "line": n, "column": 0} for n in range(3)]
+    calls: list[tuple[str, ...]] = []
+
+    def answer_for(*verb: str, timeout: float | None = None) -> dict[str, Any]:  # noqa: ARG001
+        calls.append(verb)
+        if verb == ("errors",):
+            return {"errors": [*errors, "not an object"]}
+        if verb == ("console",):
+            return {
+                "messages": [
+                    {"type": "log", "text": "plain"},
+                    {"type": "warning", "text": "careful"},
+                    {"type": "error", "text": "broken"},
+                    "not an object",
+                ]
+            }
+        if verb == ("network", "requests"):
+            return {"requests": [{"url": "https://s.test/", "status": 404}, 5]}
+        return {"cleared": True}
+
+    monkeypatch.setattr(session, "_call", answer_for)
+    first = session.diagnostics()
+    assert [e["text"] for e in first["errors"]] == ["e0", "e1", "e2"]
+    assert [m["text"] for m in first["console"]] == ["careful", "broken"]
+    assert first["requests"] == [{"url": "https://s.test/", "status": 404}]
+    assert calls == [("errors",), ("console",), ("network", "requests")]
+    # Reading again shows the same; clearing keeps what was read from being shown again.
+    assert len(session.diagnostics()["errors"]) == 3
+    calls.clear()
+    assert len(session.diagnostics(clear=True)["errors"]) == 3
+    assert calls[-2:] == [("console", "--clear"), ("network", "requests", "--clear")]
+    errors.append({"text": "e3", "line": 3, "column": 0})
+    assert [e["text"] for e in session.diagnostics()["errors"]] == ["e3"]
+    # A buffer that holds fewer errors than were counted has been emptied by the browser.
+    del errors[:]
+    errors.append({"text": "fresh", "line": 0, "column": 0})
+    assert [e["text"] for e in session.diagnostics()["errors"]] == ["fresh"]
 
 
 # --- saving pictures and files ------------------------------------------------------------

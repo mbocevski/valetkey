@@ -23,6 +23,7 @@ from valetkey import (
     deltas,
     downloads,
     expiry,
+    pagelog,
     procs,
     sandbox,
     sessions,
@@ -789,6 +790,25 @@ class Sessions:
         result = await self.session_op(connection, state, lambda session: session.screenshot(name))
         result["path"] = str(result.pop("_value"))
         return result
+
+    async def op_console(self, connection: Connection, args: dict[str, Any]) -> dict[str, Any]:
+        """Answer ``console``: what the page says went wrong, from its own buffers.
+
+        The page's errors, its console messages of level warning and error, and its requests that
+        failed (see :mod:`valetkey.pagelog`). With ``clear`` they are emptied after reading.
+        Nothing here reaches outside the session.
+        """
+        state = self.registry.state(self.registry.site_of(args))
+        clear = args.get("clear", False)
+        if not isinstance(clear, bool):
+            fail("bad_request", '"clear" must be true or false')
+        result = await self.session_op(
+            connection, state, lambda session: session.diagnostics(clear=clear)
+        )
+        raw = result.pop("_value")
+        refused = {r.host for r in state.proxy.refused_since(0)[0]} if state.proxy else set()
+        now = self._now().timestamp() * 1000
+        return result | pagelog.report(raw, now_ms=now, refused=refused)
 
     async def session_op(
         self, connection: Connection, state: Site, call: Callable[[BrowserSession], Any]

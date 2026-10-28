@@ -60,6 +60,9 @@ class BrowserSession(Protocol):
     def match_count(self, selector: str) -> int:
         """Count the elements that the CSS ``selector`` matches."""
 
+    def diagnostics(self, *, clear: bool = False) -> dict[str, list[dict[str, Any]]]:
+        """Read the page's errors, console messages and requests; with ``clear`` empty them."""
+
     def clear_requests(self) -> None:
         """Forget the logged network requests."""
 

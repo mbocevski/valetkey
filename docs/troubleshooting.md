@@ -104,6 +104,13 @@ is private. See [Private networks](security.md) and run
 `valetkey allow SITE --private-network RANGE` with the narrowest range that holds the address.
 Before the first login, run `valetkey add SITE START --private-network RANGE` instead.
 
+## A page stalls or stays blank
+
+If no host is refused, the page itself may be failing. The agent can call `browser_console`: it
+lists the page's errors, the console's warnings and errors, and the requests that failed or got no
+response, with the stack and the line for an error. A request marked refused needs a host allowed
+(see above); an error in the page's own code is for the site's owner.
+
 ## A tool says the session was closed
 
 A session that nothing uses for 15 minutes is closed, and the next call says so and asks the agent
