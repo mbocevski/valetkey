@@ -799,8 +799,9 @@ DESCRIPTIONS = {
         "save."
     ),
     "browser_click": (
-        "Click an element, named by its reference (e3) from your latest browser_snapshot, or by "
-        "its visible text with an optional role. The element is looked up again by role and "
+        "Click an element, named by its reference (e3) from your latest browser_snapshot or by "
+        "its visible text; give hover to hover over something first, and exact to match a name "
+        "exactly. With text you may add a role. The element is looked up again by role and "
         "name at click time, so a page that re-rendered cannot send the click elsewhere. A text "
         "that is not a whole name still matches an element whose name holds it as whole words "
         "(an icon label around it), but only if exactly one does; set exact to click only an "
