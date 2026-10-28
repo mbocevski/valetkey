@@ -125,7 +125,9 @@ class Target:
     role: str | None = None
     ref: str | None = None
     fold: bool = False
-    """Ignore case when comparing names (used for text the caller typed, not for a snapshot's)."""
+    """Ignore case when comparing names, and take the one name that holds the text as whole words
+    when none is equal (used for text the caller typed, not for a snapshot's). A click with
+    ``exact`` leaves it off: only a name equal to the text, case included, is the target."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +152,14 @@ def _text_arg(value: object, name: str) -> str | None:
     return value
 
 
+def _flag_arg(value: object, name: str) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        _refuse("bad_request", f'"{name}" must be true or false')
+    return value
+
+
 def build_target(args: Mapping[str, Any], known: Mapping[str, tuple[str, str]]) -> Target:
     """Turn the arguments of a click into a :class:`Target`.
 
@@ -157,18 +167,21 @@ def build_target(args: Mapping[str, Any], known: Mapping[str, tuple[str, str]]) 
 
     Raises:
         ClickError: ``bad_request`` unless exactly one of ``ref`` and ``text`` is given, or if
-            ``role`` is given with ``ref``; ``unknown_ref`` when the caller never saw that
-            reference in a snapshot.
+            ``role`` or ``exact`` is given with ``ref``; ``unknown_ref`` when the caller never saw
+            that reference in a snapshot.
 
     """
     ref = _text_arg(args.get("ref"), "ref")
     text = _text_arg(args.get("text"), "text")
     role = _text_arg(args.get("role"), "role")
+    exact = _flag_arg(args.get("exact"), "exact")
     if (ref is None) == (text is None):
         _refuse("bad_request", "give exactly one of ref and text")
     if text is None:
         if role is not None:
             _refuse("bad_request", "role goes with text; a reference already says what it is")
+        if exact:
+            _refuse("bad_request", "exact goes with text; a reference already says what it is")
         match = _REF.fullmatch(ref or "")
         if match is None:
             _refuse("bad_request", f"not a reference from a snapshot: {ref!r}")
@@ -181,7 +194,7 @@ def build_target(args: Mapping[str, Any], known: Mapping[str, tuple[str, str]]) 
             )
         found_role, found_name = known[key]
         return Target(name=normalize(found_name), role=found_role, ref=key)
-    return Target(name=normalize(text), role=role, fold=True)
+    return Target(name=normalize(text), role=role, fold=not exact)
 
 
 def parse_expectation(raw: object) -> Expect | None:

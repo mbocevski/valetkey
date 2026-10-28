@@ -320,7 +320,7 @@ EXPECTED_TOOLS = {
     "browser_login": {"site_or_url", "account"},
     "browser_open": {"site"},
     "browser_snapshot": {"site", "images", "interactive", "selector", "start_line"},
-    "browser_click": {"site", "ref", "text", "role", "expect"},
+    "browser_click": {"site", "ref", "text", "role", "expect", "exact"},
     "browser_type": {"site", "ref", "text", "submit"},
     "browser_navigate": {"site", "url"},
     "browser_save": {"site", "ref", "url"},
@@ -3020,6 +3020,24 @@ def test_text_from_the_browser_or_a_log_is_fenced_and_labelled(
 )
 def test_the_daemons_own_messages_are_printed_as_they_are(code: str, message: str) -> None:
     assert mcp_server.error_text(DaemonError(code, message)) == f"{code}: {message}"
+
+
+def test_a_click_passes_exact_only_when_it_is_set(short_dir: Path) -> None:
+    async def scenario() -> None:
+        async with connected(short_dir) as (mcp, fake, _bridge):
+            fake.handlers["click"] = lambda _a: ENVELOPE | CLICKED
+            await mcp.call_tool("browser_click", {"site": "sitex", "text": "Orders"})
+            assert "exact" not in fake.requests[-1]["args"]
+            await mcp.call_tool(
+                "browser_click", {"site": "sitex", "text": "Orders", "exact": False}
+            )
+            assert "exact" not in fake.requests[-1]["args"]
+            await mcp.call_tool("browser_click", {"site": "sitex", "text": "Orders", "exact": True})
+            assert fake.requests[-1]["args"] == {"site": "sitex", "text": "Orders", "exact": True}
+            tools = {t.name: t.description or "" for t in (await mcp.list_tools()).tools}
+            assert "exact" in tools["browser_click"]
+
+    run(scenario())
 
 
 def test_a_login_can_name_an_account_and_a_bare_name_can_be_refused(short_dir: Path) -> None:

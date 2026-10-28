@@ -3104,6 +3104,32 @@ def test_a_login_records_where_forms_were_submitted_from(roots: sites.Roots) -> 
     run(scenario())
 
 
+def test_an_exact_click_through_the_daemon_wants_the_whole_name_and_a_text(
+    roots: sites.Roots,
+) -> None:
+    add_site(roots)
+
+    async def scenario() -> None:
+        async with serving(roots) as rig, await rig.connect() as c:
+            await c.call("open", site="sitex")
+            await c.call("snapshot", site="sitex")
+            # The page has a "Go" button: a lower-case text finds it, an exact one does not.
+            assert (await c.call("click", site="sitex", text="go"))["clicked"]["name"][
+                "text"
+            ] == "Go"
+            with pytest.raises(DaemonError) as info:
+                await c.call("click", site="sitex", text="go", exact=True)
+            assert info.value.code == "target_not_found"
+            done = await c.call("click", site="sitex", text="Go", exact=True)
+            assert done["clicked"] == {"role": "button", "name": {"untrusted": True, "text": "Go"}}
+            for bad in ({"ref": "e1", "exact": True}, {"exact": True}, {"text": "Go", "exact": 1}):
+                with pytest.raises(DaemonError) as refused:
+                    await c.call("click", site="sitex", **bad)
+                assert refused.value.code == "bad_request"
+
+    run(scenario())
+
+
 def test_a_verified_click_through_the_daemon(
     roots: sites.Roots, monkeypatch: pytest.MonkeyPatch
 ) -> None:

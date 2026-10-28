@@ -48,9 +48,21 @@ def test_text_with_or_without_a_role() -> None:
     assert build_target({"text": "Go", "role": "link"}, {}) == Target("Go", "link", fold=True)
 
 
+def test_exact_turns_off_the_folding_and_the_words_for_a_text() -> None:
+    assert build_target({"text": " Orders ", "exact": True}, {}) == Target("Orders", fold=False)
+    assert build_target({"text": "Go", "role": "link", "exact": True}, {}) == Target(
+        "Go", "link", fold=False
+    )
+    assert build_target({"text": "Go", "exact": False}, {}) == Target("Go", fold=True)
+
+
 @pytest.mark.parametrize(
     ("args", "code"),
     [
+        ({"ref": "e1", "exact": True}, "bad_request"),
+        ({"exact": True}, "bad_request"),
+        ({"text": "x", "exact": "yes"}, "bad_request"),
+        ({"text": "x", "exact": 1}, "bad_request"),
         ({}, "bad_request"),
         ({"ref": "e1", "text": "x"}, "bad_request"),
         ({"ref": "e1", "role": "button"}, "bad_request"),
@@ -237,6 +249,32 @@ def test_a_reference_is_never_matched_by_words() -> None:
     fresh = refs(e1=("link", "icon_a Orders icon_b"))
     with pytest.raises(ClickError):
         resolve(fresh, Target("Orders", "link", ref="e9"))  # an exact snapshot name, no fold
+
+
+def test_an_exact_click_takes_only_a_whole_name_equal_to_the_text() -> None:
+    fresh = refs(e1=("link", "Archived orders"), e2=("button", "Save"), e3=("link", "Orders now"))
+    # Without exact, the one name that holds the text as whole words is taken, and case is ignored.
+    assert resolve(fresh, build_target({"text": "archived ORDERS"}, {}))[0] == "e1"
+    assert resolve(fresh, build_target({"text": "save"}, {}))[0] == "e2"
+    # With it, an equal name clicks...
+    assert resolve(fresh, build_target({"text": "Save", "exact": True}, {}))[0] == "e2"
+    assert (
+        resolve(fresh, build_target({"text": "Save", "role": "button", "exact": True}, {}))[0]
+        == "e2"
+    )
+    # ...a name that only holds the words is refused, with the near names, and so is another case.
+    with pytest.raises(ClickError) as info:
+        resolve(fresh, build_target({"text": "Orders", "exact": True}, {}))
+    assert info.value.code == "target_not_found"
+    assert info.value.details["candidates"] == [
+        {"role": "link", "name": "Archived orders"},
+        {"role": "link", "name": "Orders now"},
+    ]
+    for text in ("save", "SAVE"):
+        with pytest.raises(ClickError) as other:
+            resolve(fresh, build_target({"text": text, "exact": True}, {}))
+        assert other.value.code == "target_not_found"
+        assert other.value.details["candidates"] == [{"role": "button", "name": "Save"}]
 
 
 def test_names_are_compared_with_whitespace_made_single() -> None:

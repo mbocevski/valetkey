@@ -34,8 +34,8 @@ Start with `browser_sites`. The others act on one site by its name.
   for each element to act on. A long page is cut, and `interactive` lists only those elements.
   `images` adds the biggest pictures and videos. `selector` reads one part of the page (see
   [below](#reading-one-part-of-a-page)).
-- `browser_click` clicks an element by reference, or by visible text and role. Text that is
-  part of one name, as whole words, also matches. It looks the element up again at click time, and
+- `browser_click` clicks an element by reference, or by visible text and role (see
+  [clicking by text](#clicking-by-text)). It looks the element up again at click time, and
   checks an `expect` of `text_appears`, `text_gone` or `url_changes`. Only a click with an `expect`
   is repeated, and only if the first changed nothing.
 - `browser_type` replaces the contents of a field, and presses Enter when `submit` is true.
@@ -145,6 +145,15 @@ The agent adds an account with `browser_login` and its `account` argument, for e
 `site_or_url` `sitex` with `account` `work`. The new account starts at the same page, with its own
 list of hosts. You can start it with the hosts of another account using
 `valetkey add sitex:work START --copy-hosts-from sitex`. Only you can do that.
+
+## Clicking by text
+
+`browser_click` with `text` clicks the element whose name equals the text, ignoring case and
+runs of spaces. When none does, it takes the one element whose name holds the text as whole words,
+such as `icon_user Orders icon_arrow` for `Orders`, and refuses when several do. That can click
+`Archived orders` for `Orders` when the page has no `Orders`. With `exact` true only a name equal
+to the text matches, case included, and there is no whole-word fallback. A text that matches no
+element is `target_not_found`, with the near names. `exact` needs `text`, and `role` still narrows.
 
 ## Reading one part of a page
 

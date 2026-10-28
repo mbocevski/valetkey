@@ -803,7 +803,8 @@ DESCRIPTIONS = {
         "its visible text with an optional role. The element is looked up again by role and "
         "name at click time, so a page that re-rendered cannot send the click elsewhere. A text "
         "that is not a whole name still matches an element whose name holds it as whole words "
-        "(an icon label around it), but only if exactly one does. If the name matches nothing or "
+        "(an icon label around it), but only if exactly one does; set exact to click only an "
+        "element whose whole name equals the text, case included. If the name matches nothing or "
         "several elements, nothing is clicked. Say what should follow "
         "in expect (text_appears, text_gone or url_changes) and the result says whether it "
         "happened. Only a click with an expect is ever repeated, and only if the first changed "
@@ -1295,7 +1296,7 @@ class _Tools:
             ]
         )
 
-    async def browser_click(
+    async def browser_click(  # noqa: PLR0913 - the arguments are the tool's schema
         self,
         site: SITE,
         ref: Annotated[
@@ -1310,9 +1311,19 @@ class _Tools:
         expect: Annotated[
             Expectation | None, Field(description="What should happen after the click.")
         ] = None,
+        *,
+        exact: Annotated[
+            bool,
+            Field(
+                description="With text: click only an element whose whole name equals the text, "
+                "case included, never one whose name merely holds it."
+            ),
+        ] = False,
     ) -> str:
         arguments: dict[str, Any] = {"site": site, "ref": ref, "text": text, "role": role}
         arguments = {k: v for k, v in arguments.items() if v is not None}
+        if exact:
+            arguments["exact"] = True
         if expect is not None:
             arguments["expect"] = expect.model_dump()
         result = await self._ask("click", **arguments)
