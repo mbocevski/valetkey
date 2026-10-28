@@ -79,7 +79,7 @@ def test_a_login_expires_when_its_cookie_is_gone_and_a_working_one_never_looks_e
                 name = started["site"]
                 await wait_for(lambda: "GET /app" in site.hits, f"no sign-in: {site.hits}")
                 await asyncio.sleep(1)
-                await desktop.msg("[app_id=chromium]", "kill")
+                await desktop.close("chromium")
                 await wait_for(
                     lambda: sites.policy_path(roots, name).exists(), "the login was not saved"
                 )

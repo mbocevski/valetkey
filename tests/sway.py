@@ -67,6 +67,21 @@ class Sway:
         out, _ = await process.communicate()
         return out.decode()
 
+    async def close(self, app_id: str, limit: float = 60) -> None:
+        """Close a window of ``app_id`` once there is one, as the person does.
+
+        A browser's page can load well before the compositor has its window when the machine is
+        busy, and closing a window that is not there closes nothing and says so: nothing then ever
+        closes the window that appears a moment later. So this tries again until a window is closed.
+        """
+        deadline = time.monotonic() + limit
+        while True:
+            reply = json.loads(await self.msg(f"[app_id={app_id}]", "kill"))
+            if any(item.get("success") for item in reply):
+                return
+            assert time.monotonic() < deadline, f"no {app_id} window to close"
+            await asyncio.sleep(0.2)
+
     async def windows(self) -> list[dict[str, Any]]:
         def walk(node: dict[str, Any]) -> list[dict[str, Any]]:
             found = [node] if node.get("app_id") else []

@@ -160,7 +160,7 @@ def test_a_session_can_use_the_providers_hosts_its_login_used(
                     await wait_for(lambda: hosts.reached(SITE, "/callback"), f"{hosts.log}")
                     await wait_for(lambda: hosts.log.count((SITE, "/")) >= 2, f"{hosts.log}")
                     await asyncio.sleep(1)
-                    await desktop.msg("[app_id=chromium]", "kill")
+                    await desktop.close("chromium")
                     await wait_for(
                         lambda: server.registry.sites[name].kind == "idle", "still logging in"
                     )
