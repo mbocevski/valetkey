@@ -45,7 +45,7 @@ valetkey doctor
 - [bubblewrap](https://github.com/containers/bubblewrap)
 - Chromium
 - `publicsuffix-list` (`publicsuffix` on Debian and Ubuntu)
-- [agent-browser](https://github.com/vercel-labs/agent-browser) 0.39 or newer, tested with 0.39.4
+- [agent-browser](https://github.com/vercel-labs/agent-browser) 0.39 or newer, tested with 0.40.0
 - A Wayland desktop, to log in (or a bridge or a browser view, for a server: see Remote logins)
 
 The [install page](docs/install.md) says what each route installs and how to remove it.

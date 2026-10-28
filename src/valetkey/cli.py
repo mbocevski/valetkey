@@ -1365,7 +1365,7 @@ def doctor(
     user namespaces, Chromium, agent-browser 0.39 or newer, and XDG_RUNTIME_DIR. A missing
     Wayland display is a warning, because only logging in needs one, and so is a compositor
     without security-context support, where the login window is not restricted, and an
-    agent-browser newer than 0.39.4, the version valetkey was tested with, and so is a CPU other
+    agent-browser newer than 0.40.0, the version valetkey was tested with, and so is a CPU other
     than x86_64, where the sandbox has no syscall filter. When a site has the microphone on, the
     programs its audio needs must be installed (a failure if not) and the audio server's socket
     must exist (a warning if not). The state of the systemd units is shown for information. A

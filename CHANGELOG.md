@@ -70,6 +70,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- `valetkey doctor` no longer warns that agent-browser 0.40.0 is newer than the version valetkey was tested with; valetkey is now tested with 0.40.0.
 - A click that opens a very large menu now lists it, as lines with their references, and not as a new page; this holds with or without an expectation.
 - A click that opens a menu on a long page lists the menu even when something far from it changes too. It counts any lines it leaves out, and no longer says the page changed a lot.
 - The browser no longer asks the proxy for `update.googleapis.com` at the start of every session, so it is not listed among the refused background requests.

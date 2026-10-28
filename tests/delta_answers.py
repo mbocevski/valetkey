@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Answers of ``agent-browser snapshot -i --delta`` in the form agent-browser 0.39.4 writes them.
+"""Answers of ``agent-browser snapshot -i --delta`` in the form agent-browser 0.40.0 writes them.
 
 The keys, the ``@`` before a reference in a change, and the splice are as recorded from a local
 page whose button adds a link, removes one, renames one and replaces one with two. The tree is

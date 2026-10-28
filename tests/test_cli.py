@@ -930,7 +930,7 @@ class FakeSystem:
         self.outputs: dict[str, tuple[int, str]] = {
             "/usr/bin/bwrap --version": (0, "bubblewrap 0.13.1\n"),
             "/usr/bin/chromium --version": (0, "Chromium 156.0.8078.47 Arch Linux\n"),
-            "/usr/bin/agent-browser --version": (0, "agent-browser 0.39.4\n"),
+            "/usr/bin/agent-browser --version": (0, "agent-browser 0.40.0\n"),
             "/usr/bin/agent-browser --help": (0, "Options:\n  --no-webmcp  Disable WebMCP\n"),
             "systemctl --user is-active valetkeyd.socket": (3, "inactive\n"),
         }
@@ -1000,7 +1000,7 @@ def test_doctor_all_good(tmp_path: Path, suffix_list: Path) -> None:
         "bwrap": ("ok", "bwrap 0.13.1"),
         "namespaces": ("ok", "unprivileged user namespaces work"),
         "chromium": ("ok", "chromium 156"),
-        "agent-browser": ("ok", "agent-browser 0.39.4"),
+        "agent-browser": ("ok", "agent-browser 0.40.0"),
         "runtime-dir": ("ok", "XDG_RUNTIME_DIR=/run/user/1000"),
         "display": ("ok", "Wayland display /run/user/1000/wayland-1"),
         "security-context": ("ok", "the Wayland compositor restricts the login window"),
@@ -1109,7 +1109,7 @@ def test_doctor_fails_an_agent_browser_that_does_not_list_no_webmcp(tmp_path: Pa
     assert results(fake)["agent-browser"] == (
         "fail",
         (
-            "agent-browser 0.39.4 does not list --no-webmcp, which valetkey passes; "
+            "agent-browser 0.40.0 does not list --no-webmcp, which valetkey passes; "
             "every release from 0.36.0 on has it"
         ),
     )
@@ -1120,9 +1120,9 @@ def test_doctor_warns_about_a_newer_agent_browser_and_does_not_fail(tmp_path: Pa
     fake.outputs["/usr/bin/agent-browser --version"] = (0, "agent-browser 0.40.1\n")
     assert results(fake)["agent-browser"] == (
         "warn",
-        "agent-browser 0.40.1 is newer than 0.39.4, the version valetkey was tested with",
+        "agent-browser 0.40.1 is newer than 0.40.0, the version valetkey was tested with",
     )
-    for version in ("0.39.0", "0.39.4"):
+    for version in ("0.39.0", "0.40.0"):
         fake.outputs["/usr/bin/agent-browser --version"] = (0, f"agent-browser {version}\n")
         assert results(fake)["agent-browser"] == ("ok", f"agent-browser {version}")
 

@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 MIN_VERSION = (0, 39, 0)
 """The oldest agent-browser this module drives. The README, the PKGBUILD and ``doctor`` repeat
 it, and ``tools/version_check.py`` and ``tools/readme_check.py`` keep them in step."""
-TESTED_VERSION = (0, 39, 4)
+TESTED_VERSION = (0, 40, 0)
 """The agent-browser version the behavior here was checked against. The CI workflow installs this
 version, and ``tools/version_check.py`` checks that it does."""
 

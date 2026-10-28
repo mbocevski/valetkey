@@ -71,8 +71,8 @@ jobs:
       # packages inside are whatever Arch has when the job runs.
       ARCH_IMAGE: archlinux@sha256:52dfbd5afb23a220d5ee92dafcb4c788d96c026ed04179890c23adef4c897fa0
       # The tested agent-browser release and the SHA-256 of its linux-x64 binary.
-      AGENT_BROWSER_VERSION: 0.39.4
-      AGENT_BROWSER_SHA256: aa82c8ee81a38b8ad9ba61af02ced6dcbbb8af36dd8b2b479384177f8aa077a6
+      AGENT_BROWSER_VERSION: 0.40.0
+      AGENT_BROWSER_SHA256: da26cc8029c004325b960fa955951063380cb61e622cc580fd5adf3aa89e4676
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
