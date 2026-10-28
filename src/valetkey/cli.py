@@ -1500,24 +1500,56 @@ def _show_activity(*, as_json: bool, show_links: bool) -> int:
     return 0
 
 
-async def _watch_daemon() -> int:
-    try:
-        connection = await client.Client.connect()
-    except client.DaemonError as error:
-        return _fail(CommandError(error.message))
-    async with connection:
+WAIT_FIRST = 0.25
+"""Seconds ``watch --wait`` waits before it looks for the daemon again."""
+WAIT_LIMIT = 3.0
+"""The longest it waits between two looks. Each look is one connection attempt to a socket."""
+DAEMON_STOPPED = '{"event":"daemon_stopped"}'
+
+
+async def _pause(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+async def _watch_daemon(*, wait: bool) -> int:
+    """Print what the daemon reports; with ``wait``, outlast daemons and never start one."""
+    pause = WAIT_FIRST
+    while True:
         try:
-            async for event in connection.watch():
-                _say(json.dumps(event, separators=(",", ":")))
-                sys.stdout.flush()
+            connection = await client.Client.connect()
         except client.DaemonError as error:
-            if error.code != "connection_lost":
+            if not wait:
                 return _fail(CommandError(error.message))
-    return 0
+            await _pause(pause)
+            pause = min(pause * 2, WAIT_LIMIT)
+            continue
+        pause = WAIT_FIRST
+        async with connection:
+            try:
+                async for event in connection.watch():
+                    _say(json.dumps(event, separators=(",", ":")))
+                    sys.stdout.flush()
+            except client.DaemonError as error:
+                if error.code != "connection_lost":
+                    return _fail(CommandError(error.message))
+        if not wait:
+            return 0
+        _say(DAEMON_STOPPED)
+        sys.stdout.flush()
 
 
 @app.command
-def watch() -> int:
+def watch(
+    *,
+    wait: Annotated[
+        bool,
+        Parameter(
+            name="--wait",
+            negative="",
+            help="Wait for a daemon instead of failing, and for the next one when it stops.",
+        ),
+    ] = False,
+) -> int:
     """Print one JSON line for every change to the sessions, login windows and bridges.
 
     The first line is a snapshot of what is open, as `status --json` shows it, with "event" set
@@ -1527,10 +1559,12 @@ def watch() -> int:
     bridge the key is bridge instead of site, and event is bridge_connected or
     bridge_disconnected. Bars and indicators can read the lines as they come. The command runs
     until it is interrupted or the daemon stops; it exits 1 when no daemon is running, and does
-    not start one.
+    not start one. With --wait it never exits for that: it waits for a daemon, prints
+    {"event":"daemon_stopped"} when the daemon ends, and when another one runs it prints the
+    snapshot again. It looks for a daemon every few seconds at most, and never starts one.
     """
     try:
-        return asyncio.run(_watch_daemon())
+        return asyncio.run(_watch_daemon(wait=wait))
     except KeyboardInterrupt:
         return 0
     except sites.RuntimeDirUnavailableError as error:

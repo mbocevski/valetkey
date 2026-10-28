@@ -311,7 +311,8 @@ Parameters:
 
 `valetkey status` lists the open browser sessions and login windows. `valetkey watch` prints one
 JSON line for each start or end, which a status bar can read. Both ask the daemon and never start
-it. Nothing can hide a session from them. When a session starts, `notify-send` shows a desktop
+it. `valetkey watch --wait` does not exit when there is no daemon: it waits for one, prints
+`{"event":"daemon_stopped"}` when it ends, and prints the snapshot again when the next one runs. Nothing can hide a session from them. When a session starts, `notify-send` shows a desktop
 notification if it is installed.
 
 A session that nothing uses is closed after `session_idle_minutes` minutes, 15 unless you set it
@@ -365,7 +366,7 @@ browser. [default: False]
 
 <!-- begin: valetkey watch --help -->
 ```text
-Usage: valetkey watch
+Usage: valetkey watch [OPTIONS]
 
 Print one JSON line for every change to the sessions, login windows and bridges.
 
@@ -377,7 +378,14 @@ microphone ("microphone": true or false). For a bridge the key is bridge instead
 of site, and event is bridge_connected or bridge_disconnected. Bars and
 indicators can read the lines as they come. The command runs until it is
 interrupted or the daemon stops; it exits 1 when no daemon is running, and does
-not start one.
+not start one. With --wait it never exits for that: it waits for a daemon,
+prints {"event":"daemon_stopped"} when the daemon ends, and when another one
+runs it prints the snapshot again. It looks for a daemon every few seconds at
+most, and never starts one.
+
+Parameters:
+  --wait: Wait for a daemon instead of failing, and for the next one when it
+stops. [default: False]
 ```
 <!-- end: valetkey watch --help -->
 

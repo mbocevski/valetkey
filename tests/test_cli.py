@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import io
 import json
 import os
@@ -8,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1642,6 +1644,93 @@ def test_watch_stops_quietly_when_interrupted(
     connect_to(monkeypatch, FakeConnection(events=EVENTS[:1], end=KeyboardInterrupt()))
     status, out, _ = run(capsys, "watch")
     assert (status, len(out.splitlines())) == (0, 1)
+
+
+def connect_in_turn(
+    monkeypatch: pytest.MonkeyPatch, turns: Sequence[FakeConnection | BaseException]
+) -> list[int]:
+    """Answer each connection attempt from ``turns``, in order; return the attempts so far."""
+    attempts: list[int] = []
+
+    async def connect(_path: object = None) -> FakeConnection:
+        turn = turns[len(attempts)]
+        attempts.append(len(attempts))
+        if isinstance(turn, BaseException):
+            raise turn
+        return turn
+
+    monkeypatch.setattr(cli.client.Client, "connect", staticmethod(connect))
+    return attempts
+
+
+def pauses(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    waited: list[float] = []
+
+    async def pause(seconds: float) -> None:
+        waited.append(seconds)
+
+    monkeypatch.setattr(cli, "_pause", pause)
+    return waited
+
+
+def test_watch_wait_waits_for_a_daemon_with_growing_pauses_and_never_starts_one(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waited = pauses(monkeypatch)
+    ends = KeyboardInterrupt()
+    turns = [not_running()] * 7 + [FakeConnection(events=EVENTS[:1], end=ends)]
+    attempts = connect_in_turn(monkeypatch, turns)
+    status, out, err = run(capsys, "watch", "--wait")
+    assert (status, err) == (0, "")
+    assert [json.loads(line) for line in out.splitlines()] == EVENTS[:1]
+    assert waited == [0.25, 0.5, 1.0, 2.0, 3.0, 3.0, 3.0]  # never longer than three seconds
+    assert len(attempts) == 8
+
+
+def test_the_pause_between_looks_for_the_daemon_really_waits() -> None:
+    started = time.monotonic()
+    asyncio.run(cli._pause(0.05))  # noqa: SLF001 - the one place the wait is real
+    assert time.monotonic() - started >= 0.04
+
+
+def test_watch_wait_says_when_the_daemon_stops_and_prints_the_next_snapshot(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waited = pauses(monkeypatch)
+    lost = cli.client.DaemonError("connection_lost", "the connection to valetkeyd was lost")
+    turns = [
+        FakeConnection(events=EVENTS[:1], end=lost),
+        not_running(),
+        FakeConnection(events=EVENTS[:1], end=lost),
+        not_running(),
+        not_running(),
+        FakeConnection(events=EVENTS[1:], end=KeyboardInterrupt()),
+    ]
+    connect_in_turn(monkeypatch, turns)
+    status, out, _ = run(capsys, "watch", "--wait")
+    assert status == 0
+    assert out.splitlines() == [
+        json.dumps(EVENTS[0], separators=(",", ":")),
+        '{"event":"daemon_stopped"}',
+        json.dumps(EVENTS[0], separators=(",", ":")),
+        '{"event":"daemon_stopped"}',
+        json.dumps(EVENTS[1], separators=(",", ":")),
+    ]
+    assert waited == [0.25, 0.25, 0.5]  # a daemon that came back resets the pause
+
+
+def test_watch_wait_still_fails_on_a_daemon_error_and_without_a_runtime_directory(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pauses(monkeypatch)
+    error = cli.client.DaemonError("unknown_op", "no such operation: watch")
+    connect_in_turn(monkeypatch, [FakeConnection(end=error)])
+    status, out, err = run(capsys, "watch", "--wait")
+    assert (status, out, err) == (1, "", "valetkey: no such operation: watch\n")
+    unavailable = sites.RuntimeDirUnavailableError("no runtime directory")
+    connect_in_turn(monkeypatch, [unavailable])
+    status, _, err = run(capsys, "watch", "--wait")
+    assert (status, err) == (1, "valetkey: no runtime directory\n")
 
 
 def test_allow_and_deny_keep_the_login_pages(

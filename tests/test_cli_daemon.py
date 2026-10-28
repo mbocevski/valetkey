@@ -6,7 +6,9 @@ import fcntl
 import io
 import json
 import os
+import queue
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -596,3 +598,57 @@ def test_mic_turns_the_microphone_on_and_off_and_tells_a_live_session_it_is_unch
         assert run(capsys, "mic", "sitex", "off")[1].startswith("sitex: the microphone is now off.")
         assert sites.load_policy(roots, "sitex").microphone is False
     assert fake.ops == ["reload_policy", "reload_policy"]
+
+
+# -- watch --wait, across a daemon that starts, stops and starts again -----------------------
+
+
+class WatchProcess:
+    """``valetkey watch --wait`` as a real process, with its lines read on a thread."""
+
+    def __init__(self) -> None:
+        self.process = subprocess.Popen(
+            [sys.executable, "-m", "valetkey", "watch", "--wait"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.lines: queue.Queue[str] = queue.Queue()
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self) -> None:
+        assert self.process.stdout is not None
+        for line in self.process.stdout:
+            self.lines.put(line.strip())
+
+    def next(self, seconds: float = 30) -> dict[str, Any]:
+        return json.loads(self.lines.get(timeout=seconds))
+
+    def stop(self) -> str:
+        self.process.terminate()
+        _, errors = self.process.communicate(timeout=30)
+        return errors
+
+
+def test_watch_wait_follows_a_daemon_that_starts_stops_and_starts_again(
+    roots: sites.Roots,
+) -> None:
+    socket_path = client.socket_path(roots)
+    watching = WatchProcess()
+    try:
+        # With no daemon it waits, prints nothing, and does not start one.
+        time.sleep(1.5)
+        assert watching.process.poll() is None
+        assert watching.lines.empty()
+        assert not socket_path.exists()
+        with RealDaemon(daemon.Daemon(roots, user_environment=dict)):
+            assert watching.next()["event"] == "snapshot"
+        assert watching.next() == {"event": "daemon_stopped"}
+        assert watching.process.poll() is None
+        assert not socket_path.exists()  # still not started by the command
+        with RealDaemon(daemon.Daemon(roots, user_environment=dict)):
+            assert watching.next()["event"] == "snapshot"
+    finally:
+        errors = watching.stop()
+    assert errors == ""
+    assert watching.process.returncode in {0, -15}
