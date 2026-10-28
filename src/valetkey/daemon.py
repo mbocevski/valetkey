@@ -44,19 +44,21 @@ profile.
   downloaded (``in_progress``). A ``click`` or ``navigate`` answer carries the same under
   ``downloads``: the files that arrived since this client last looked.
 * ``status`` with no ``site``: what is running now. ``{"sessions": [{"site", "since",
-  "contained", "host", "idle_seconds", "closes_at"}], "logins": [{"site", "since"}],
+  "contained", "host", "microphone", "idle_seconds", "closes_at"}], "logins": [{"site", "since"}],
   "bridges": [{"bridge", "since"}]}``, the
   first two sorted by site. ``since`` is a UTC time, ``host`` is the host of the page the
   browser was last reported at (never the whole URL, which may carry a token). ``idle_seconds``
   is how long nothing has used the session and ``closes_at`` a UTC time: see **Idle sessions**.
-  It is read from
+  ``microphone`` is whether the session has one (see **The microphone**), and then ``capture``
+  says where its capture stream is. It is read from
   the processes the daemon owns. With ``links: true`` a login shown in a web browser also has
   ``remote`` (``url``, ``port``, ``ssh``): the link is a credential, so ``watch`` never carries
   it and nothing that reaches a model asks for it.
 * ``watch``: the connection stays open. The first answer is ``{"event": "snapshot", "at",
   "sessions", "logins"}`` as for ``status``; then one answer per change, each
   ``{"event": "session_started" | "session_ended" | "login_opened" | "login_closed",
-  "site", "at"}`` (a ``session_ended`` caused by lack of use also has ``"reason": "idle"``), or
+  "site", "at"}`` (a ``session_ended`` caused by lack of use also has ``"reason": "idle"``, and a
+  ``session_started`` has ``"microphone"``), or
   ``{"event": "bridge_connected" | "bridge_disconnected", "bridge", "at"}``,
   all with the request's ``id``. Nothing can hide a session from it.
 * ``bridge_register`` ``{rand}``: record the bridge ``bridge-<rand>``, whose socket the ssh
@@ -74,6 +76,18 @@ profile.
   ``remote_logins.waypipe`` (the answer then has ``route: "bridge"``), and otherwise in a web
   browser when it turns on ``novnc``. When the window closes the hosts it reached are
   classified and merged into the site's policy.
+
+**The microphone.** A site's policy has ``microphone``, off unless the person turned it on. A
+session of a site that has it on is started with a private audio graph (see
+:mod:`valetkey.audio`), and ``status`` reports ``"microphone": true`` and ``capture``:
+``{"socket", "directory", "node"}``, the graph's PulseAudio socket, the directory with its
+PipeWire socket, and the number of the node the browser records with (``null`` while nothing
+does). ``sites`` entries have ``microphone`` too. ``microphone_check`` ``{site}`` answers
+``{site, enabled, can_ask}``. ``microphone_ask`` ``{site, reason}`` asks through the approval
+command or a notification and answers ``{site, result, message}`` with ``allowed``, ``denied``,
+``expired`` or ``could_not_ask``; a no is not remembered. ``microphone_apply`` ``{site, channel}``
+turns it on because the MCP client's interface returned a yes, for the ``"elicitation"`` channel
+only. A running session is not changed: the setting applies from the next one.
 
 **Accounts.** A site can have several, named ``site:account`` and each with its own policy,
 profile and downloads. A bare ``site`` is the account of a site that has only one, and is refused
@@ -356,6 +370,9 @@ class Daemon:
             "deny_check": self.approvals.op_deny_check,
             "deny_apply": self.approvals.op_deny_apply,
             "deny_ask": self.approvals.op_deny_ask,
+            "microphone_check": self.approvals.op_microphone_check,
+            "microphone_apply": self.approvals.op_microphone_apply,
+            "microphone_ask": self.approvals.op_microphone_ask,
             "bridge_register": self.logins.op_bridge_register,
         }
 
@@ -555,11 +572,29 @@ class Daemon:
             gone.cancel()
             self.registry.watchers.discard(watcher)
 
-    def _activity(self, event: str | None = None, *, links: bool = False) -> dict[str, Any]:
+    async def _captures(self) -> dict[str, dict[str, object]]:
+        """Ask each running session with the microphone where its capture stream is."""
+        found: dict[str, dict[str, object]] = {}
+        for name, state in list(self.registry.sites.items()):
+            session = state.session
+            if state.kind == "session" and state.microphone and session is not None:
+                capture = await asyncio.to_thread(session.capture_stream)
+                if capture is not None:
+                    found[name] = capture
+        return found
+
+    def _activity(
+        self,
+        event: str | None = None,
+        *,
+        links: bool = False,
+        captures: Mapping[str, dict[str, object]] | None = None,
+    ) -> dict[str, Any]:
         """Describe what runs now, from the registry the daemon's own processes keep.
 
         ``links`` adds the link of a login shown in a web browser. It is a credential, so only
-        ``status`` with ``links: true`` ever asks for it.
+        ``status`` with ``links: true`` ever asks for it. ``captures`` are the capture streams of
+        the sessions with the microphone (see :meth:`_captures`), which ``status`` adds.
         """
         sessions_now = []
         logins_now = []
@@ -567,10 +602,16 @@ class Daemon:
             state = self.registry.sites[name]
             since = state.since.strftime(TIME_FORMAT) if state.since else None
             if state.kind == "session":
-                sessions_now.append(
-                    {"site": name, "since": since, "contained": True, "host": state.host}
-                    | self.sessions.idle_fields(state)
-                )
+                entry_now: dict[str, Any] = {
+                    "site": name,
+                    "since": since,
+                    "contained": True,
+                    "host": state.host,
+                    "microphone": state.microphone,
+                }
+                if captures is not None and name in captures:
+                    entry_now["capture"] = captures[name]
+                sessions_now.append(entry_now | self.sessions.idle_fields(state))
             elif state.kind == "login":
                 entry: dict[str, Any] = {"site": name, "since": since}
                 if links and state.shown is not None:
@@ -624,6 +665,7 @@ class Daemon:
                     "learned": policy.learned.strftime("%Y-%m-%dT%H:%M:%SZ")
                     if policy and policy.learned
                     else None,
+                    "microphone": policy.microphone if policy else False,
                     "summary": state.summary,
                 }
             )
@@ -666,7 +708,7 @@ class Daemon:
             links = args.get("links", False)
             if not isinstance(links, bool):
                 fail("bad_request", '"links" must be true or false')
-            return self._activity(links=links)
+            return self._activity(links=links, captures=await self._captures())
         site = self.registry.site_of(args)
         state = self.registry.state(site)
         if state.kind != "session":
@@ -676,6 +718,9 @@ class Daemon:
         result = await self.sessions.session_op(connection, state, BrowserSession.is_alive)
         result.pop("_value")
         result["state"] = "session"
+        result["microphone"] = state.microphone
+        if state.microphone and (capture := (await self._captures()).get(site)) is not None:
+            result["capture"] = capture
         return result
 
 

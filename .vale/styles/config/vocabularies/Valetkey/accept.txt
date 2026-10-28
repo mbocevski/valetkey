@@ -40,3 +40,8 @@ as_json
 idle_seconds
 closes_at
 session_idle_minutes
+PipeWire
+WirePlumber
+PulseAudio
+pactl
+libpulse

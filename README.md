@@ -13,8 +13,8 @@ Three things hold for every session:
 - It reaches only the hosts that site needs. Everything else is refused, DNS lookups included.
 - You decide about anything more. The agent can ask for a host, and only you can say yes.
 
-valetkey is early software. An MCP client can already open a logged-in site, read it, click, type
-and download files.
+valetkey is early software, but a client can already open a logged-in site, read it, click, type
+and download.
 
 ## Install
 
@@ -26,7 +26,7 @@ systemctl --user enable --now valetkeyd.socket
 valetkey doctor
 ```
 
-After a `git pull`, run `makepkg -si` again to build the new code.
+After a `git pull`, run `makepkg -si` again.
 
 On other Linux systems, install from the checkout with uv:
 
@@ -64,7 +64,7 @@ explains how the agent asks for a host.
 ## Log in and use it
 
 1. Ask the agent to log in to a site. A browser window opens on your desktop.
-2. Sign in, with two-factor authentication if the site asks for it, and close the window. valetkey
+2. Sign in, with two-factor authentication if asked, and close the window. valetkey
    allows the hosts the login used, such as the site and its sign-in provider, apart from ads and
    tracking, and says which.
 3. The agent opens the site in a headless browser that is already signed in. It reads pages,
@@ -73,14 +73,16 @@ explains how the agent asks for a host.
    through a command you set up, or you run `valetkey allow SITE HOST` yourself.
 5. When the site forgets you, `browser_open` says the login expired, and the agent logs in again.
 
-`valetkey status` shows the open sessions at any time, and nothing can hide one. A session that
-nothing uses for 15 minutes closes itself, and `browser_open` starts it again.
+`valetkey status` shows the open sessions, and nothing can hide one. A session unused for 15
+minutes closes itself; `browser_open` starts it again.
 
 ## What it contains
 
 Each browser runs in its own Linux network namespace. Its only connection to the outside is a proxy
 that allows the site's hosts and refuses the rest, including private addresses, WebRTC and services
 on your machine. Page text reaches the agent labelled as untrusted data.
+
+The microphone stays off until you run `valetkey mic SITE on`; then a session hears nothing else.
 
 Pages the browser already cached still render, no tool uploads files, and a login window is refused
 on X11. A process running as your user can change a site's hosts with `valetkey allow`, so keep

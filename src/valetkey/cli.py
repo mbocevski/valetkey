@@ -10,17 +10,18 @@ import platform
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path  # the command-line framework reads the annotation at runtime
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from cyclopts import App, Parameter
 
 from valetkey import (
     __version__,
     approvals,
+    audio,
     client,
     daemon,
     display,
@@ -221,8 +222,9 @@ def list_sites(
     by a login and denied by you, when the hosts were last learned, the private address ranges it
     may reach (a dash for none), and whether a login profile exists. With --json, each site is an
     object with the keys site, account (the part after the colon of ``sitex:work``, or null),
-    host, allowed, excluded, denied, learned (a UTC time, or null), ``private_networks`` (a list)
-    and profile (true or false). A site with several accounts has a line for each.
+    host, allowed, excluded, denied, learned (a UTC time, or null), ``private_networks`` (a list),
+    microphone (true or false) and profile (true or false). A site with several accounts has a
+    line for each.
 
     With a site, it prints that one site's complete lists instead: the hosts it may reach, the
     hosts its last login left out and the hosts you denied, one to a line. With --json, that is
@@ -263,6 +265,7 @@ def list_sites(
                 "denied": len(policy.denied),
                 "learned": _learned(policy),
                 "private_networks": list(policy.private_networks),
+                "microphone": policy.microphone,
                 "profile": sites.profile_path(roots, name).is_dir(),
             }
         )
@@ -292,6 +295,7 @@ def _show_site(roots: sites.Roots, policy: sites.Policy, *, as_json: bool) -> in
                     "denied": list(policy.denied),
                     "learned": _learned(policy),
                     "private_networks": list(policy.private_networks),
+                    "microphone": policy.microphone,
                     "profile": sites.profile_path(roots, policy.site).is_dir(),
                 },
                 indent=2,
@@ -310,6 +314,7 @@ def _show_site(roots: sites.Roots, policy: sites.Policy, *, as_json: bool) -> in
         _say(f"{label} ({len(hosts)}):")
         for host in hosts:
             _say(f"  {host}")
+    _say(f"Microphone: {'on' if policy.microphone else 'off'}.")
     return 0
 
 
@@ -323,12 +328,14 @@ def _print_sites(rows: list[dict[str, object]]) -> None:
             str(row["denied"]),
             str(row["learned"] or "never"),
             ", ".join(map(str, row["private_networks"] or ())) or "-",  # ty: ignore[invalid-argument-type]
+            "on" if row["microphone"] else "off",
             "yes" if row["profile"] else "no",
         ]
         for row in rows
     ]
     _print_table(
-        ["SITE", "HOST", "ALLOWED", "EXCLUDED", "DENIED", "LEARNED", "NETWORKS", "PROFILE"], body
+        ["SITE", "HOST", "ALLOWED", "EXCLUDED", "DENIED", "LEARNED", "NETWORKS", "MIC", "PROFILE"],
+        body,
     )
 
 
@@ -587,6 +594,45 @@ def deny(site: str, host: str | None = None, *, network: PrivateNetwork = None) 
     if changed is None:
         _say(f"{site}: {name} was already denied and not allowed. Nothing changed.")
     _say_applied(site, applied=applied)
+    return 0
+
+
+@app.command
+def mic(site: str, setting: Literal["on", "off"] | None = None) -> int:
+    """Show, turn on or turn off the microphone for a site.
+
+    With the microphone on, the site's browser sessions can record what the microphone hears, and
+    nothing else of the machine's audio: each session gets a private audio graph with the
+    microphone and a silent output in it. It applies to sessions that start afterwards; a running
+    one keeps its setting until it is closed. The setting is off for every site until you turn it
+    on, and an agent can only ask you to. Without a setting this prints the current one.
+
+    Parameters
+    ----------
+    site
+        The site name, as shown by ``valetkey sites``, with its account (``sitex:work``) when
+        the site has more than one.
+    setting
+        ``on`` or ``off``. Leave it out to show the setting.
+
+    """
+    roots = sites.roots_from_env()
+    try:
+        policy = _load(roots, site)
+    except CommandError as error:
+        return _fail(error)
+    site = policy.site
+    state = "on" if policy.microphone else "off"
+    if setting is None:
+        _say(f"{site}: the microphone is {state}.")
+        return 0
+    if (setting == "on") == policy.microphone:
+        _say(f"{site}: the microphone was already {state}. Nothing changed.")
+        return 0
+    live = save_and_reload(roots, site, replace(policy, microphone=setting == "on"))
+    _say(f"{site}: the microphone is now {setting}.")
+    if live:
+        _say(f"{site}: the running session keeps its setting. Close it and open it again.")
     return 0
 
 
@@ -1213,6 +1259,27 @@ def check_seccomp(system: System) -> Check:
     return Check("seccomp", "warn", detail)
 
 
+def check_microphone(system: System) -> list[Check]:
+    """Check what the microphone needs, if any site has it on; nothing is reported otherwise."""
+    names = []
+    for name in sites.known_sites(system.roots):
+        with contextlib.suppress(OSError, sites.PolicyError):
+            if sites.load_policy(system.roots, name).microphone:
+                names.append(name)
+    if not names:
+        return []
+    listed = ", ".join(names)
+    missing = audio.missing_programs(system.which)
+    if missing:
+        detail = f"the microphone is on for {listed}, but {', '.join(missing)} is not installed"
+        return [Check("microphone", "fail", detail)]
+    runtime = system.roots.runtime
+    if runtime is None or not audio.upstream_socket(runtime).is_socket():
+        detail = f"the microphone is on for {listed}, but the audio server's socket is missing"
+        return [Check("microphone", "warn", detail)]
+    return [Check("microphone", "ok", f"the microphone is on for {listed}, and audio is running")]
+
+
 def check_suffix_list(_system: System) -> Check:
     """Check that the public suffix list is installed, which logins need to name a site."""
     try:
@@ -1277,6 +1344,7 @@ def run_checks(system: System) -> list[Check]:
         *check_security_context(system),
         *check_remote_login(system),
         check_seccomp(system),
+        *check_microphone(system),
         check_suffix_list(system),
         *check_policies(system),
         *check_config(system),
@@ -1298,8 +1366,10 @@ def doctor(
     Wayland display is a warning, because only logging in needs one, and so is a compositor
     without security-context support, where the login window is not restricted, and an
     agent-browser newer than 0.39.4, the version valetkey was tested with, and so is a CPU other
-    than x86_64, where the sandbox has no syscall filter. The state of the systemd units is shown
-    for information. A `config.json` that others can write to is ignored and
+    than x86_64, where the sandbox has no syscall filter. When a site has the microphone on, the
+    programs its audio needs must be installed (a failure if not) and the audio server's socket
+    must exist (a warning if not). The state of the systemd units is shown for information. A
+    `config.json` that others can write to is ignored and
     fails. The exit status is 1 when a required check fails. With
     --json, each check is an object with the keys check, status (ok, fail, warn or info) and
     detail.
@@ -1347,6 +1417,7 @@ def _activity_rows(activity: dict[str, Any]) -> list[list[str]]:
             entry.get("host") or "-",
             _idle_text(entry.get("idle_seconds")),
             entry.get("closes_at") or "-",
+            "microphone" if entry.get("microphone") else "-",
         ]
         for kind, key in (("session", "sessions"), ("login", "logins"), ("bridge", "bridges"))
         for entry in activity.get(key, [])
@@ -1375,7 +1446,11 @@ def show_status(
     when none runs, this says so and exits 0.
 
     With --json the output is an object with three lists. "sessions" holds objects with the keys
-    site, since, contained, host, idle_seconds and closes_at. "logins" holds objects with the
+    site, since, contained, host, microphone, idle_seconds and closes_at. A session with the
+    microphone on also has "capture", where a recorder finds its capture stream: "socket" is the
+    session's private PulseAudio socket, "directory" holds its PipeWire socket, and
+    "node" is the number of the PipeWire node the browser records with, or null while nothing
+    records. "logins" holds objects with the
     keys site and since. "bridges" holds objects with the keys bridge and since, one for each
     laptop connected to take login windows. since is a UTC time like 2026-10-26T09:00:00Z.
     contained is always true.
@@ -1416,7 +1491,7 @@ def _show_activity(*, as_json: bool, show_links: bool) -> int:
     if not rows:
         _say("No browser sessions or login windows are open.")
         return 0
-    _print_table(["KIND", "SITE", "SINCE", "HOST", "IDLE", "CLOSES"], rows)
+    _print_table(["KIND", "SITE", "SINCE", "HOST", "IDLE", "CLOSES", "AUDIO"], rows)
     for entry in activity.get("logins", []):
         if remote := entry.get("remote"):
             _say(f"\nThe {entry['site']} login is shown in a web browser.")
@@ -1447,10 +1522,12 @@ def watch() -> int:
 
     The first line is a snapshot of what is open, as `status --json` shows it, with "event" set
     to "snapshot" and an "at" time. After that each line has the keys event, site and at, where
-    event is session_started, session_ended, login_opened or login_closed. For a bridge the key
-    is bridge instead of site, and event is bridge_connected or bridge_disconnected. Bars and
-    indicators can read the lines as they come. The command runs until it is interrupted or the
-    daemon stops; it exits 1 when no daemon is running, and does not start one.
+    event is session_started, session_ended, login_opened or login_closed. A session_started line
+    also says whether the session has the microphone ("microphone": true or false). For a
+    bridge the key is bridge instead of site, and event is bridge_connected or
+    bridge_disconnected. Bars and indicators can read the lines as they come. The command runs
+    until it is interrupted or the daemon stops; it exits 1 when no daemon is running, and does
+    not start one.
     """
     try:
         return asyncio.run(_watch_daemon())

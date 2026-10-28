@@ -10,6 +10,7 @@ MCP client's own interface or through the approval command or a desktop notifica
 import asyncio
 import logging
 import os
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from valetkey import approvals, notify, sites
@@ -42,6 +43,15 @@ _DENY_OUTCOMES = {
     "broken": ("could_not_ask", "The approval command could not run. Run: {manual}"),
 }
 """How each way the question to deny a host can end, other than yes, is reported."""
+
+
+_MICROPHONE_OUTCOMES = {
+    "no": ("denied", "The person said no."),
+    "timeout": ("expired", "Nobody answered in time. You may ask again."),
+    "none": ("could_not_ask", "Nobody could be asked from here. Run: {manual}"),
+    "broken": ("could_not_ask", "The approval command could not run. Run: {manual}"),
+}
+"""How each way the question to turn on the microphone can end, other than yes, is reported."""
 
 
 def _answer(site: str, host: str, result: str, message: str) -> dict[str, Any]:
@@ -183,12 +193,33 @@ class Approvals:
             return await self._notify(question, env)
         request: dict[str, Any] = {
             "site": site,
+            "permission": "host",
             "host": host,
             "seen_during_login": seen,
             "reason": reason,
         }
         if deny:
             request["action"] = "deny"
+        try:
+            return await approvals.run_command(command, request, env, self._approve_timeout)
+        except OSError as error:
+            logger.warning("the approval command could not run: %s", error)
+            return "broken"
+
+    async def _consult_microphone(self, site: str, reason: str) -> str:
+        """Ask whether to turn the microphone on; the outcomes are those of :meth:`_consult`.
+
+        The request has ``"permission": "microphone"`` and no ``host``.
+        """
+        command = await self._approve_command()
+        env = await asyncio.to_thread(
+            approvals.command_environment, os.environ, self._user_environment
+        )
+        if command is None:
+            return await self._notify(
+                notify.Question(site, "", seen=False, reason=reason, microphone=True), env
+            )
+        request = {"site": site, "permission": "microphone", "reason": reason}
         try:
             return await approvals.run_command(command, request, env, self._approve_timeout)
         except OSError as error:
@@ -209,6 +240,62 @@ class Approvals:
             return "none"
         ask = self._notifier or notify.ask
         return await ask(question, env, self._approve_timeout)
+
+    async def op_microphone_check(
+        self, _connection: Connection, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Say whether the microphone is on for a site already, and whether the daemon can ask."""
+        site = self.registry.site_of(args)
+        policy = await self.registry.load_policy(site)
+        return {
+            "site": site,
+            "enabled": policy.microphone,
+            "can_ask": await self._approve_command() is not None,
+        }
+
+    async def op_microphone_apply(
+        self, _connection: Connection, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Turn the microphone on because the MCP client's interface returned a yes."""
+        site = self.registry.site_of(args)
+        if args.get("channel") != "elicitation":
+            fail("bad_request", 'this operation is for the "elicitation" channel')
+        return await self._enable_microphone(site)
+
+    async def op_microphone_ask(
+        self, _connection: Connection, args: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Ask through the approval command or a notification, and turn it on if the answer is yes.
+
+        A no is not remembered: the agent may ask again, and the person can say no again.
+        """
+        site = self.registry.site_of(args)
+        reason = approvals.sanitize_reason(args.get("reason"))
+        state = self.registry.state(site)
+        async with state.ask_lock:
+            if (await self.registry.load_policy(site)).microphone:
+                return await self._enable_microphone(site)
+            outcome = await self._consult_microphone(site, reason)
+            if outcome == "yes":
+                return await self._enable_microphone(site)
+            result, message = _MICROPHONE_OUTCOMES[outcome]
+            manual = approvals.manual_microphone_command(site)
+            return {"site": site, "result": result, "message": message.format(manual=manual)}
+
+    async def _enable_microphone(self, site: str) -> dict[str, Any]:
+        """Turn the microphone on for the site, save the policy, and say when it takes effect."""
+        policy = await self.registry.load_policy(site)
+        if policy.microphone:
+            message = f"The microphone is already on for {site}."
+        else:
+            await asyncio.to_thread(sites.save_policy, self.roots, replace(policy, microphone=True))
+            logger.info("turned on the microphone for %s", site)
+            message = f"The microphone is now on for {site}."
+        if self.registry.state(site).kind == "session":
+            message += " The running session does not have it: close it, then open it again."
+        else:
+            message += " It applies to sessions from now on."
+        return {"site": site, "result": "allowed", "message": message}
 
     async def _deny_eligibility(
         self, site: str, host: object

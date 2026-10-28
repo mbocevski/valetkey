@@ -535,7 +535,8 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
     that look like its sign-in (see :mod:`valetkey.cookies`). They replace the old ones even when
     there are none, because cookies that are gone must not keep a site from opening; ``None``
     means they could not be read, and the old ones are kept. The person's
-    ``private_networks`` are kept as they are; a login never adds to them.
+    ``private_networks`` and the ``microphone`` setting are kept as they are; a login never
+    changes them.
     """
     old_allow = existing.allow if existing else ()
     old_denied = existing.denied if existing else ()
@@ -565,6 +566,7 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
             else (existing.login_cookies if existing else ())
         ),
         private_networks=existing.private_networks if existing else (),
+        microphone=existing.microphone if existing else False,
     )
 
 

@@ -66,19 +66,24 @@ DELTA_LIMIT = 4_000
 Past it the answer says the page changed a lot, and the agent takes a snapshot."""
 
 
-type SessionFactory = Callable[[sites.Roots, str, str, Path], BrowserSession]
+type SessionFactory = Callable[..., BrowserSession]
+"""Starts a session from ``(roots, site, start_url, proxy_socket)``; with the microphone on, from
+the same and ``microphone=True``."""
 
 
-type Announcer = Callable[[str], Awaitable[None]]
+type Announcer = Callable[..., Awaitable[None]]
 
 
 async def announce_session(
     site: str,
     *,
+    microphone: bool = False,
     which: Callable[[str], str | None] = shutil.which,
     spawn: Callable[..., Awaitable[asyncio.subprocess.Process]] = asyncio.create_subprocess_exec,
 ) -> None:
     """Tell the person, with ``notify-send``, that a session for ``site`` started.
+
+    With ``microphone`` the message says that the session can hear the microphone.
 
     Nothing happens when ``notify-send`` is not installed. Only the site name, which valetkey
     validated, goes into the message; nothing from a page does. A notification that does not
@@ -89,6 +94,8 @@ async def announce_session(
     if program is None:
         return
     message = f"valetkey: a browser session for {site} started"
+    if microphone:
+        message += ", with the microphone on"
     try:
         process = await spawn(
             program,
@@ -114,11 +121,16 @@ async def announce_session(
 
 
 def start_session(
-    roots: sites.Roots, site: str, start_url: str, proxy_socket: Path
+    roots: sites.Roots, site: str, start_url: str, proxy_socket: Path, *, microphone: bool = False
 ) -> BrowserSession:
     """Start the real session: a contained agent-browser behind the site's proxy."""
     return sessions.Session.start(
-        roots, site, start_url, proxy_socket=proxy_socket, watch_browser=True
+        roots,
+        site,
+        start_url,
+        proxy_socket=proxy_socket,
+        watch_browser=True,
+        microphone=microphone,
     )
 
 
@@ -400,8 +412,15 @@ class Sessions:
         )
         await proxy.start(paths.proxy_socket)
         try:
+            # Only a session with the microphone on is told so; a factory need not know about it.
+            extra = {"microphone": True} if policy.microphone else {}
             session = await asyncio.to_thread(
-                self._session_factory, self.roots, state.name, policy.start, paths.proxy_socket
+                self._session_factory,
+                self.roots,
+                state.name,
+                policy.start,
+                paths.proxy_socket,
+                **extra,
             )
         except BaseException as error:
             refused = [refused_entry(entry) for entry in proxy.refused_since(0)[0]]
@@ -427,8 +446,9 @@ class Sessions:
         state.idle_closed = None
         state.last_used = self._idle_clock()
         state.host = host_of(policy.start)
-        self.registry.emit("session_started", state.name)
-        task = asyncio.ensure_future(self._announce(state.name))
+        state.microphone = policy.microphone
+        self.registry.emit("session_started", state.name, microphone=state.microphone)
+        task = asyncio.ensure_future(self._announce(state.name, microphone=state.microphone))
         self.background.add(task)
         task.add_done_callback(self.background.discard)
         self._end_startup_burst(state, proxy)
@@ -475,6 +495,7 @@ class Sessions:
             session, proxy = state.session, state.proxy
             state.session = state.proxy = None
             state.kind = "idle"
+            state.microphone = False
             if session is not None:
                 try:
                     await asyncio.to_thread(session.close)
@@ -795,10 +816,13 @@ class Sessions:
         message = f"the {state.name} browser has exited; open the site again"
         raise DaemonError(code, message)
 
-    async def _announce(self, site: str) -> None:
+    async def _announce(self, site: str, *, microphone: bool = False) -> None:
         """Run the announcer; a failure to tell the person never reaches the session."""
         try:
-            await self._announcer(site)
+            if microphone:
+                await self._announcer(site, microphone=True)
+            else:
+                await self._announcer(site)
         except Exception:
             logger.exception("announcing the %s session failed", site)
 

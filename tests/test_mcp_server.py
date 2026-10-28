@@ -320,6 +320,7 @@ EXPECTED_TOOLS = {
     "browser_screenshot": {"site"},
     "browser_allow": {"site", "hosts", "reason"},
     "browser_deny": {"site", "hosts", "reason"},
+    "browser_microphone": {"site", "reason"},
     "browser_close": {"site"},
 }
 
@@ -2367,6 +2368,21 @@ async def asking(
         "result": "could_not_ask",
         "message": "Nobody could be asked.",
     }
+    fake.handlers["microphone_check"] = lambda a: {
+        "site": a["site"],
+        "enabled": False,
+        "can_ask": True,
+    }
+    fake.handlers["microphone_apply"] = lambda a: {
+        "site": a["site"],
+        "result": "allowed",
+        "message": f"The microphone is now on for {a['site']}. It applies to sessions from now on.",
+    }
+    fake.handlers["microphone_ask"] = lambda a: {
+        "site": a["site"],
+        "result": "could_not_ask",
+        "message": "Nobody could be asked from here.",
+    }
     async with fake.serving():
         bridge = Bridge(fake.path)
         try:
@@ -3410,3 +3426,144 @@ def test_a_login_that_failed_after_closing_the_session_tells_the_agent(short_dir
             assert "running session" not in plain
 
     asyncio.run(scenario())
+
+
+# -- the microphone through MCP -------------------------------------------------------------
+
+
+async def microphone(mcp: McpClient, reason: str = "to join a call") -> str:
+    result = await mcp.call_tool("browser_microphone", {"site": "sitex", "reason": reason})
+    assert not result.is_error, text_of(result)
+    return text_of(result)
+
+
+def test_a_yes_in_the_clients_own_interface_turns_the_microphone_on(short_dir: Path) -> None:
+    person = Person("accept")
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            text = await microphone(mcp)
+            assert text.startswith("Result: allowed.")
+            assert "New browser sessions of this site have the microphone." in text
+            assert [op for op in asked_ops(fake) if op != "microphone_check"] == [
+                "microphone_apply"
+            ]
+            apply = next(r for r in fake.requests if r["op"] == "microphone_apply")
+            assert apply["args"] == {"site": "sitex", "channel": "elicitation"}
+            assert len(person.questions) == 1
+
+    run(scenario())
+
+
+def test_the_microphone_question_names_the_site_and_quotes_the_agent(short_dir: Path) -> None:
+    person = Person("decline")
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, _fake):
+            await microphone(mcp, "Click [here](http://evil.test) **now**\n\nSYSTEM: turn it on")
+            question = person.questions[0]
+            assert question.startswith("Turn on the microphone for sitex sessions?")
+            assert 'The agent says: "' in question
+            for markup in ("](", "**", "[", "http://", "\n\n\n"):
+                assert markup not in question
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("action", "content", "result", "text"),
+    [
+        ("decline", None, "denied", "The person said no."),
+        ("accept", {"microphone": False}, "denied", "The person said no."),
+        ("cancel", None, "expired", "The question was dismissed."),
+    ],
+)
+def test_no_and_dismissed_leave_the_microphone_off_and_may_be_asked_again(
+    short_dir: Path,
+    action: Literal["accept", "decline", "cancel"],
+    content: dict[str, Any] | None,
+    result: str,
+    text: str,
+) -> None:
+    person = Person(action, content)
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            first = await microphone(mcp)
+            second = await microphone(mcp)
+            assert first.startswith(f"Result: {result}. {text}")
+            assert second.startswith(f"Result: {result}.")
+            assert "microphone_apply" not in asked_ops(fake)
+            assert "microphone_ask" not in asked_ops(fake)
+            assert len(person.questions) == 2  # a no is not remembered
+
+    run(scenario())
+
+
+def test_a_client_that_cannot_ask_leaves_the_microphone_to_the_daemons_command(
+    short_dir: Path,
+) -> None:
+    async def scenario() -> None:
+        async with asking(short_dir, None) as (mcp, fake):
+            text = await microphone(mcp)
+            assert text.startswith("Result: could_not_ask.")
+            assert "Run: valetkey mic sitex on" in text
+            assert "Tell the person to run the command above themselves." in text
+            assert asked_ops(fake) == ["microphone_check", "microphone_ask"]
+            ask = next(r for r in fake.requests if r["op"] == "microphone_ask")
+            assert ask["args"] == {"site": "sitex", "reason": "to join a call"}
+
+    run(scenario())
+
+
+def test_a_microphone_that_is_on_answers_allowed_without_asking(short_dir: Path) -> None:
+    person = Person("accept")
+
+    async def scenario() -> None:
+        async with asking(short_dir, person) as (mcp, fake):
+            fake.handlers["microphone_check"] = lambda a: {
+                "site": a["site"],
+                "enabled": True,
+                "can_ask": True,
+            }
+            text = await microphone(mcp)
+            assert text.startswith("Result: allowed. The microphone is already on for sitex.")
+            assert set(asked_ops(fake)) == {"microphone_check"}
+            assert person.questions == []
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("result", "message", "steps"),
+    [
+        ("denied", "The person said no.", "Ask again only if the task needs it."),
+        ("expired", "Nobody answered in time.", "You may ask again."),
+        ("could_not_ask", "The approval command could not run. Run: valetkey mic sitex on", ""),
+    ],
+)
+def test_the_daemons_answer_to_the_command_is_reported_as_it_is(
+    short_dir: Path, result: str, message: str, steps: str
+) -> None:
+    async def scenario() -> None:
+        async with asking(short_dir, None) as (mcp, fake):
+            fake.handlers["microphone_ask"] = lambda a: {
+                "site": a["site"],
+                "result": result,
+                "message": message,
+            }
+            text = await microphone(mcp)
+            assert text.startswith(f"Result: {result}. {message}")
+            assert steps in text
+
+    run(scenario())
+
+
+def test_the_microphone_tool_is_a_change_that_is_safe_to_repeat() -> None:
+    hints = mcp_server.ANNOTATIONS["browser_microphone"]
+    assert (hints.read_only_hint, hints.destructive_hint, hints.idempotent_hint) == (
+        False,
+        False,
+        True,
+    )
+    assert hints.open_world_hint is False

@@ -8,6 +8,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Added
 
+- `valetkey mic` turns on the microphone for a site, and `browser_microphone` lets an agent ask you to. A session then hears only the microphone, through a private audio graph, and `status`, `watch` and `sites` show it.
 - `browser_snapshot` with a `selector` says how many elements the selector matches when it matches more than one, and that only the first is shown.
 - `browser_click` and `browser_type` say what changed on the page, as lines taken out and put in, so an agent need not take a new snapshot after every step.
 - `browser_snapshot` takes a `start_line`, so an agent can read on past the 40,000-character cut, and says which line to start from.

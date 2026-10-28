@@ -51,6 +51,9 @@ class Question:
     deny: bool = False
     """``True`` when the question is whether to deny a host the site may reach now; ``seen`` then
     means that the host was left out at login."""
+    microphone: bool = False
+    """``True`` when the question is whether to turn on the microphone for the site, and not about
+    a host. ``host`` and ``seen`` then mean nothing."""
 
 
 def command(program: str, question: Question, limit: float) -> list[str]:
@@ -60,7 +63,14 @@ def command(program: str, question: Question, limit: float) -> list[str]:
     so nothing in it can be read as an option. The notification expires with the question.
     """
     claim = f'"{question.reason}"' if question.reason else "(nothing)"
-    if question.deny:
+    if question.microphone:
+        buttons = [f"--action={ALLOW}=Allow", f"--action={DENY}=Deny"]
+        title = f"Turn on the microphone for {question.site}?"
+        body = (
+            f"Sessions of {question.site} started from now on can record what the microphone "
+            f"hears.\nThe agent says: {claim}"
+        )
+    elif question.deny:
         state = "left out when you logged in" if question.seen else "allowed"
         buttons = [f"--action={DENY}=Deny", f"--action={KEEP}=Keep"]
         title = f"Deny {question.site} the host {question.host}?"

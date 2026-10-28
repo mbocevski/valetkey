@@ -574,3 +574,25 @@ def test_allow_reaches_a_daemon_that_systemd_started(
             assert out == "sitex: other.test is allowed.\nsitex: applied to the running session.\n"
             ask.call("close", site="sitex")
     assert not client.daemon_holds_lock(path)
+
+
+# -- the microphone -----------------------------------------------------------------------
+
+
+def test_mic_turns_the_microphone_on_and_off_and_tells_a_live_session_it_is_unchanged(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    reload = {"reload_policy": lambda args: {"site": args["site"], "live": True}}
+    with FakeDaemon(client.socket_path(roots).parent.parent, reload) as fake:
+        status, out, err = run(capsys, "mic", "sitex", "on")
+        assert (status, err) == (0, "")
+        assert out == (
+            "sitex: the microphone is now on.\n"
+            "sitex: the running session keeps its setting. Close it and open it again.\n"
+        )
+        assert sites.load_policy(roots, "sitex").microphone is True
+        assert run(capsys, "mic", "sitex")[1] == "sitex: the microphone is on.\n"
+        assert run(capsys, "mic", "sitex", "off")[1].startswith("sitex: the microphone is now off.")
+        assert sites.load_policy(roots, "sitex").microphone is False
+    assert fake.ops == ["reload_policy", "reload_policy"]

@@ -466,6 +466,10 @@ def test_a_login_with_no_private_refusals_reports_none(roots: sites.Roots) -> No
 
 
 def test_the_browser_is_started_in_a_private_sandbox_with_the_display(roots: sites.Roots) -> None:
+    # Even for a site whose sessions have the microphone: a login window never does.
+    sites.save_policy(
+        roots, sites.Policy("sitex", "https://sitex.com/", ("sitex.com",), microphone=True)
+    )
     fake = FakeSandbox(["true"])
     modes: dict[str, int] = {}
     policies: list[str] = []
@@ -495,6 +499,8 @@ def test_the_browser_is_started_in_a_private_sandbox_with_the_display(roots: sit
     (box,) = fake.boxes
     assert modes == {"profile": 0o700, "login": 0o700}
     assert box.writable_dirs == ()  # a login window gets no folder to save downloads in
+    assert box.audio_socket is None
+    assert "AudioCapture" not in policies[0]
     assert box.wayland_socket == Path("/run/user/1000/wayland-0")
     assert box.profile_dir == sites.profile_path(roots, "sitex")
     assert box.proxy_socket == login_dir(roots) / "proxy.sock"

@@ -839,6 +839,16 @@ DESCRIPTIONS = {
         "as cdn.example.com does not remove example.com, if that is allowed. Your reason is "
         "shown to the person as your claim, not as fact."
     ),
+    "browser_microphone": (
+        "Ask the person to turn on the microphone for a site, so that its browser can record "
+        "audio for a call. Only the person can turn it on, and it applies to browser sessions "
+        "that start afterwards: if the site's browser is running, close it and open it again. "
+        "Nothing else is shared: the browser hears the microphone and cannot play or record "
+        "anything else on the machine. Results: allowed (it is on); denied (the person said no); "
+        "expired (no answer: you may ask again); could_not_ask (nobody could be asked from "
+        "here: tell the person to run the command in the result). Ask only when the task needs "
+        "the microphone. Your reason is shown to the person as your claim, not as fact."
+    ),
     "browser_close": (
         "End the site's browser. The login stays saved, so browser_open works again later."
     ),
@@ -884,6 +894,12 @@ _DENY_STEPS = {
     "expired": "You may ask again.",
     "could_not_ask": "Tell the person to run the command above themselves.",
 }
+_MICROPHONE_STEPS = {
+    "allowed": "New browser sessions of this site have the microphone.",
+    "denied": "Ask again only if the task needs it.",
+    "expired": "You may ask again.",
+    "could_not_ask": "Tell the person to run the command above themselves.",
+}
 _NEXT_STEPS = {
     "allowed": "The next navigation to it will load.",
     "denied": "Do not ask again for this host.",
@@ -907,6 +923,34 @@ def deny_text(result: str, host: str, message: str, site: str) -> str:
         message = f"{message} Run: {approvals.manual_deny_command(site, host)}"
     steps = _DENY_STEPS.get(result, "")
     return f"Result: {result}. {message}" + (f" {steps}" if steps else "")
+
+
+def microphone_text(result: str, message: str, site: str) -> str:
+    """Say how a request to turn on the microphone ended, in words that keep the results apart."""
+    if result == "could_not_ask" and "valetkey mic" not in message:
+        message = f"{message} Run: {approvals.manual_microphone_command(site)}"
+    steps = _MICROPHONE_STEPS.get(result, "")
+    return f"Result: {result}. {message}" + (f" {steps}" if steps else "")
+
+
+@dataclass(frozen=True, slots=True)
+class _MicrophonePlan:
+    """What a ``browser_microphone`` call has to do: nothing (``settled``), or ask the person."""
+
+    site: str
+    reason: str
+    settled: str | None
+
+
+def _microphone_form() -> type[BaseModel]:
+    """Return the form that asks about the microphone: one box, ticked."""
+    return create_model(
+        "Microphone",
+        microphone=(
+            bool,
+            Field(default=True, title="Microphone", description="Turn it on for this site."),
+        ),
+    )
 
 
 def _validated_hosts(hosts: list[str]) -> list[str]:
@@ -1063,6 +1107,7 @@ class _Tools:
         self._kept: set[tuple[str, str]] = set()
         self.browser_allow = self._allow_tool()
         self.browser_deny = self._deny_tool()
+        self.browser_microphone = self._microphone_tool()
 
     async def _ask(self, op: str, **args: Any) -> dict[str, Any]:  # noqa: ANN401 - JSON values
         try:
@@ -1521,6 +1566,63 @@ class _Tools:
             self._kept.add((planned.site, name))
         return deny_text(answered["result"], name, answered["message"], planned.site)
 
+    def _microphone_tool(self) -> Callable[..., Awaitable[str]]:
+        """Build the ``browser_microphone`` function and the resolvers it uses.
+
+        It asks the way ``browser_allow`` does (see :meth:`_allow_tool`). A no is not remembered
+        here or in the daemon: the person's answer is for this question only.
+        """
+
+        async def plan(site: SITE, reason: str) -> _MicrophonePlan:
+            checked = await self._ask("microphone_check", site=site)
+            resolved = checked["site"]
+            if checked["enabled"]:
+                done = microphone_text(
+                    "allowed", f"The microphone is already on for {resolved}.", resolved
+                )
+                return _MicrophonePlan(resolved, "", done)
+            return _MicrophonePlan(resolved, approvals.sanitize_reason(reason), None)
+
+        async def question(
+            planned: Annotated[_MicrophonePlan, Resolve(plan)], ctx: Context
+        ) -> Elicit[BaseModel] | None:
+            if planned.settled is not None or not can_elicit(ctx):
+                return None
+            message = approvals.microphone_prompt_text(planned.site, planned.reason)
+            return Elicit(message, _microphone_form())
+
+        async def browser_microphone(
+            site: SITE,
+            reason: Annotated[
+                str, Field(description="Why the microphone is needed, for the person.")
+            ],
+            planned: Annotated[_MicrophonePlan, Resolve(plan)],
+            answer: Annotated[ElicitationResult[BaseModel], Resolve(question)],
+        ) -> str:
+            del site, reason  # the resolvers read them, by name
+            return await self._microphone(planned, answer)
+
+        return browser_microphone
+
+    async def _microphone(
+        self, planned: _MicrophonePlan, answer: ElicitationResult[BaseModel]
+    ) -> str:
+        """Carry out what the person answered, and say how it ended."""
+        site = planned.site
+        if planned.settled is not None:
+            return planned.settled
+        if isinstance(answer, AcceptedElicitation) and isinstance(answer.data, BaseModel):
+            if not answer.data.microphone:  # ty: ignore[unresolved-attribute]
+                return microphone_text("denied", "The person said no.", site)
+            done = await self._ask("microphone_apply", site=site, channel="elicitation")
+        elif isinstance(answer, DeclinedElicitation):
+            return microphone_text("denied", "The person said no.", site)
+        elif isinstance(answer, CancelledElicitation):
+            return microphone_text("expired", "The question was dismissed.", site)
+        else:
+            done = await self._ask("microphone_ask", site=site, reason=planned.reason)
+        return microphone_text(done["result"], done["message"], site)
+
     async def browser_close(self, site: SITE) -> str:
         result = await self._ask("close", site=site)
         if result["closed"]:
@@ -1566,6 +1668,8 @@ ANNOTATIONS = {
     # Removes one host from what a site may reach, after the person says yes. It narrows, and
     # asking again for a denied host changes nothing.
     "browser_deny": _changes(destructive=False, idempotent=True, open_world=False),
+    # Turns on a setting of the site after the person says yes; a no changes nothing.
+    "browser_microphone": _changes(destructive=False, idempotent=True, open_world=False),
     # Ends the session. The login, the profile and the downloads stay.
     "browser_close": _changes(destructive=False, idempotent=True, open_world=False),
 }

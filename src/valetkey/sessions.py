@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -46,7 +47,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import unquote, urldefrag, urljoin, urlsplit
 
-from valetkey import procs, profiles, sandbox, seccomp, sites
+from valetkey import audio, procs, profiles, sandbox, seccomp, sites
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -338,6 +339,9 @@ class SessionPaths:
     finished file out under a name that is free (see :mod:`valetkey.downloads`)."""
     screenshots_dir: Path
     """Inside ``downloads_dir``, hidden, so a screenshot is not mistaken for a download."""
+    audio_dir: Path
+    """Where the private audio graph of a session with the microphone on lives. Its socket path
+    must stay short, so this is directly under ``directory``."""
 
 
 def session_paths(roots: sites.Roots, site: str) -> SessionPaths:
@@ -364,6 +368,7 @@ def session_paths(roots: sites.Roots, site: str) -> SessionPaths:
         downloads_dir=sites.downloads_path(roots, site),
         incoming_dir=sites.downloads_path(roots, site) / ".incoming",
         screenshots_dir=sites.downloads_path(roots, site) / ".screenshots",
+        audio_dir=directory / "audio",
     )
 
 
@@ -777,6 +782,7 @@ class Session:
         self._lock = threading.Lock()
         self._closed = False
         self._watch_browser = False
+        self._audio: audio.AudioGraph | None = None
 
     @classmethod
     def start(  # noqa: PLR0913  # each argument is a distinct thing a caller decides
@@ -791,8 +797,14 @@ class Session:
         timeout: float = DEFAULT_TIMEOUT,
         watch_browser: bool = False,
         allow_ptrace: bool = False,
+        microphone: bool = False,
     ) -> Self:
         """Start the browser for ``site`` and load ``start_url``.
+
+        With ``microphone`` the session gets a private audio graph (see :mod:`valetkey.audio`),
+        whose socket is the only audio the sandbox sees, and the browser is allowed to record on
+        the site's own domain. The graph ends with the session. Nothing else of the person's
+        audio is reachable.
 
         ``allow_ptrace`` leaves ``ptrace`` out of the syscall filter, for the tests that trace
         the browser with ``strace``. Nothing but a test passes it.
@@ -805,7 +817,8 @@ class Session:
         crashed session left are deleted.
 
         Raises:
-            SessionError: when the browser does not come up (the message ends with the log).
+            SessionError: when the browser does not come up (the message ends with the log), or
+                when the graph for the microphone does not.
             AgentBrowserError: when the first page fails to load.
             VersionError: when agent-browser is too old.
 
@@ -822,17 +835,23 @@ class Session:
             open_command = launch_command(binary_path, paths, start_url, executable, chrome_major)
             script = holder_script(paths, binary_path, open_command, runtime)
             session = cls(paths, runtime, binary_path, timeout, Page(start_url, ""))
-            box = sandbox.Sandbox(
-                profile_dir=paths.profile_dir,
-                writable_dirs=(paths.incoming_dir, paths.screenshots_dir),
-                proxy_socket=paths.proxy_socket,
-                log_file=paths.log_file,
-                runtime_dir=runtime,
-                shared_dir=paths.driver_dir,
-                policy_dir=sandbox.write_chrome_policy(paths.directory / "chrome-policy"),
-                allow_ptrace=allow_ptrace,
-            )
             try:
+                if microphone:
+                    session._audio = session._start_audio()
+                box = sandbox.Sandbox(
+                    profile_dir=paths.profile_dir,
+                    writable_dirs=(paths.incoming_dir, paths.screenshots_dir),
+                    proxy_socket=paths.proxy_socket,
+                    log_file=paths.log_file,
+                    runtime_dir=runtime,
+                    shared_dir=paths.driver_dir,
+                    policy_dir=sandbox.write_chrome_policy(
+                        paths.directory / "chrome-policy",
+                        audio.capture_urls(sites.load_policy(roots, site)) if microphone else (),
+                    ),
+                    audio_socket=None if session._audio is None else session._audio.socket,
+                    allow_ptrace=allow_ptrace,
+                )
                 session._launch(box, ["/usr/bin/bash", "-c", script])
                 session.first_page = parse_page(session._await_first_page())
                 session._watch_browser = watch_browser
@@ -849,6 +868,20 @@ class Session:
         raise AssertionError  # pragma: no cover  # the loop returns or raises
 
     # -- lifecycle --
+
+    def _start_audio(self) -> audio.AudioGraph:
+        """Start the private audio graph for the microphone, from the person's pulse socket."""
+        try:
+            return audio.AudioGraph.start(
+                self.paths.audio_dir,
+                audio.upstream_socket(self._runtime),
+                f"{sites.storage_key(self.paths.site)}-{secrets.token_hex(4)}",
+            )
+        except audio.AudioError as error:
+            message = (
+                f"the microphone is on for {self.paths.site}, but its audio did not start: {error}"
+            )
+            raise SessionError(message) from error
 
     def _launch(self, box: sandbox.Sandbox, command: list[str]) -> None:
         started = threading.Event()
@@ -889,6 +922,10 @@ class Session:
         except OSError:
             return ""
 
+    def capture_stream(self) -> dict[str, object] | None:
+        """Tell where a recorder finds the capture stream, or ``None`` with no microphone."""
+        return None if self._audio is None else self._audio.capture_stream()
+
     @property
     def watches_browser(self) -> bool:
         """Whether :meth:`is_alive` looks for the browser's own process (``watch_browser``)."""
@@ -904,6 +941,8 @@ class Session:
         and only when the browser is watched.
         """
         if self._holder is None or self._holder.poll() is not None:
+            return False
+        if self._audio is not None and not self._audio.is_alive():
             return False
         if not self._watch_browser:
             return True
@@ -926,6 +965,9 @@ class Session:
         self._stop_holder()
         if self._thread is not None:
             self._thread.join(10)
+        if self._audio is not None:
+            self._audio.close()
+            shutil.rmtree(self.paths.audio_dir, ignore_errors=True)
         sweep_records(self.paths.screenshots_dir)
         shutil.rmtree(self.paths.driver_dir, ignore_errors=True)
         shutil.rmtree(self.paths.directory / "chrome-policy", ignore_errors=True)

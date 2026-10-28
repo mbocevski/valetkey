@@ -219,6 +219,9 @@ PNG = b"\x89PNG\r\n\x1a\nsaved"
 class FakeSession:
     """A browser session that records calls and checks nobody uses it twice at once."""
 
+    capture: dict[str, object] | None = None
+    """What the session says about its capture stream; ``None`` for one with no microphone."""
+
     def __init__(
         self, url: str = "https://sitex.test/", title: str = "Start", delay: float = 0
     ) -> None:
@@ -390,6 +393,9 @@ class FakeSession:
         self._use("screenshot", name)
         return Path("/shots") / name
 
+    def capture_stream(self) -> dict[str, object] | None:
+        return self.capture
+
     @property
     def watches_browser(self) -> bool:
         return self.watching
@@ -419,11 +425,20 @@ class Factory:
         self.during_start: Callable[[Path], None] | None = None
         self.landing: str | None = None
         self.passwords = 0
+        self.microphone: list[bool] = []
+        """Whether each session that was started was asked to have the microphone."""
 
     def __call__(
-        self, _roots: sites.Roots, site: str, url: str, proxy_socket: Path
+        self,
+        _roots: sites.Roots,
+        site: str,
+        url: str,
+        proxy_socket: Path,
+        *,
+        microphone: bool = False,
     ) -> protocol.BrowserSession:
         self.calls.append((site, url, proxy_socket))
+        self.microphone.append(microphone)
         if self.during_start is not None:
             self.during_start(proxy_socket)
         time.sleep(self.delay)
@@ -1033,6 +1048,7 @@ def test_a_login_learns_a_policy_and_reports_it_once(roots: sites.Roots) -> None
                     "excluded": [],
                     "denied": [],
                     "learned": None,
+                    "microphone": False,
                     "summary": None,
                 }
             ]
@@ -2876,7 +2892,7 @@ def test_the_real_session_factory_passes_the_proxy_socket(
     assert seen == [
         (
             (roots, "sitex", "https://x.test/"),
-            {"proxy_socket": Path("/p.sock"), "watch_browser": True},
+            {"proxy_socket": Path("/p.sock"), "watch_browser": True, "microphone": False},
         )
     ]
 
@@ -3744,6 +3760,7 @@ def test_status_without_a_site_says_what_is_running(roots: sites.Roots) -> None:
                         "since": "2026-10-27T12:00:00Z",
                         "contained": True,
                         "host": "sitex.test",
+                        "microphone": False,
                         "idle_seconds": 0,
                         "closes_at": "2026-10-27T12:15:00Z",
                     }
@@ -4560,6 +4577,7 @@ def test_the_approval_command_is_run_without_a_shell_and_gets_the_request(
     request = json.loads(seen.read_text(encoding="utf-8"))
     assert request == {
         "site": "sitex",
+        "permission": "host",
         "host": "cdn.assets.test",
         "seen_during_login": True,
         "reason": "It loads the logo http://evil.test/ for the page".replace("http://", ""),
@@ -4862,7 +4880,9 @@ def test_no_operation_widens_a_policy_except_the_ones_that_ask(roots: sites.Root
         async with serving(roots) as rig, await rig.connect() as c:
             # The deny operations only narrow a policy, and are tested apart.
             denying = {"deny_check", "deny_apply", "deny_ask"}
-            assert set(rig.daemon._ops) - set(ops) == {"login", *denying}  # noqa: SLF001 - every other op is listed
+            # The microphone operations change one setting of the site and never a host.
+            microphone = {"microphone_check", "microphone_apply", "microphone_ask"}
+            assert set(rig.daemon._ops) - set(ops) == {"login", *denying, *microphone}  # noqa: SLF001 - every other op is listed
             for op in ops:
                 with contextlib.suppress(DaemonError):
                     await c.call(op, **arguments)
@@ -6034,6 +6054,7 @@ def test_the_approval_command_is_told_it_is_a_deny_and_exit_zero_denies(
     request = json.loads(seen.read_text(encoding="utf-8"))
     assert request == {
         "site": "sitex",
+        "permission": "host",
         "host": "cdn.assets.test",
         "seen_during_login": False,
         "reason": "it tracks",

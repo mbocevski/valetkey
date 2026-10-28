@@ -66,7 +66,13 @@ _POLICY_KEYS = ("site", "start", "allow", "excluded", "learned")
 MAX_LOGIN_COOKIES = 20
 """The most cookies a policy records for a login."""
 _LOGIN_COOKIE_RE = re.compile(r"\.?[a-z0-9][a-z0-9.-]* [\x21-\x7e]{1,128}")
-_OPTIONAL_POLICY_KEYS = ("denied", "login_cookies", "login_pages", "private_networks")
+_OPTIONAL_POLICY_KEYS = (
+    "denied",
+    "login_cookies",
+    "login_pages",
+    "microphone",
+    "private_networks",
+)
 
 # Ranges a site may be given for its private-network addresses: the RFC 1918 blocks, the unique
 # local addresses of RFC 4193, and the shared address space of RFC 6598 (100.64.0.0/10). The last
@@ -667,6 +673,9 @@ class Policy:
     ``private_networks`` are the address ranges (``10.20.0.0/16``) in which a host the site
     allows may resolve although they are private, see :func:`private_network`. Only the person
     sets them. It is optional too.
+    ``microphone`` says that the site's sessions may record the person's microphone, through a
+    private audio graph (see :mod:`valetkey.audio`). Only the person turns it on, and it is off
+    when the key is missing. It is written only when it is on.
     ``ignored`` are the ``allow`` entries that :func:`load_policy` dropped because each is a
     public suffix (``github.io``), which would let the site reach every unrelated host under
     it. It is never written to the file.
@@ -683,6 +692,7 @@ class Policy:
     private_networks: tuple[str, ...] = ()
     denied: tuple[str, ...] = ()
     login_cookies: tuple[str, ...] = ()
+    microphone: bool = False
     ignored: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -876,8 +886,8 @@ def load_policy(roots: Roots, site: str, suffixes: SuffixList | None = None) -> 
     """Read and validate ``site``'s policy file.
 
     The file must be a JSON object with the keys ``site``, ``start``, ``allow``, ``excluded``
-    and ``learned``, and may also have ``denied``, ``login_cookies``, ``login_pages`` and
-    ``private_networks``. A
+    and ``learned``, and may also have ``denied``, ``login_cookies``, ``login_pages``,
+    ``microphone`` and ``private_networks``. A
     file without ``denied`` is one from before it existed: it has none, and its ``excluded``
     entries stay what a login left out, built again by the next login. Missing keys and
     unknown keys are both errors, and ``site`` must equal the file name. An ``allow`` entry that
@@ -919,6 +929,7 @@ def load_policy(roots: Roots, site: str, suffixes: SuffixList | None = None) -> 
             private_networks=(
                 _hosts(data, "private_networks") if "private_networks" in data else ()
             ),
+            microphone=_flag(data, "microphone"),
         )
     except ValueError as exc:
         msg = f"{path}: {exc}"
@@ -953,6 +964,15 @@ def _hosts(data: dict[str, Any], key: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _flag(data: dict[str, Any], key: str) -> bool:
+    """Return the optional true-or-false ``key`` of a policy file; a missing key is false."""
+    value = data.get(key, False)
+    if not isinstance(value, bool):
+        msg = f"{key} must be true or false"
+        raise PolicyError(msg)
+    return value
+
+
 def _learned(value: object) -> datetime | None:
     if value is None:
         return None
@@ -979,6 +999,8 @@ def policy_json(policy: Policy) -> str:
         data["login_cookies"] = list(policy.login_cookies)
     if policy.private_networks:
         data["private_networks"] = list(policy.private_networks)
+    if policy.microphone:
+        data["microphone"] = True
     return json.dumps(data, indent=2) + "\n"
 
 

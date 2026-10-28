@@ -28,29 +28,30 @@ Start with `browser_sites`. The others act on one site by its name.
   Otherwise, with `remote_logins.novnc` on, the window is shown in a web browser. The link goes to
   you, never to the agent: your client shows it, or you run `valetkey status` (see
   [remote logins](remote.md)).
-- `browser_open` starts the signed-in browser for a site, or joins the running one, and says when
-  the saved login has expired.
+- `browser_open` starts the signed-in browser for a site, or joins the running one, and says if
+  the login expired.
 - `browser_snapshot` reads the page as a text tree with its text and a reference such as `e3`
   for each element to act on. A long page is cut, and `interactive` lists only those elements.
   `images` adds the biggest pictures and videos. `selector` reads one part of the page (see
   [below](#reading-one-part-of-a-page)).
 - `browser_click` clicks an element by reference, or by visible text and role. Text that is
   part of one name, as whole words, also matches. It looks the element up again at click time, and
-  checks an `expect` of `text_appears`, `text_gone` or `url_changes`. Only a click with an `expect` is ever repeated, and only when the first attempt
-  changed nothing.
+  checks an `expect` of `text_appears`, `text_gone` or `url_changes`. Only a click with an `expect`
+  is repeated, and only if the first changed nothing.
 - `browser_type` replaces the contents of a field, and presses Enter when `submit` is true.
-- `browser_navigate` goes to an HTTP or HTTPS address on an allowed host.
+- `browser_navigate` goes to an address on an allowed host.
 - `browser_save` saves a picture, a video or a linked file into the downloads folder (see
   [Downloads](#downloads)).
 - `browser_downloads` lists saved files; clicks and navigation list new ones.
-- `browser_screenshot` returns a page image.
+- `browser_screenshot` returns an image.
 - `browser_allow` asks you to let the site reach more hosts.
 - `browser_deny` asks you to stop the site reaching hosts it reaches now (see
   [denying a host](#denying-a-host)).
+- `browser_microphone` asks you to turn on the site's [microphone](#the-microphone).
 - `browser_close` ends the site's browser. The login stays saved.
 
 There is no script evaluation, no launch option, no upload, no cookie access and no way to delete
-a site. Text from a page is labelled as untrusted data.
+a site. Page text is labelled as untrusted.
 
 ## What a result starts with
 
@@ -110,7 +111,8 @@ Each tool carries the standard MCP hints, so a client can decide what to ask you
 `browser_sites`, `browser_downloads`, `browser_snapshot` and `browser_screenshot` only read; the
 first two touch nothing but valetkey's own state. `browser_click` and `browser_type` are marked
 destructive, because a click or Enter can submit, send or delete. `browser_open`,
-`browser_navigate`, `browser_allow`, `browser_deny` and `browser_close` are idempotent.
+`browser_navigate`, `browser_allow`, `browser_deny`, `browser_microphone` and `browser_close` are
+idempotent.
 `browser_save` writes a file, so it is not read-only; it never overwrites one, so it is not
 destructive. Every tool that touches a page is marked open world. They are hints, not promises.
 
@@ -188,7 +190,10 @@ arguments:
 ```
 
 The daemon runs it with one line of JSON on standard input:
-`{"site": ..., "host": ..., "seen_during_login": ..., "reason": ...}`. Exit status 0 means yes.
+`{"site": ..., "permission": "host", "host": ..., "seen_during_login": ..., "reason": ...}`.
+The `permission` says what is asked: `host` here, and `microphone` for the question in
+[the microphone](#the-microphone), which has no `host`. Check it, because a command that ignores
+it would read a microphone request as a host request with no host. Exit status 0 means yes.
 Any other status means no. A command that runs longer than 60 seconds counts as unanswered. What it
 prints is never shown to the agent. The reason is the agent's claim, so show it as one. The command
 runs without a shell and gets a small environment: `PATH`, `HOME`, `XDG_RUNTIME_DIR`, `LANG`, and the
@@ -232,6 +237,26 @@ denies. The notification has Deny and Keep buttons.
 Hosts you confirm move to the site's denied list and stop loading, in a running session too. The
 results are `denied`, `declined` (you said no: the agent must not ask again), `expired`,
 `could_not_ask` and `not_eligible`. Only you can allow a denied host again, with `valetkey allow`.
+
+## The microphone
+
+A session has no microphone until you turn one on for its site with `valetkey mic SITE on`. The
+agent can ask with `browser_microphone`, giving the site and a reason. You are asked the way
+`browser_allow` asks: a form in the client with one box, then your `approve_command`, then a
+notification. Only a yes turns it on. A site that has it on answers `allowed` without asking.
+
+The approval command gets `{"site": ..., "permission": "microphone", "reason": ...}`, with no
+`host` and no `seen_during_login`. Exit status 0 means yes. The notification has Allow and Deny
+buttons.
+
+The results are `allowed`, `denied` (you said no), `expired` (nobody answered, or the question was
+dismissed) and `could_not_ask` (nobody could be asked from here, so the agent tells you to run
+`valetkey mic SITE on`). A no is not remembered: the agent may ask again, and you can say no
+again. The browser may record on the start page's origin and the site's own domain with its subdomains, and on no other host the site reaches. The setting applies to sessions that start afterwards. A running session keeps what it
+started with, so the agent closes the site's browser and opens it again.
+
+What the browser can hear, and nothing else it can reach, is described in
+[Security](security.md#the-microphone).
 
 ## A client that cannot show questions
 

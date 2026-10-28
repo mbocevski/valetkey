@@ -5,21 +5,23 @@ import contextlib
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import stat
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import delta_answers as recorded
 import pytest
 from environment import unusable_reason
 from proxy_stub import PageServer, ProxyStub, host_of_request
 
-from valetkey import procs, sandbox, sessions, sites
+from valetkey import audio, procs, sandbox, sessions, sites
 
 # --- helpers ------------------------------------------------------------------------------
 
@@ -761,8 +763,8 @@ def test_open_refuses_other_schemes(tmp_path: Path) -> None:
 def test_the_session_has_no_eval_or_passthrough() -> None:
     public = {n for n in dir(sessions.Session) if not n.startswith("_")}
     assert public == {
-        "start", "is_alive", "watches_browser", "close", "open", "snapshot", "outline", "click",
-        "fill", "press_enter",
+        "start", "is_alive", "watches_browser", "capture_stream", "close", "open", "snapshot",
+        "outline", "click", "fill", "press_enter",
         "current_url", "screenshot", "clear_requests", "started_downloads", "password_fields",
         "resource_url", "images", "fetch", "look", "snapshot_delta", "title", "match_count",
     }  # fmt: skip
@@ -1487,6 +1489,7 @@ class FakeStart:
     def __init__(self, monkeypatch: pytest.MonkeyPatch, script: str | None) -> None:
         self.script = script
         self.policies: list[str] = []
+        self.boxes: list[sandbox.Sandbox] = []
         monkeypatch.setattr(sessions, "installed_version", lambda _: sessions.TESTED_VERSION)
         monkeypatch.setattr(sessions, "_resolve_binary", lambda _: "/usr/bin/agent-browser")
         monkeypatch.setattr(sandbox, "installed_chrome_major", lambda _: 156)
@@ -1503,6 +1506,7 @@ class FakeStart:
             == sessions.session_paths(make_roots(box.runtime_dir.parent), "demo").driver_dir
         )
         assert box.policy_dir is not None
+        self.boxes.append(box)
         self.policies.append((box.policy_dir / "managed" / "valetkey.json").read_text())
         env = {**os.environ, "READY": str(box.shared_dir / "ready.json"), "LOG": str(box.log_file)}
         with box.log_file.open("ab") as log:
@@ -1613,6 +1617,129 @@ def test_start_waits_for_the_first_page(tmp_path: Path, monkeypatch: pytest.Monk
         assert session.paths.config_file.read_text() == "{}\n"
     assert not session.is_alive()
     assert not session.paths.driver_dir.exists()
+
+
+class FakeGraph:
+    """Stands in for a private audio graph, which needs PipeWire and a jail."""
+
+    made: ClassVar[list[FakeGraph]] = []
+
+    def __init__(self, directory: Path, upstream: Path, tag: str) -> None:
+        self.directory, self.upstream, self.tag = directory, upstream, tag
+        self.socket = directory / "pulse" / "native"
+        self.alive = True
+        self.closed = 0
+        FakeGraph.made.append(self)
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+    def capture_stream(self) -> dict[str, object]:
+        return {"socket": str(self.socket), "node": 52, "directory": str(self.directory)}
+
+    def close(self) -> None:
+        self.closed += 1
+        self.alive = False
+
+
+@pytest.fixture
+def graphs(monkeypatch: pytest.MonkeyPatch) -> list[FakeGraph]:
+    FakeGraph.made = []
+    monkeypatch.setattr(audio.AudioGraph, "start", staticmethod(FakeGraph))
+    return FakeGraph.made
+
+
+PAGE = json.dumps({"success": True, "data": {"url": "http://site.test/", "title": "Hi"}})
+READY = f"echo '{PAGE}' > \"$READY\"; sleep 60"
+
+
+def save_policy(tmp_path: Path) -> None:
+    policy = sites.Policy("demo", "http://site.test/", ("site.test", "cdn.site.test", "10.0.0.7"))
+    sites.save_policy(
+        make_roots(tmp_path), replace(policy, microphone=True, denied=("cdn.site.test",))
+    )
+
+
+def test_a_session_without_the_microphone_has_no_audio_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graphs: list[FakeGraph]
+) -> None:
+    fake = FakeStart(monkeypatch, READY)
+    with start(tmp_path) as session:
+        assert session.capture_stream() is None
+    assert graphs == []
+    (box,) = fake.boxes
+    assert box.audio_socket is None
+    assert "AudioCapture" not in fake.policies[0]
+
+
+def test_a_session_with_the_microphone_gets_a_graph_a_socket_and_a_policy_that_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graphs: list[FakeGraph]
+) -> None:
+    save_policy(tmp_path)
+    fake = FakeStart(monkeypatch, READY)
+    session = sessions.Session.start(
+        make_roots(tmp_path), "demo", "http://site.test/", timeout=10, microphone=True
+    )
+    try:
+        (graph,) = graphs
+        paths = session.paths
+        assert (graph.directory, graph.upstream) == (
+            paths.audio_dir,
+            tmp_path / "rt" / "pulse" / "native",
+        )
+        assert re.fullmatch(r"demo-[0-9a-f]{8}", graph.tag)
+        assert paths.audio_dir.parent == paths.directory  # short, so the socket path is
+        (box,) = fake.boxes
+        assert box.audio_socket == graph.socket
+        policy = json.loads(fake.policies[0])
+        assert policy["AudioCaptureAllowed"] is True
+        # The start page's origin and its own registrable domain; not the site's other hosts.
+        assert policy["AudioCaptureAllowedUrls"] == ["http://site.test", "https://[*.]site.test"]
+        assert session.capture_stream() == graph.capture_stream()
+        assert session.is_alive()
+        graph.alive = False
+        assert not session.is_alive()  # a session without its audio is no use to a call
+        graph.alive = True
+    finally:
+        session.close()
+    assert graph.closed == 1
+    assert not paths.audio_dir.exists()
+    session.close()
+    assert graph.closed == 1
+
+
+def test_a_graph_that_does_not_start_fails_the_session_and_starts_no_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_policy(tmp_path)
+    fake = FakeStart(monkeypatch, READY)
+
+    def broken(*_args: object) -> None:
+        message = "the audio graph ended at start"
+        raise audio.AudioError(message)
+
+    monkeypatch.setattr(audio.AudioGraph, "start", staticmethod(broken))
+    with pytest.raises(sessions.SessionError) as info:
+        sessions.Session.start(
+            make_roots(tmp_path), "demo", "http://site.test/", timeout=10, microphone=True
+        )
+    assert str(info.value) == (
+        "the microphone is on for demo, but its audio did not start: the audio graph ended at start"
+    )
+    assert fake.boxes == []
+
+
+def test_a_graph_ends_with_a_session_that_fails_to_load_its_first_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, graphs: list[FakeGraph]
+) -> None:
+    save_policy(tmp_path)
+    failure = json.dumps({"success": False, "error": "Navigation failed: net::ERR_X"})
+    FakeStart(monkeypatch, f"echo '{failure}' > \"$READY\"; sleep 60")
+    with pytest.raises(sessions.AgentBrowserError):
+        sessions.Session.start(
+            make_roots(tmp_path), "demo", "http://site.test/", timeout=10, microphone=True
+        )
+    assert [graph.closed for graph in graphs] == [1]
 
 
 def test_start_reports_a_first_page_that_failed(

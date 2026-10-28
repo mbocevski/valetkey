@@ -84,6 +84,9 @@ class BrowserSession(Protocol):
     def screenshot(self, name: str = "screenshot.png") -> Path:
         """Save a screenshot and return its path."""
 
+    def capture_stream(self) -> dict[str, object] | None:
+        """Say where a recorder finds the browser's capture stream; ``None`` with no microphone."""
+
     @property
     def watches_browser(self) -> bool:
         """Whether :meth:`is_alive` looks for the browser's own process in the process table."""

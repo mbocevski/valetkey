@@ -34,6 +34,9 @@ depends=(
 )
 optdepends=(
   'libnotify: a desktop notification when a browser session starts'
+  'pipewire-pulse: the microphone for a site (valetkey mic), with wireplumber and libpulse'
+  'wireplumber: runs in the private audio graph of a session with the microphone'
+  'libpulse: pactl, which asks the audio server for the microphone'
   'sway: the private display for a login on a machine with no screen (remote_logins.novnc)'
   'wayvnc: serves that display to the noVNC page (remote_logins.novnc)'
 )

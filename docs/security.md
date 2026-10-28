@@ -44,6 +44,9 @@ A host is added to a site's policy only when a person says yes. Three things can
   answer in the client's own interface, in a notification, or through the approval command, and no
   tool takes "the person said yes" from the agent. See [MCP clients](mcp.md).
 
+The microphone is a setting of the site that only you turn on, with `valetkey mic`, or by saying
+yes to `browser_microphone` in the same ways.
+
 Only a host that was refused for the site, or that is in its excluded or denied list, can be asked
 about. The excluded list holds the hosts the last login left out, and the denied list the ones you
 denied. A steered agent cannot fill your screen with questions about arbitrary hosts.
@@ -182,6 +185,31 @@ stock Chrome lacks, and a page can lie about what a tool does. A page then sees 
 A login window can also tamper with the files it writes. valetkey reads its history and its
 cookie database from a copy, read-only, with a size cap and a time limit, and refuses a file that
 holds anything but plain tables. Of the cookies it keeps only a host and a name, never a value.
+
+## The microphone
+
+A session has no audio at all, not even a silent one, until you turn the microphone on for its
+site. Page text is untrusted, so an agent can only ask, and a no changes nothing.
+
+With it on, valetkey does not give the browser your audio server. That would let it record what
+you play, list your devices and applications, change your defaults and load modules, one of
+which opens a listening port on the host. Each session gets an audio graph of its own, started
+for it and ended with it. The graph has two nodes: a microphone that pulls from your default
+source, and a silent output for the call. Only that graph's socket is in the browser's sandbox.
+Anything that has taken over the browser sees those two nodes. It cannot list yours, record
+your sound, change a default or load a module, and nothing in your own audio configuration
+changes. Chrome may record without a prompt, because nobody sees one, but only on the start page's origin and the site's own domain with its subdomains. A sign-in provider or CDN the site may reach cannot.
+
+The graph runs in a jail of its own: no network, no devices, a read-only system, its own
+directory, your audio socket, and the same syscall filter as the browser. When the browser is
+killed, the daemon ends the session within a second or two, and the graph with it. The jail shares
+the host's process namespace, because the audio server cannot tell its clients apart in one of its own. A
+compromised audio server could therefore signal your other processes, and it has the full reach of
+your audio socket. The browser has neither.
+
+A recorder on your machine can find the capture stream of a session in `valetkey status --json`
+(see [commands](commands.md#seeing-what-runs)), and listens to what the call plays through the
+silent output. The setting shows in `status`, `watch`, `sites` and the start notification.
 
 ## Sessions that nobody uses
 

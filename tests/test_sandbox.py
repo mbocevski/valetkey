@@ -124,6 +124,37 @@ def test_write_chrome_policy(tmp_path: Path) -> None:
     assert sandbox.write_chrome_policy(directory) == directory  # again is fine
 
 
+def test_the_policy_allows_recording_only_where_it_is_told(tmp_path: Path) -> None:
+    plain = sandbox.write_chrome_policy(tmp_path / "plain")
+    assert "AudioCaptureAllowed" not in (plain / "managed" / "valetkey.json").read_text()
+    urls = ["https://sitex.test", "https://[*.]sitex.test"]
+    directory = sandbox.write_chrome_policy(tmp_path / "audio", urls)
+    written = json.loads((directory / "managed" / "valetkey.json").read_text())
+    assert written == sandbox.CHROME_POLICY | {
+        "AudioCaptureAllowed": True,
+        "AudioCaptureAllowedUrls": urls,
+    }
+    assert "AudioCaptureAllowed" not in sandbox.CHROME_POLICY  # the shared part never allows it
+
+
+def test_the_audio_socket_is_bound_alone_where_the_browser_looks_for_it(tmp_path: Path) -> None:
+    host_socket = tmp_path / "graph" / "pulse" / "native"
+    plain = build(tmp_path)
+    assert not any("pulse" in arg.lower() for arg in plain)
+    argv = sandbox.bwrap_argv(
+        replace(make_sandbox(tmp_path), audio_socket=host_socket),
+        ["chromium"],
+        roots=(),
+        system_links=[],
+        interpreter_links=[],
+    )
+    assert (str(host_socket), "/run/user/4242/pulse/native") in pairs(argv, "--bind")
+    assert setenvs(argv)["PULSE_SERVER"] == "unix:/run/user/4242/pulse/native"
+    # It sits in the tmpfs runtime directory, so the tmpfs comes first; nothing around it is bound.
+    assert argv.index("/run/user/4242") < argv.index(str(host_socket)) < argv.index("--clearenv")
+    assert str(host_socket.parent) not in argv
+
+
 def test_the_policy_is_bound_read_only_where_chromium_and_chrome_read_it(tmp_path: Path) -> None:
     box = make_sandbox(tmp_path)
     plain = sandbox.bwrap_argv(box, ["true"], roots=(), system_links=[], interpreter_links=[])

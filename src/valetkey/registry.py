@@ -38,6 +38,8 @@ class Site:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     op_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     kind: str = "idle"
+    microphone: bool = False
+    """Whether the running session has the microphone: what the policy said when it started."""
     session: BrowserSession | None = None
     proxy: Proxy | None = None
     window: LoginWindow | None = None
@@ -199,11 +201,17 @@ class Registry:
         *,
         bridge: str | None = None,
         reason: str | None = None,
+        microphone: bool | None = None,
     ) -> None:
-        """Tell every `watch` client that ``event`` happened to ``site`` or to ``bridge``."""
+        """Tell every `watch` client that ``event`` happened to ``site`` or to ``bridge``.
+
+        A session that started says whether it has the microphone.
+        """
         message: dict[str, Any] = {"event": event}
         if site is not None:
             message["site"] = site
+        if microphone is not None:
+            message["microphone"] = microphone
         if reason is not None:
             message["reason"] = reason
         if bridge is not None:

@@ -5,8 +5,10 @@ import json
 import os
 import runpy
 import shutil
+import socket
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
@@ -118,13 +120,13 @@ def test_sites_lists_one_and_several(
     status, out, _ = run(capsys, "sites")
     assert status == 0
     assert out.splitlines() == [
-        "SITE   HOST           ALLOWED  EXCLUDED  DENIED  LEARNED               NETWORKS  PROFILE",
-        "sitex  app.sitex.com  2        1         0       2026-10-26T09:00:00Z  -         yes",
+        "SITE   HOST           ALLOWED  EXCLUDED  DENIED  LEARNED               NETWORKS  MIC  PROFILE",  # noqa: E501
+        "sitex  app.sitex.com  2        1         0       2026-10-26T09:00:00Z  -         off  yes",
     ]
     make_site(roots, "another")
     status, out, _ = run(capsys, "sites")
     assert [line.split()[0] for line in out.splitlines()] == ["SITE", "another", "sitex"]
-    assert out.splitlines()[1].split()[-3:] == ["never", "-", "no"]
+    assert out.splitlines()[1].split()[-4:] == ["never", "-", "off", "no"]
 
 
 def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]) -> None:
@@ -142,6 +144,7 @@ def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]
             "denied": 0,
             "learned": None,
             "private_networks": [],
+            "microphone": False,
             "profile": True,
         },
         {
@@ -153,6 +156,7 @@ def test_sites_json_shape(roots: sites.Roots, capsys: pytest.CaptureFixture[str]
             "denied": 0,
             "learned": "2026-10-26T09:00:00Z",
             "private_networks": [],
+            "microphone": False,
             "profile": False,
         },
     ]
@@ -1348,6 +1352,7 @@ ACTIVITY = {
             "since": "2026-10-26T09:00:00Z",
             "contained": True,
             "host": "sitex.com",
+            "microphone": True,
             "idle_seconds": 125,
             "closes_at": "2026-10-26T09:12:55Z",
         },
@@ -1454,9 +1459,9 @@ def test_status_prints_a_table(
     status, out, err = run(capsys, "status")
     assert (status, err) == (0, "")
     assert out.splitlines() == [
-        "KIND     SITE     SINCE                 HOST       IDLE  CLOSES",
-        "session  sitex    2026-10-26T09:00:00Z  sitex.com  2m    2026-10-26T09:12:55Z",
-        "login    another  2026-10-26T09:05:00Z  -          -     -",
+        "KIND     SITE     SINCE                 HOST       IDLE  CLOSES                AUDIO",
+        "session  sitex    2026-10-26T09:00:00Z  sitex.com  2m    2026-10-26T09:12:55Z  microphone",
+        "login    another  2026-10-26T09:05:00Z  -          -     -                     -",
     ]
     assert connection.asked == ["status"]
     assert connection.arguments == [{"links": True}]
@@ -1498,7 +1503,7 @@ def test_status_shows_the_link_of_a_login_in_a_browser_and_how_to_reach_it(
     status, out, _ = run(capsys, "status")
     assert status == 0
     lines = out.splitlines()
-    assert lines[1].split() == ["login", "sitex", "2026-10-26T09:05:00Z", "-", "-", "-"]
+    assert lines[1].split() == ["login", "sitex", "2026-10-26T09:05:00Z", "-", "-", "-", "-"]
     assert lines[-3:] == [
         "The sitex login is shown in a web browser.",
         "On the machine you will use, run: ssh -L 4242:localhost:4242 box",
@@ -1537,6 +1542,7 @@ def test_status_without_a_host_shows_a_dash(
     assert run(capsys, "status")[1].splitlines()[1].split() == [
         "session",
         "sitex",
+        "-",
         "-",
         "-",
         "-",
@@ -1859,7 +1865,7 @@ def test_status_lists_a_connected_bridge(
     activity = ACTIVITY | {"bridges": [{"bridge": "bridge-abc", "since": "2026-10-26T09:10:00Z"}]}
     connect_to(monkeypatch, FakeConnection(status=activity))
     rows = run(capsys, "status")[1].splitlines()
-    assert rows[-1].split() == ["bridge", "bridge-abc", "2026-10-26T09:10:00Z", "-", "-", "-"]
+    assert rows[-1].split() == ["bridge", "bridge-abc", "2026-10-26T09:10:00Z", "-", "-", "-", "-"]
     connect_to(monkeypatch, FakeConnection(status=activity))
     assert json.loads(run(capsys, "status", "--json")[1]) == activity
 
@@ -2229,6 +2235,7 @@ def test_sites_with_a_site_prints_every_host_of_its_three_lists(
         "  no.example",
         "Private networks (1):",
         "  10.0.0.0/8",
+        "Microphone: off.",
     ]
 
 
@@ -2260,6 +2267,7 @@ def test_sites_with_a_site_as_json_is_one_object(
         "denied": ["no.example"],
         "learned": "2026-10-26T09:00:00Z",
         "private_networks": ["10.0.0.0/8"],
+        "microphone": False,
         "profile": True,
     }
 
@@ -2287,3 +2295,122 @@ def test_sites_with_an_unknown_site_is_an_error(
     status, out, err = run(capsys, "sites", "nosuch")
     assert (status, out) == (1, "")
     assert "nosuch" in err
+
+
+# -- the microphone ----------------------------------------------------------------------
+
+
+def test_mic_shows_the_setting_and_changes_it(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    assert run(capsys, "mic", "sitex") == (0, "sitex: the microphone is off.\n", "")
+    assert run(capsys, "mic", "sitex", "on") == (0, "sitex: the microphone is now on.\n", "")
+    assert sites.load_policy(roots, "sitex").microphone is True
+    assert run(capsys, "mic", "sitex") == (0, "sitex: the microphone is on.\n", "")
+    again = run(capsys, "mic", "sitex", "on")
+    assert again == (0, "sitex: the microphone was already on. Nothing changed.\n", "")
+    assert run(capsys, "mic", "sitex", "off") == (0, "sitex: the microphone is now off.\n", "")
+    assert sites.load_policy(roots, "sitex").microphone is False
+    assert run(capsys, "mic", "sitex", "off")[1].endswith("was already off. Nothing changed.\n")
+
+
+def test_mic_keeps_everything_else_in_the_policy(roots: sites.Roots) -> None:
+    make_site(roots, allow=("sitex.com", "login.okta.com"), excluded=("t.example",))
+    before = sites.load_policy(roots, "sitex")
+    main(["mic", "sitex", "on"])
+    assert sites.load_policy(roots, "sitex") == replace(before, microphone=True)
+
+
+def test_mic_refuses_an_unknown_site_and_a_bad_setting(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    status, out, err = run(capsys, "mic", "nosuch", "on")
+    assert (status, out) == (1, "")
+    assert "no site named 'nosuch'. Known sites: sitex" in err
+    with pytest.raises(SystemExit) as info:
+        main(["mic", "sitex", "maybe"])
+    assert info.value.code == 2
+    assert sites.load_policy(roots, "sitex").microphone is False
+
+
+def test_sites_shows_the_microphone_in_the_table_the_lists_and_json(
+    roots: sites.Roots, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_site(roots)
+    main(["mic", "sitex", "on"])
+    capsys.readouterr()
+    assert run(capsys, "sites")[1].splitlines()[1].split()[-2:] == ["on", "no"]
+    assert json.loads(run(capsys, "sites", "--json")[1])[0]["microphone"] is True
+    assert json.loads(run(capsys, "sites", "sitex", "--json")[1])["microphone"] is True
+    assert run(capsys, "sites", "sitex")[1].splitlines()[-1] == "Microphone: on."
+
+
+def test_status_shows_the_microphone_on_the_sessions_that_have_it(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = {"socket": "/s/pulse/native", "node": 52, "directory": "/s"}
+    activity = ACTIVITY | {
+        "sessions": [
+            {**ACTIVITY["sessions"][0], "capture": capture},
+            {**ACTIVITY["sessions"][0], "site": "other", "microphone": False},
+        ]
+    }
+    connect_to(monkeypatch, FakeConnection(status=activity))
+    lines = run(capsys, "status")[1].splitlines()
+    assert lines[1].split()[-1] == "microphone"
+    assert lines[2].split()[-1] == "-"
+    connect_to(monkeypatch, FakeConnection(status=activity))
+    assert json.loads(run(capsys, "status", "--json")[1])["sessions"][0]["capture"] == capture
+
+
+def test_doctor_says_nothing_of_audio_when_no_site_has_the_microphone(tmp_path: Path) -> None:
+    fake = FakeSystem(tmp_path)
+    make_site(fake.roots, "sitex")
+    assert "microphone" not in results(fake)
+
+
+def microphone_system(tmp_path: Path, **overrides: Any) -> FakeSystem:  # noqa: ANN401
+    runtime = tmp_path / "rt"
+    (runtime / "pulse").mkdir(parents=True)
+    fake = FakeSystem(tmp_path, **overrides)
+    fake.roots = sites.Roots(tmp_path / "cfg", tmp_path / "state", runtime)
+    sites.save_policy(fake.roots, replace(make_site(fake.roots, "sitex"), microphone=True))
+    make_site(fake.roots, "other")
+    return fake
+
+
+def test_doctor_checks_the_audio_a_microphone_needs(tmp_path: Path) -> None:
+    tools = {name: f"/usr/bin/{name}" for name in ("bwrap", "chromium", "agent-browser")}
+    tools |= {name: f"/usr/bin/{name}" for name in cli.audio.PROGRAMS}
+    fake = microphone_system(tmp_path, tools=tools)
+    with socket.socket(socket.AF_UNIX) as listener:
+        assert fake.roots.runtime is not None
+        listener.bind(str(cli.audio.upstream_socket(fake.roots.runtime)))
+        status, detail = results(fake)["microphone"]
+    assert (status, detail) == ("ok", "the microphone is on for sitex, and audio is running")
+
+
+def test_doctor_fails_for_the_programs_a_microphone_needs_and_warns_for_the_socket(
+    tmp_path: Path,
+) -> None:
+    tools = {name: f"/usr/bin/{name}" for name in cli.audio.PROGRAMS if name != "wireplumber"}
+    fake = microphone_system(tmp_path, tools=tools)
+    assert results(fake)["microphone"] == (
+        "fail",
+        "the microphone is on for sitex, but wireplumber is not installed",
+    )
+    tools["wireplumber"] = "/usr/bin/wireplumber"
+    status, detail = results(microphone_system(tmp_path / "again", tools=tools))["microphone"]
+    assert status == "warn"
+    assert detail == "the microphone is on for sitex, but the audio server's socket is missing"
+    fake.tools = tools
+    fake.roots = sites.Roots(tmp_path / "cfg", tmp_path / "state", None)
+    assert results(fake)["microphone"] == (status, detail)
+
+
+def test_doctor_ignores_a_site_whose_policy_cannot_be_read(tmp_path: Path) -> None:
+    fake = microphone_system(tmp_path)
+    sites.policy_path(fake.roots, "other").write_text("{")
+    assert "microphone" in results(fake)

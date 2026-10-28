@@ -137,14 +137,21 @@ _POLICY_DESTINATIONS = ("/etc/chromium/policies", "/etc/opt/chrome/policies")
 """Where Chromium and Google Chrome read policy from. Each reads only its own."""
 
 
-def write_chrome_policy(directory: Path) -> Path:
+def write_chrome_policy(directory: Path, audio_capture_urls: Sequence[str] = ()) -> Path:
     """Write :data:`CHROME_POLICY` under ``directory`` as ``managed/valetkey.json`` and return it.
 
-    Pass the directory as ``Sandbox.policy_dir``.
+    Pass the directory as ``Sandbox.policy_dir``. ``audio_capture_urls`` are the origins that may
+    record the microphone without a prompt (``AudioCaptureAllowedUrls``); with none, the policy
+    says nothing about audio capture, and a page that asks is refused, as there is no prompt to
+    answer in a browser nobody sees. Only a session with the microphone on passes them.
     """
     managed = directory / "managed"
     managed.mkdir(parents=True, exist_ok=True)
-    (managed / "valetkey.json").write_text(json.dumps(CHROME_POLICY) + "\n", encoding="utf-8")
+    policy: dict[str, object] = dict(CHROME_POLICY)
+    if audio_capture_urls:
+        policy["AudioCaptureAllowed"] = True
+        policy["AudioCaptureAllowedUrls"] = list(audio_capture_urls)
+    (managed / "valetkey.json").write_text(json.dumps(policy) + "\n", encoding="utf-8")
     return directory
 
 
@@ -229,6 +236,11 @@ class Sandbox:
     policy_dir: Path | None = None
     """A directory made by :func:`write_chrome_policy`. Bound read-only where the browser reads
     its policy from."""
+    audio_socket: Path | None = None
+    """The PulseAudio socket of a private audio graph (see :mod:`valetkey.audio`), for a session
+    with the microphone on. That one socket file is bound read-write (a socket needs both) at
+    ``pulse/native`` in ``runtime_dir``, where the browser looks for it. ``None`` means no audio
+    at all, which is what every other session and every login window gets."""
     die_with_parent: bool = True
     """Kill the sandbox when the process that started it dies. See ``bwrap_argv``."""
     allow_ptrace: bool = False
@@ -329,6 +341,18 @@ def system_link_args(root: Path = Path("/")) -> list[str]:
     return args
 
 
+def _audio_bind(sandbox: Sandbox) -> list[str]:
+    """Return the arguments that bind the audio socket in, or none when there is no audio."""
+    if sandbox.audio_socket is None:
+        return []
+    return ["--bind", str(sandbox.audio_socket), str(_audio_destination(sandbox))]
+
+
+def _audio_destination(sandbox: Sandbox) -> Path:
+    """Return where the audio socket appears inside: ``pulse/native`` in the runtime directory."""
+    return sandbox.runtime_dir / "pulse" / "native"
+
+
 def _opening(*, die_with_parent: bool, seccomp_fd: int | None) -> list[str]:
     """Return the first arguments of a ``bwrap`` line: the namespaces, and what ends them."""
     argv = ["bwrap", "--unshare-all", "--new-session", "--hostname", "valetkey"]
@@ -396,6 +420,7 @@ def bwrap_argv(  # noqa: PLR0913  # keywords tests use to build the same line an
     if sandbox.wayland_socket is not None:
         wayland_name = sandbox.wayland_socket.name
         argv += ["--bind", str(sandbox.wayland_socket), str(sandbox.runtime_dir / wayland_name)]
+    argv += _audio_bind(sandbox)
     argv += ["--clearenv"]
     environment = {
         "PATH": "/usr/bin",
@@ -405,6 +430,8 @@ def bwrap_argv(  # noqa: PLR0913  # keywords tests use to build the same line an
     }
     if wayland_name is not None:
         environment["WAYLAND_DISPLAY"] = wayland_name
+    if sandbox.audio_socket is not None:
+        environment["PULSE_SERVER"] = f"unix:{_audio_destination(sandbox)}"
     for name, value in environment.items():
         argv += ["--setenv", name, value]
     # The shell adds SHLVL to the environment of what it starts; the last command removes it.

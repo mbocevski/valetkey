@@ -40,6 +40,10 @@ Install bubblewrap, Chromium and agent-browser with your system's package manage
 agent-browser releases. Install the public suffix list too: `publicsuffix-list` on Arch and
 Fedora, `publicsuffix` on Debian and Ubuntu. The Arch package depends on it.
 
+The microphone (`valetkey mic`) also needs PipeWire with its PulseAudio server, WirePlumber and
+`pactl`, which are `pipewire`, `pipewire-pulse`, `wireplumber` and `libpulse` on Arch. The Arch
+package lists them as optional. `valetkey doctor` checks them once a site has the microphone on.
+
 ## The systemd units
 
 `valetkey install-units` writes `valetkeyd.socket` and `valetkeyd.service` to

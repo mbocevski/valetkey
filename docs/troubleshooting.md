@@ -103,6 +103,18 @@ A session that nothing uses for 15 minutes is closed, and the next call says so 
 to call `browser_open`. That is normal, and the agent does it without asking. The login stays
 saved. To change the time, set `session_idle_minutes` in `config.json`.
 
+## The microphone does not work
+
+Run `valetkey doctor`. When a site has the microphone on, it fails if PipeWire, WirePlumber, `pactl`
+or `bwrap` is missing, and warns if your audio server has no socket at `$XDG_RUNTIME_DIR/pulse/native`.
+
+If `browser_open` fails with "its audio did not start", the message ends with the log of the
+session's audio graph. A graph needs the same user namespaces as the browser, and your default
+microphone must exist. A call that records silence usually has the microphone muted or turned
+down on your side. The graph copies the microphone you have set as the default when the session
+starts, so change the default first and open the site again. `valetkey status --json` shows
+`capture` for a session with the microphone: its `node` is `null` until a page records.
+
 ## The browser does not start on a busy machine
 
 On a heavily loaded machine the browser may take longer to start than agent-browser waits, which

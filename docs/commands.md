@@ -19,6 +19,7 @@ Commands:
   forget: Delete a site's policy, login profile and downloads.
   install-units: Write the systemd user units that run the valetkey daemon.
   mcp: Serve the browser tools to an MCP client over standard input and output.
+  mic: Show, turn on or turn off the microphone for a site.
   sites: List the sites valetkey knows.
   status: Show the browser sessions, login windows and bridges that are open.
   watch: Print one JSON line for every change to the sessions, login windows and
@@ -30,9 +31,9 @@ bridges.
 
 ## Listing sites
 
-`valetkey sites` lists each site with its start host, how many hosts it allows, excludes and denies, the
-private address ranges it may reach, when the hosts were last learned and whether a login
-profile exists. Add `--json` for a script. `valetkey sites SITE` prints that one site's complete
+`valetkey sites` lists each site with its start host, how many hosts it allows, excludes and denies,
+and the private address ranges it may reach. It also shows when the hosts were last learned,
+whether the microphone is on, and whether a login profile exists. Add `--json` for a script. `valetkey sites SITE` prints that one site's complete
 lists instead, one host to a line: the hosts it may reach, the hosts its last login left out and
 the hosts you denied. With `--json` that is one object.
 
@@ -47,8 +48,9 @@ allowed, excluded by a login and denied by you, when the hosts were last
 learned, the private address ranges it may reach (a dash for none), and whether
 a login profile exists. With --json, each site is an object with the keys site,
 account (the part after the colon of sitex:work, or null), host, allowed,
-excluded, denied, learned (a UTC time, or null), private_networks (a list) and
-profile (true or false). A site with several accounts has a line for each.
+excluded, denied, learned (a UTC time, or null), private_networks (a list),
+microphone (true or false) and profile (true or false). A site with several
+accounts has a line for each.
 
 With a site, it prints that one site's complete lists instead: the hosts it may
 reach, the hosts its last login left out and the hosts you denied, one to a
@@ -119,6 +121,38 @@ Parameters:
 of a host.
 ```
 <!-- end: valetkey deny --help -->
+
+## The microphone
+
+A session has no microphone until you turn one on for its site. `valetkey mic SITE on` turns it
+on, `valetkey mic SITE off` turns it off, and `valetkey mic SITE` shows the setting. It applies to
+sessions that start afterwards; a running session keeps what it started with. Only you can turn it
+on. An agent can ask, and you answer. A session with it on gets an audio graph of its own, with the
+microphone and a silent output in it, and nothing else of your audio (see [Security](security.md)).
+It needs PipeWire with its PulseAudio server, and WirePlumber, on your machine. `valetkey doctor`
+checks for them when some site has the microphone on.
+
+<!-- begin: valetkey mic --help -->
+```text
+Usage: valetkey mic SITE [ARGS]
+
+Show, turn on or turn off the microphone for a site.
+
+With the microphone on, the site's browser sessions can record what the
+microphone hears, and nothing else of the machine's audio: each session gets a
+private audio graph with the microphone and a silent output in it. It applies to
+sessions that start afterwards; a running one keeps its setting until it is
+closed. The setting is off for every site until you turn it on, and an agent can
+only ask you to. Without a setting this prints the current one.
+
+Parameters:
+  SITE, --site: The site name, as shown by valetkey sites, with its account
+(sitex:work) when
+  the site has more than one. [required]
+  SETTING, --setting: on or off. Leave it out to show the setting. [choices: on,
+off]
+```
+<!-- end: valetkey mic --help -->
 
 ## Adding a site
 
@@ -261,9 +295,11 @@ XDG_RUNTIME_DIR. A missing Wayland display is a warning, because only logging in
 needs one, and so is a compositor without security-context support, where the
 login window is not restricted, and an agent-browser newer than 0.39.4, the
 version valetkey was tested with, and so is a CPU other than x86_64, where the
-sandbox has no syscall filter. The state of the systemd units is shown for
-information. A config.json that others can write to is ignored and fails. The
-exit status is 1 when a required check fails. With --json, each check is an
+sandbox has no syscall filter. When a site has the microphone on, the programs
+its audio needs must be installed (a failure if not) and the audio server's
+socket must exist (a warning if not). The state of the systemd units is shown
+for information. A config.json that others can write to is ignored and fails.
+The exit status is 1 when a required check fails. With --json, each check is an
 object with the keys check, status (ok, fail, warn or info) and detail.
 
 Parameters:
@@ -280,7 +316,12 @@ notification if it is installed.
 
 A session that nothing uses is closed after `session_idle_minutes` minutes, 15 unless you set it
 in `config.json` to a whole number from 1 to 1440. `status` shows each session's idle time and the
-time it will close.
+time it will close, and `microphone` on a session that has one.
+
+For a session with the microphone, `status --json` also gives its capture stream: the session's
+private audio socket and the node the browser records with. A recorder that wants the call's audio
+looks there instead of guessing from process names. `watch` says whether each session that starts
+has the microphone, and the start notification says so too.
 
 <!-- begin: valetkey status --help -->
 ```text
@@ -293,13 +334,17 @@ session from it. A browser that was killed disappears within a second or two.
 The daemon is not started: when none runs, this says so and exits 0.
 
 With --json the output is an object with three lists. "sessions" holds objects
-with the keys site, since, contained, host, idle_seconds and closes_at. "logins"
-holds objects with the keys site and since. "bridges" holds objects with the
-keys bridge and since, one for each laptop connected to take login windows.
-since is a UTC time like 2026-10-26T09:00:00Z. contained is always true. host is
-the host of the page the browser was last reported at, never the whole address,
-which may carry a token. idle_seconds is how long nothing has used the session,
-and closes_at is the UTC time the daemon will close it if nothing does: after
+with the keys site, since, contained, host, microphone, idle_seconds and
+closes_at. A session with the microphone on also has "capture", where a recorder
+finds its capture stream: "socket" is the session's private PulseAudio socket,
+"directory" holds its PipeWire socket, and "node" is the number of the PipeWire
+node the browser records with, or null while nothing records. "logins" holds
+objects with the keys site and since. "bridges" holds objects with the keys
+bridge and since, one for each laptop connected to take login windows. since is
+a UTC time like 2026-10-26T09:00:00Z. contained is always true. host is the host
+of the page the browser was last reported at, never the whole address, which may
+carry a token. idle_seconds is how long nothing has used the session, and
+closes_at is the UTC time the daemon will close it if nothing does: after
 session_idle_minutes in config.json, 15 by default.
 
 A login shown in a web browser has a link that works like a password: whoever
@@ -327,10 +372,12 @@ Print one JSON line for every change to the sessions, login windows and bridges.
 The first line is a snapshot of what is open, as status --json shows it, with
 "event" set to "snapshot" and an "at" time. After that each line has the keys
 event, site and at, where event is session_started, session_ended, login_opened
-or login_closed. For a bridge the key is bridge instead of site, and event is
-bridge_connected or bridge_disconnected. Bars and indicators can read the lines
-as they come. The command runs until it is interrupted or the daemon stops; it
-exits 1 when no daemon is running, and does not start one.
+or login_closed. A session_started line also says whether the session has the
+microphone ("microphone": true or false). For a bridge the key is bridge instead
+of site, and event is bridge_connected or bridge_disconnected. Bars and
+indicators can read the lines as they come. The command runs until it is
+interrupted or the daemon stops; it exits 1 when no daemon is running, and does
+not start one.
 ```
 <!-- end: valetkey watch --help -->
 

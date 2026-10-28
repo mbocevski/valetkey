@@ -10,12 +10,17 @@ added to a policy only after a person said yes, through one of two channels.
   this is asked first.
 * **An approval command** from ``$XDG_CONFIG_HOME/valetkey/config.json``, run by the daemon:
   ``{"approve_command": ["/path/to/program", "arg"]}``. It gets one line of JSON on stdin,
-  ``{"site": ..., "host": ..., "seen_during_login": ..., "reason": ...}``, and exit status 0
+  ``{"site": ..., "permission": "host", "host": ..., "seen_during_login": ..., "reason": ...}``,
+  and exit status 0
   means yes. Any other status means no, running too long (60 seconds) counts as unanswered, and
   nothing it prints is ever shown to the model.
 
 If neither can be used, the agent is told to hand the person the exact command to run:
 ``valetkey allow SITE HOST``.
+
+The same two channels turn on a site's microphone, which ``browser_microphone`` asks for. The
+command then gets ``{"site": ..., "permission": "microphone", "reason": ...}`` with no ``host``,
+so it must check ``permission``.
 
 **Trust boundary.** The daemon cannot see the MCP client's interface, so for the elicitation
 channel it has to take the word of the ``valetkey mcp`` process that the person accepted: the
@@ -80,6 +85,22 @@ class ConfigError(ValueError):
 def manual_command(site: str, host: str) -> str:
     """Return the command a person can run to allow ``host`` for ``site`` themselves."""
     return f"valetkey allow {site} {host}"
+
+
+def manual_microphone_command(site: str) -> str:
+    """Return the command that turns the microphone on for ``site``, for the person to run."""
+    return f"valetkey mic {site} on"
+
+
+def microphone_prompt_text(site: str, reason: str) -> str:
+    """Return the question to turn on the microphone; ``reason`` is from :func:`sanitize_reason`."""
+    claim = f'"{reason}"' if reason else "(nothing)"
+    return (
+        f"Turn on the microphone for {site} sessions?\n"
+        "Sessions started from now on can record what the microphone hears, and the setting "
+        "stays on until you turn it off with `valetkey mic`.\n"
+        f"The agent says: {claim}"
+    )
 
 
 def manual_deny_command(site: str, host: str) -> str:
