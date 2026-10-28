@@ -42,6 +42,9 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - run: uv sync
+      # The test that runs a real ssh against a private sshd needs the directory Debian's sshd
+      # insists on, even when it runs as a user. A runner may not have created it.
+      - run: sudo mkdir -p /run/sshd
       - run: uv run pytest -n auto --dist loadfile
 
   build:

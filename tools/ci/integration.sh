@@ -12,8 +12,11 @@ set -euo pipefail
 
 : "${AGENT_BROWSER_VERSION:?}" "${AGENT_BROWSER_SHA256:?}"
 
+# openssh runs a real ssh against a private sshd, pipewire, wireplumber and libpulse (pactl, parec,
+# pacat) a throwaway audio server, and publicsuffix-list names a site's domain.
 pacman -Syu --noconfirm --needed \
-  bubblewrap chromium dbus foot grim iproute2 libnotify mako python strace sway uv wayvnc waypipe wtype
+  bubblewrap chromium dbus foot grim iproute2 libnotify libpulse mako openssh pipewire \
+  pipewire-pulse publicsuffix-list python strace sway uv wayvnc waypipe wireplumber wtype
 
 curl -fsSL -o /tmp/agent-browser \
   "https://github.com/vercel-labs/agent-browser/releases/download/v${AGENT_BROWSER_VERSION}/agent-browser-linux-x64"
@@ -26,7 +29,10 @@ agent-browser --version
 owner=$(stat -c %u /src)
 useradd --create-home --uid "$owner" ci
 mkdir /work
-tar -C /src --exclude=.venv --exclude=.git -cf - . | tar -C /work -xf -
+# A __pycache__ made on the machine that holds /src names files there, so Python cannot find the
+# source of what it loads from one here (inspect.getsource fails). Nothing cached is copied.
+tar -C /src --exclude=.venv --exclude=.git --exclude=__pycache__ --exclude=.pytest_cache \
+  --exclude=.ruff_cache -cf - . | tar -C /work -xf -
 chown -R ci /work
 
 run_as_ci() {
