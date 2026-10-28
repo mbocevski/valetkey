@@ -84,7 +84,7 @@ class ThrowawayAudio:
     """Start the server on entering, and stop its programs, by process number, on leaving."""
 
     def __init__(self) -> None:
-        self.base = Path(tempfile.mkdtemp(prefix="vka-", dir="/tmp"))  # short on purpose
+        self.base = Path(tempfile.mkdtemp(prefix="vk-audio-", dir="/tmp"))  # short on purpose
         self.runtime = self.base / "rt"
         self._processes: list[subprocess.Popen[bytes]] = []
 
