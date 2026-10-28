@@ -79,6 +79,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Fixed
 
+- `browser_console` says that the request for a worker's script shows with no response even when the worker started, so an agent does not take it for the reason a page stalls.
 - A browser whose first open answers with nothing now fails with the driver's log, not a JSON error.
 - A microphone session starts at full volume with the mute off, whatever an earlier session's page set and your audio server saved.
 - `valetkey doctor` no longer warns that agent-browser 0.40.0 is newer than the version valetkey was tested with; valetkey is now tested with 0.40.0.

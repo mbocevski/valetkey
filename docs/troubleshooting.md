@@ -109,7 +109,8 @@ Before the first login, run `valetkey add SITE START --private-network RANGE` in
 If no host is refused, the page itself may be failing. The agent can call `browser_console`: it
 lists the page's errors, the console's warnings and errors, and the requests that failed or got no
 response, with the stack and the line for an error. A request marked refused needs a host allowed
-(see above); an error in the page's own code is for the site's owner.
+(see above); an error in the page's own code is for the site's owner. A request for a worker's
+script shows with no response even when the worker started, so do not read it as the cause.
 
 ## A tool says the session was closed
 

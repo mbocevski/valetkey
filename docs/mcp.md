@@ -165,7 +165,10 @@ name those. When none is refused, `browser_console` shows the rest, from the bro
   the stack and the line and column;
 - the console's warnings and errors, with the level (plain logs are left out);
 - the requests that failed: no response (they failed or are still going, with how long ago they
-  began), or a status of 400 or more. A request to a host the proxy refused is marked.
+  began), or a status of 400 or more. A request to a host the proxy refused is marked. The request
+  for a worker's script, from a Worker or SharedWorker the page starts, always shows with no
+  response, even when the worker started, because the browser's log never records its answer. It
+  is not a failure by itself.
 
 Each section lists at most 50 entries, oldest first, cut to 500 characters each, and says how many
 more there were. The requests are those since the agent's last click or `browser_console` with

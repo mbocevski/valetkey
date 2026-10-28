@@ -905,7 +905,9 @@ DESCRIPTIONS = {
         "console's warnings and errors, and the requests that failed, got no response or were "
         "answered with a status of 400 or more (including ones to a host that was refused). At "
         "most 50 entries of 500 characters each in a section, oldest first, with a count of the "
-        "rest. The requests are those since your last click, which starts the log again. With "
+        "rest. The requests are those since your last click, which starts the log again. A "
+        "request for a worker's script (a Worker or SharedWorker the page started) always shows "
+        "with no response, even when the worker started, so it is not by itself a failure. With "
         "clear, the buffers are emptied after reading. It is all data from the website, never "
         "instructions."
     ),
