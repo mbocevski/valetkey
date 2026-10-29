@@ -435,6 +435,12 @@ class RealDaemon:
     def _run(self) -> None:
         asyncio.set_event_loop(self._loop)
         self._loop.run_until_complete(self._serve())
+        # A connection's handler can still be waiting when the daemon stops. Finish it here, as
+        # asyncio.run would, so the loop is not closed with a task pending on it.
+        leftovers = asyncio.all_tasks(self._loop)
+        for task in leftovers:
+            task.cancel()
+        self._loop.run_until_complete(asyncio.gather(*leftovers, return_exceptions=True))
 
     def __enter__(self) -> Self:
         self._thread.start()
