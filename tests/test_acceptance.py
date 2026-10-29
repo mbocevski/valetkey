@@ -10,7 +10,7 @@ typed with key events into a real window; ``browser_open``, ``browser_snapshot``
 of one name; ``status`` and ``watch``; an expired login; and ``forget``. At the end it checks
 that no tool result held a link, a token, or page text outside a fence.
 
-**What this cannot cover** (still for the person, in MAR-53's checklist):
+**What this cannot cover** (checked by hand):
 
 * a real site, with its real redirects, scripts and second factor;
 * a real compositor and a real screen: the window opens on a private sway, not on a desktop, so
