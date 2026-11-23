@@ -983,6 +983,7 @@ class FakeSystem:
     def system(self) -> cli.System:
         return System(
             which=self.which,
+            resolve=self.resolve,
             run=self.run,
             environ=self.environ,
             wayland=self.wayland,

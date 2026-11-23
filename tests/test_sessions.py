@@ -2061,7 +2061,10 @@ def test_a_real_session_from_start_to_close(short_dir: Path) -> None:
         }
         page_requests = [r for r in proxy.requests if r.startswith("GET http://site.test/")]
         assert page_requests
-        assert all("Chrome/156.0.0.0" in r and "HeadlessChrome" not in r for r in page_requests)
+        # The installed browser's major, not a constant: the test image takes whatever Chromium
+        # Arch ships on the day it runs.
+        claimed = f"Chrome/{sandbox.installed_chrome_major()}.0.0.0"
+        assert all(claimed in r and "HeadlessChrome" not in r for r in page_requests)
 
         assert session.is_alive()
         session.close()
