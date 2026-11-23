@@ -956,6 +956,9 @@ class FakeSystem:
     def which(self, name: str) -> str | None:
         return self.tools.get(name)
 
+    def resolve(self, path: str) -> str:
+        return path
+
     def run(self, args: Sequence[str]) -> tuple[int, str]:
         self.calls.append(list(args))
         if BWRAP_PROBE in args:

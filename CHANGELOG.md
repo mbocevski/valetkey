@@ -8,7 +8,7 @@ Changes that affect users of valetkey. The format follows
 
 ### Added
 
-- valetkey runs Google Chrome where Chromium is not installed, such as on Gentoo, and `valetkey doctor` reports which of the two it found.
+- Google Chrome is used where Chromium is not installed, such as on Gentoo, and `valetkey doctor` reports which of the two it found.
 - A login window that refused connections tells you which when it closes: every host and port it refused, with the reason, in what the login learned and in `valetkey watch` (`login_closed`). Before, only private addresses were told.
 - `valetkey login TARGET` opens a login window from the command line, waits for it to close and prints what it learned; `--no-wait` returns once the window is open, and Ctrl-C ends the login.
 - The `browser_console` tool shows what went wrong inside a page that stalls or stays blank: its errors, the console's warnings and errors, and the requests that failed or got no response.

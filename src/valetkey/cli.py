@@ -1260,6 +1260,8 @@ class System:
     """Everything ``doctor`` asks the machine, so tests can answer instead."""
 
     which: Callable[[str], str | None] = shutil.which
+    resolve: Callable[[str], str] = sandbox.resolve_link
+    """A path with its links resolved, for the paths ``which`` answers."""
     run: Callable[[Sequence[str]], tuple[int, str]] = _run
     environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
     wayland: Callable[[], Path] = login.find_wayland_socket
@@ -1328,7 +1330,7 @@ def check_chromium(system: System) -> Check:
     That is Chromium, or Google Chrome where the distribution has no Chromium. The check keeps the
     name ``chromium``, which is what scripts that read ``doctor`` look for.
     """
-    path = sandbox.find_browser(system.which)
+    path = sandbox.find_browser(system.which, system.resolve)
     if path == sandbox.FALLBACK_BROWSER and system.which("chromium") is None:
         return Check("chromium", "fail", "no browser found; install chromium or google-chrome")
     output = system.run([path, "--version"])[1]

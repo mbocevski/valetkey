@@ -96,17 +96,27 @@ BROWSER_HOMES = (Path("/opt/google/chrome"),)
 ``/usr/bin`` entry is only a link. The sandbox binds such a directory read-only."""
 
 
-def find_browser(which: Callable[[str], str | None] = shutil.which) -> str:
+def resolve_link(path: str) -> str:
+    """Return ``path`` with its links resolved."""
+    return str(Path(path).resolve())
+
+
+def find_browser(
+    which: Callable[[str], str | None] = shutil.which,
+    resolve: Callable[[str], str] = resolve_link,
+) -> str:
     """Return the absolute path of the browser to run, links resolved.
 
     It is the first of :data:`BROWSERS` on ``PATH`` that resolves to a file under ``/usr`` or one
     of :data:`BROWSER_HOMES`, because nothing else of the system is visible in the sandbox.
+    ``resolve`` is passed with ``which``, so a caller answering from a table is not checked
+    against the real disk's links.
     """
     for name in BROWSERS:
         found = which(name)
         if found is None:
             continue
-        resolved = str(Path(found).resolve())
+        resolved = resolve(found)
         if resolved.startswith("/usr/") or browser_dirs(resolved):
             return resolved
     return FALLBACK_BROWSER
