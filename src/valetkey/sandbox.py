@@ -19,6 +19,7 @@ system D-Bus, the resolver) and the rest of the user's home do not exist inside.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ import valetkey
 from valetkey import seccomp, sites
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 PROXY_ADDRESS = "127.0.0.1:3128"
 """Where the forwarder listens inside the namespace, and what the browser uses as its proxy."""
@@ -83,10 +84,50 @@ def parse_chrome_major(version_output: str) -> int:
     return int(match.group(1))
 
 
-def installed_chrome_major(executable: str = "chromium") -> int:
-    """Run ``executable --version`` and return its major version."""
-    result = subprocess.run(  # noqa: S603  # fixed argument list, executable is a program name
-        [executable, "--version"],
+BROWSERS = ("chromium", "google-chrome-stable")
+"""The browsers valetkey runs, by program name, in order of preference. Google Chrome is for the
+distributions that no longer package Chromium, such as Gentoo since 2026."""
+
+FALLBACK_BROWSER = "/usr/bin/chromium"
+"""What :func:`find_browser` returns when neither browser is installed, so the error names it."""
+
+BROWSER_HOMES = (Path("/opt/google/chrome"),)
+"""Where a browser may live outside ``/usr``. Google Chrome's packages install it here, and its
+``/usr/bin`` entry is only a link. The sandbox binds such a directory read-only."""
+
+
+def find_browser(which: Callable[[str], str | None] = shutil.which) -> str:
+    """Return the absolute path of the browser to run, links resolved.
+
+    It is the first of :data:`BROWSERS` on ``PATH`` that resolves to a file under ``/usr`` or one
+    of :data:`BROWSER_HOMES`, because nothing else of the system is visible in the sandbox.
+    """
+    for name in BROWSERS:
+        found = which(name)
+        if found is None:
+            continue
+        resolved = str(Path(found).resolve())
+        if resolved.startswith("/usr/") or browser_dirs(resolved):
+            return resolved
+    return FALLBACK_BROWSER
+
+
+def browser_dirs(executable: str) -> tuple[Path, ...]:
+    """Return the directory of :data:`BROWSER_HOMES` that holds ``executable``, if any.
+
+    A browser under ``/usr`` needs nothing more, so the result is then empty.
+    """
+    path = Path(executable)
+    return tuple(home for home in BROWSER_HOMES if path.is_relative_to(home))
+
+
+def installed_chrome_major(executable: str | None = None) -> int:
+    """Run ``executable --version`` and return its major version.
+
+    ``executable`` defaults to :func:`find_browser`.
+    """
+    result = subprocess.run(  # noqa: S603  # fixed argument list, executable is a program path
+        [executable or find_browser(), "--version"],
         capture_output=True,
         text=True,
         check=True,
@@ -236,6 +277,9 @@ class Sandbox:
     policy_dir: Path | None = None
     """A directory made by :func:`write_chrome_policy`. Bound read-only where the browser reads
     its policy from."""
+    browser_dirs: tuple[Path, ...] = ()
+    """Where the browser lives when that is outside ``/usr`` (see :func:`browser_dirs`). Bound
+    read-only at the same path."""
     audio_socket: Path | None = None
     """The PulseAudio socket of a private audio graph (see :mod:`valetkey.audio`), for a session
     with the microphone on. That one socket file is bound read-write (a socket needs both) at
@@ -341,6 +385,14 @@ def system_link_args(root: Path = Path("/")) -> list[str]:
     return args
 
 
+def _same_path_ro_binds(paths: Sequence[Path]) -> list[str]:
+    """Return arguments that bind each of ``paths`` read-only at the same path inside."""
+    args: list[str] = []
+    for path in paths:
+        args += ["--ro-bind", str(path), str(path)]
+    return args
+
+
 def _audio_bind(sandbox: Sandbox) -> list[str]:
     """Return the arguments that bind the audio socket in, or none when there is no audio."""
     if sandbox.audio_socket is None:
@@ -402,6 +454,7 @@ def bwrap_argv(  # noqa: PLR0913  # keywords tests use to build the same line an
     python = python_roots() if roots is None else roots
     for root in python:
         argv += ["--ro-bind", str(root), str(root)]
+    argv += _same_path_ro_binds(sandbox.browser_dirs)
     argv += (
         interpreter_links if interpreter_links is not None else interpreter_link_args(bound=python)
     )

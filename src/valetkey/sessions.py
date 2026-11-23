@@ -65,7 +65,6 @@ SESSION_NAME = "s"
 """agent-browser's session name. Short on purpose: its socket path may not pass 103 bytes."""
 DRIVER_DIR = "agent-browser"
 READY_FILE = "ready.json"
-DEFAULT_EXECUTABLE = "/usr/bin/chromium"
 PROBE_TIMEOUT = 2.0
 STOP_GRACE = 5.0
 """Seconds the holder gets after SIGTERM before SIGKILL."""
@@ -784,6 +783,7 @@ class Session:
         self._watch_browser = False
         self._audio: audio.AudioGraph | None = None
         self._errors_seen = 0
+        self._browser_dirs: tuple[Path, ...] = ()
 
     @classmethod
     def start(  # noqa: PLR0913  # each argument is a distinct thing a caller decides
@@ -793,7 +793,7 @@ class Session:
         start_url: str,
         *,
         proxy_socket: Path | None = None,
-        executable: str = DEFAULT_EXECUTABLE,
+        executable: str | None = None,
         binary: str = "agent-browser",
         timeout: float = DEFAULT_TIMEOUT,
         watch_browser: bool = False,
@@ -813,6 +813,8 @@ class Session:
         With ``watch_browser``, :meth:`is_alive` also looks for the browser's own process once
         the first page has loaded, so a browser that was killed on its own counts as gone.
 
+        ``executable`` is the browser, and defaults to :func:`valetkey.sandbox.find_browser`.
+
         ``proxy_socket`` defaults to ``session_paths(...).proxy_socket``. Only one session per
         site may run at a time, and the caller makes sure of it: any files an earlier,
         crashed session left are deleted.
@@ -830,6 +832,7 @@ class Session:
             paths = replace(paths, proxy_socket=proxy_socket)
         binary_path = _resolve_binary(binary)
         runtime = sites.runtime_path(roots).parent
+        executable = executable or sandbox.find_browser()
         chrome_major = sandbox.installed_chrome_major(executable)
         heard = sites.load_policy(roots, site) if microphone else None
         for attempt in range(LAUNCH_ATTEMPTS):
@@ -852,8 +855,10 @@ class Session:
                         audio.capture_urls(heard) if heard is not None else (),
                     ),
                     audio_socket=None if session._audio is None else session._audio.socket,
+                    browser_dirs=sandbox.browser_dirs(executable),
                     allow_ptrace=allow_ptrace,
                 )
+                session._browser_dirs = box.browser_dirs
                 session._launch(box, ["/usr/bin/bash", "-c", script])
                 session.first_page = parse_page(session._await_first_page())
                 session._watch_browser = watch_browser
@@ -1068,7 +1073,7 @@ class Session:
             environment,
             runtime_dir=self._runtime,
             driver_dir=self.paths.driver_dir,
-            read_only=[Path(self._binary), self.paths.config_file],
+            read_only=[Path(self._binary), self.paths.config_file, *self._browser_dirs],
             seccomp_fd=seccomp_fd,
         )
 

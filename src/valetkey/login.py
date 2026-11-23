@@ -302,8 +302,13 @@ def waypipe_wrapper(
 # -- the browser command -------------------------------------------------------------------
 
 
-def chromium_command(profile_dir: Path, start_url: str, chrome_major: int) -> list[str]:
+def chromium_command(
+    profile_dir: Path, start_url: str, chrome_major: int, browser: str = CHROMIUM
+) -> list[str]:
     """Return the Chromium command line for a login window.
+
+    ``browser`` is the program to run: a name on the sandbox's ``PATH``, or the absolute path
+    that :func:`valetkey.sandbox.find_browser` returns.
 
     The containment flags of :func:`valetkey.sandbox.chrome_flags` stay, except the one that
     hides automation: nothing drives this window, and Chromium shows a warning bar for it. The
@@ -315,7 +320,7 @@ def chromium_command(profile_dir: Path, start_url: str, chrome_major: int) -> li
     keyring that this window might find and a session would not.
     """
     return [
-        CHROMIUM,
+        browser,
         *sandbox.chrome_flags(chrome_major, hide_automation=False),
         "--password-store=basic",
         "--ozone-platform=wayland",
@@ -560,6 +565,7 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     socket_path = None
     if bridge is None:
         socket_path = wayland_socket or await asyncio.to_thread(find_wayland_socket)
+    browser = await asyncio.to_thread(sandbox.find_browser)
     major = chrome_major or await asyncio.to_thread(sandbox.installed_chrome_major)
     runtime = sites.runtime_path(roots)
     profile_dir, login_dir = await asyncio.to_thread(_prepare, roots, site, runtime)
@@ -581,11 +587,12 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
             runtime_dir=cast("Path", roots.runtime),
             wayland_socket=_window_display(context, socket_path, login_dir, bridge),
             policy_dir=policy_dir,
+            browser_dirs=sandbox.browser_dirs(browser),
             wrapper=waypipe_wrapper(bridge, login_dir / DISPLAY_NAME, waypipe) if bridge else (),
         )
         await asyncio.to_thread(box.log_file.unlink, missing_ok=True)
         command = holder_command(
-            chromium_command(profile_dir, url, major),
+            chromium_command(profile_dir, url, major, browser),
             sandbox.bridge_command(proxy_socket),
             profile_dir,
         )

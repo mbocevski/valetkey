@@ -1085,10 +1085,23 @@ def test_doctor_namespaces_blocked(tmp_path: Path) -> None:
 def test_doctor_chromium_problems(tmp_path: Path) -> None:
     fake = FakeSystem(tmp_path)
     fake.tools.pop("chromium")
-    assert results(fake)["chromium"] == ("fail", "chromium not found")
+    no_browser = ("fail", "no browser found; install chromium or google-chrome")
+    assert results(fake)["chromium"] == no_browser
     fake.tools["chromium"] = "/usr/bin/chromium"
     fake.outputs["/usr/bin/chromium --version"] = (0, "garbage\n")
     assert results(fake)["chromium"] == ("fail", "cannot read the version of /usr/bin/chromium")
+
+
+def test_doctor_accepts_google_chrome_where_there_is_no_chromium(tmp_path: Path) -> None:
+    # Gentoo has no Chromium. Google Chrome's /usr/bin entry links into /opt/google/chrome.
+    fake = FakeSystem(tmp_path)
+    fake.tools.pop("chromium")
+    fake.tools["google-chrome-stable"] = "/opt/google/chrome/google-chrome"
+    fake.outputs["/opt/google/chrome/google-chrome --version"] = (
+        0,
+        "Google Chrome 158.0.8127.36\n",
+    )
+    assert results(fake)["chromium"] == ("ok", "google-chrome 158")
 
 
 def test_doctor_agent_browser_problems(tmp_path: Path) -> None:
@@ -1234,7 +1247,7 @@ def test_doctor_command_output_and_exit_status(
     assert status == 1
     lines = out.splitlines()
     assert lines[0] == "ok    bwrap 0.13.1"
-    assert "FAIL  chromium not found" in lines
+    assert "FAIL  no browser found; install chromium or google-chrome" in lines
     assert "FAIL  agent-browser not found" in lines
     assert lines[-1] == "info  valetkeyd.socket is inactive"
 

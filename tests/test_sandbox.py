@@ -168,6 +168,37 @@ def test_the_policy_is_bound_read_only_where_chromium_and_chrome_read_it(tmp_pat
     assert (str(tmp_path / "policy"), "/etc/opt/chrome/policies") in ro
 
 
+def test_chromium_is_preferred_over_google_chrome() -> None:
+    found = {
+        "chromium": "/usr/lib/valetkey-test/chromium",
+        "google-chrome-stable": "/opt/google/chrome/google-chrome",
+    }
+    assert sandbox.find_browser(found.get) == "/usr/lib/valetkey-test/chromium"
+
+
+def test_google_chrome_is_found_where_there_is_no_chromium() -> None:
+    found = {"google-chrome-stable": "/opt/google/chrome/google-chrome"}
+    assert sandbox.find_browser(found.get) == "/opt/google/chrome/google-chrome"
+
+
+def test_a_browser_the_sandbox_cannot_see_is_not_chosen() -> None:
+    # A copy in a home directory would not exist inside, so the fallback names what is missing.
+    found = {"chromium": "/home/someone/.local/bin/chromium"}
+    assert sandbox.find_browser(found.get) == sandbox.FALLBACK_BROWSER
+
+
+def test_only_a_browser_outside_usr_gets_its_directory_bound() -> None:
+    assert sandbox.browser_dirs("/opt/google/chrome/google-chrome") == (Path("/opt/google/chrome"),)
+    assert sandbox.browser_dirs("/usr/bin/chromium") == ()
+
+
+def test_the_browser_directory_is_bound_read_only(tmp_path: Path) -> None:
+    box = replace(make_sandbox(tmp_path), browser_dirs=(Path("/opt/google/chrome"),))
+    argv = sandbox.bwrap_argv(box, ["true"], roots=(), system_links=[], interpreter_links=[])
+    assert ("/opt/google/chrome", "/opt/google/chrome") in pairs(argv, "--ro-bind")
+    assert ("/opt/google/chrome", "/opt/google/chrome") not in pairs(argv, "--bind")
+
+
 def test_the_component_updater_is_pointed_at_something_that_cannot_be_fetched() -> None:
     flag = next(f for f in sandbox.chrome_flags(156) if f.startswith("--component-updater="))
     assert flag == "--component-updater=url-source=file:///nonexistent"

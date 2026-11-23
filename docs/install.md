@@ -38,7 +38,14 @@ systemctl --user enable --now valetkeyd.socket
 `uv tool install .` builds valetkey and its dependencies into a private environment of its own.
 Install bubblewrap, Chromium and agent-browser with your system's package manager, or from the
 agent-browser releases. Install the public suffix list too: `publicsuffix-list` on Arch and
-Fedora, `publicsuffix` on Debian and Ubuntu. The Arch package depends on it.
+Fedora, `publicsuffix` on Debian and Ubuntu, `net-misc/publicsuffix-db` on Gentoo. The Arch package
+depends on it.
+
+Where the distribution has no Chromium, as on Gentoo, Google Chrome works instead. valetkey runs
+`chromium` when it is installed and `google-chrome-stable` otherwise, and binds
+`/opt/google/chrome` read-only into the sandbox, because Chrome lives there rather than under
+`/usr`. Install agent-browser under `/usr` too, such as `/usr/local/bin`, since the sandbox sees
+nothing else of the system.
 
 The microphone (`valetkey mic`) also needs PipeWire with its PulseAudio server, WirePlumber and
 `pactl`, which are `pipewire`, `pipewire-pulse`, `wireplumber` and `libpulse` on Arch. The Arch

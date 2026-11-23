@@ -1323,15 +1323,20 @@ def check_bwrap(system: System) -> list[Check]:
 
 
 def check_chromium(system: System) -> Check:
-    """Check that Chromium is installed and report its major version."""
-    path, output = _tool_version(system, "chromium")
-    if path is None:
-        return Check("chromium", "fail", "chromium not found")
+    """Check that a browser valetkey can run is installed and report its major version.
+
+    That is Chromium, or Google Chrome where the distribution has no Chromium. The check keeps the
+    name ``chromium``, which is what scripts that read ``doctor`` look for.
+    """
+    path = sandbox.find_browser(system.which)
+    if path == sandbox.FALLBACK_BROWSER and system.which("chromium") is None:
+        return Check("chromium", "fail", "no browser found; install chromium or google-chrome")
+    output = system.run([path, "--version"])[1]
     try:
         major = sandbox.parse_chrome_major(output)
     except ValueError:
         return Check("chromium", "fail", f"cannot read the version of {path}")
-    return Check("chromium", "ok", f"chromium {major}")
+    return Check("chromium", "ok", f"{Path(path).name} {major}")
 
 
 def check_agent_browser(system: System) -> Check:
