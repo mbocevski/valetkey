@@ -1742,7 +1742,7 @@ class _Tools:
         if planned.settled is not None:
             return planned.settled
         if isinstance(answer, AcceptedElicitation) and isinstance(answer.data, BaseModel):
-            if not answer.data.microphone:  # ty: ignore[unresolved-attribute]
+            if not answer.data.microphone:  # ty: ignore[missing-attribute]
                 return microphone_text("denied", "The person said no.", site)
             done = await self._ask("microphone_apply", site=site, channel="elicitation")
         elif isinstance(answer, DeclinedElicitation):
