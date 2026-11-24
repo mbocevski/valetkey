@@ -669,8 +669,8 @@ class Policy:
     on. A start URL that ends on one of them means the login has expired. It is optional, and a
     policy written before it existed has none.
     ``login_cookies`` are the cookies (``host name``, never a value) that the login set on the
-    site's own hosts and that look like its sign-in: if none of them is in the profile when the
-    site is opened, the login has gone (see :mod:`valetkey.cookies`). It is optional.
+    site's own hosts and that look like its sign-in. If none of them is in the profile when the site
+    is opened, the login has gone (see :mod:`valetkey.cookies`). It is optional.
     ``private_networks`` are the address ranges (``10.20.0.0/16``) in which a host the site
     allows may resolve although they are private, see :func:`private_network`. Only the person
     sets them. It is optional too.
@@ -832,10 +832,10 @@ def allow_host(policy: Policy, host: str) -> tuple[Policy, bool, list[str]]:
 def private_network(text: str) -> str:
     """Return ``text`` as a range a site may list, in its one canonical spelling.
 
-    The range must be written with a prefix length and no host bits (``10.20.0.0/16``), lie
-    inside the private address space (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7) and be no
-    wider than ``MIN_PRIVATE_PREFIX``. Loopback, link-local and the like are outside that space,
-    so they can never be listed.
+    The range must be written with a prefix length and no host bits (``10.20.0.0/16``), and be no
+    wider than ``MIN_PRIVATE_PREFIX``. It must lie inside the private address space (10/8,
+    172.16/12, 192.168/16, 100.64/10, fc00::/7). Loopback, link-local and the like are outside that
+    space, so they can never be listed.
 
     Raises:
         ValueError: when it is none of that.
@@ -892,9 +892,9 @@ def deny_host(policy: Policy, host: str) -> Policy:
     """Return ``policy`` with ``host`` denied: no longer allowed, and blocked from now on.
 
     The host's own ``allow`` entry is removed, and the host is added to ``denied`` unless it is
-    there. A ``denied`` entry blocks the host and its subdomains even when a wider ``allow``
-    entry covers them (``cdn.example.com`` denied with ``example.com`` allowed), so a host
-    carved out of an allowed domain stays out. ``host`` must already be normalized (see
+    there. A ``denied`` entry blocks the host and its subdomains even when a wider ``allow`` entry
+    covers them (``cdn.example.com`` denied with ``example.com`` allowed). So a host carved out of
+    an allowed domain stays out. ``host`` must already be normalized (see
     :func:`host_of`).
     """
     allow = tuple(entry for entry in policy.allow if entry != host)
@@ -921,9 +921,9 @@ def load_policy(roots: Roots, site: str, suffixes: SuffixList | None = None) -> 
     ``microphone``, ``microphone_source`` and ``private_networks``. A
     file without ``denied`` is one from before it existed: it has none, and its ``excluded``
     entries stay what a login left out, built again by the next login. Missing keys and
-    unknown keys are both errors, and ``site`` must equal the file name. An ``allow`` entry that
-    is a public suffix is left out and named in ``ignored``; with no suffix list on the machine
-    the entries are kept, since the policy was written down before and its session must open.
+    unknown keys are both errors, and ``site`` must equal the file name. An ``allow`` entry that is
+    a public suffix is left out and named in ``ignored``. With no suffix list on the machine the
+    entries are kept, since the policy was written down before and its session must open.
 
     Raises:
         FileNotFoundError: when the site has no policy file.
@@ -1041,8 +1041,8 @@ def policy_json(policy: Policy) -> str:
 def save_policy(roots: Roots, policy: Policy) -> Path:
     """Write ``policy`` to its file atomically and return the path.
 
-    The text goes to a temporary file in the same directory, is flushed to disk, then replaces
-    the old file in one step, so a reader sees the old or the new policy and never a partial one.
+    The text goes to a temporary file in the same directory, is flushed to disk, then replaces the
+    old file in one step. So a reader sees the old or the new policy and never a partial one.
     The file is mode ``0600`` and its directories ``0700``. If the write fails, the old file is
     left as it was and the temporary file is removed.
     """

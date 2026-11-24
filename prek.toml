@@ -54,7 +54,9 @@ pass_filenames = false
 id = "vale"
 name = "vale"
 language = "system"
-entry = "uv run --frozen vale"
+# Vale reads Python comments and docstrings with a tree-sitter grammar that `vale sync` downloads
+# (Grammars in .vale.ini). Without it Vale falls back to reading code as prose.
+entry = '''sh -c 'test -f .vale/styles/config/grammars/python.wasm || uv run --frozen vale sync >&2; exec uv run --frozen vale "$@"' vale'''
 files = '\.(md|py)$'
 # The first run downloads the vale binary into the virtual environment. Prek splits the files
 # over several processes at once, and two of them would download it together.

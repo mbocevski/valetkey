@@ -285,8 +285,8 @@ def reset_stream(upstream: Path, tag: str) -> bool:
 
     Tells whether the stream was found. PipeWire remembers the volume and mute of a stream by the
     name of the program that opened it, and the tunnel is always the same program. A client of the
-    graph can set the volume and mute of ``vk_mic``, which the tunnel passes on to this stream, so
-    a stream left muted or turned down would start so every time, and the microphone would arrive
+    graph can set the volume and mute of ``vk_mic``, which the tunnel passes on to this stream. A
+    stream left muted or turned down would start so every time, and the microphone would arrive
     silent. Only this stream is touched, never another one or a device.
     """
     listing = _ask([*_server_args(upstream), "list", "source-outputs"])
@@ -333,12 +333,12 @@ class AudioGraph:
     ) -> AudioGraph:
         """Start the graph under ``directory`` and return it once the microphone is its default.
 
-        ``directory`` must be short, because a socket's path is limited to about a hundred bytes,
-        and ``tag`` unique among the graphs that ever ran against the person's server: a stream
-        left over from a graph that has just ended must not be taken for this one's. ``argv``
-        builds the command. ``source`` names the source the microphone copies instead of the
-        default one. It must exist, and nothing is started when it does not: there is no falling
-        back to the default, which would hear something else than the person asked for.
+        ``directory`` must be short, because a socket's path is limited to about a hundred bytes.
+        ``tag`` must be unique among the graphs that ever ran against the person's server. A stream
+        left over from a graph that has just ended must not be taken for this one's. ``argv`` builds
+        the command. ``source`` names the source the microphone copies instead of the default one.
+        It must exist, and nothing is started when it does not: there is no falling back to the
+        default, which would hear something else than the person asked for.
 
         Raises:
             MissingSourceError: when ``source`` is not on the person's audio server.
@@ -453,10 +453,10 @@ class AudioGraph:
     def capture_stream(self) -> dict[str, object]:
         """Describe where a recorder finds the browser's capture stream.
 
-        ``source`` is the source the microphone copies (``None`` for the person's default),
-        ``socket`` is the graph's PulseAudio socket and ``node`` the number of the capture node
-        (the oldest, when the browser records twice), or ``None`` while nothing records or when the
-        graph cannot be asked. The graph's PipeWire socket is in ``directory``.
+        ``source`` is the source the microphone copies (``None`` for the person's default).
+        ``socket`` is the graph's PulseAudio socket. ``node`` is the number of the capture node (the
+        oldest, when the browser records twice), or ``None`` while nothing records or when the graph
+        cannot be asked. The graph's PipeWire socket is in ``directory``.
         """
         try:
             nodes = self.capture_nodes()

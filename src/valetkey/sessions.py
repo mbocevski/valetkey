@@ -111,7 +111,7 @@ _SAVE_SCRIPT = """(async () => {
 })()"""
 
 # The pictures and videos on the page, the biggest first, as JSON text. The page's own words are
-# passed on as they are, srcset included: an address may hold commas (picture services put their
+# passed on as they are, srcset included. An address may hold commas (picture services put their
 # options in the path), so it is read in Python, by :func:`largest_candidate`, not here.
 _IMAGES_SCRIPT = r"""(() => {
   const found = [];
@@ -430,7 +430,7 @@ def holder_script(paths: SessionPaths, binary: str, open_command: list[str], run
     """Return the shell script that is the first command in the namespace.
 
     It starts the forwarder, waits until it accepts connections, runs ``open_command`` with the
-    session's identity in its environment, writes the answer to ``paths.ready_file`` and then
+    session's identity in its environment and writes the answer to ``paths.ready_file``. Then it
     waits for the forwarder, which is to say until it is killed.
     """
     bridge = shlex.join(sandbox.bridge_command(paths.proxy_socket))
@@ -1173,11 +1173,11 @@ class Session:
     def fill(self, ref: str, text: str) -> None:
         """Replace the contents of the field ``ref`` with ``text``.
 
-        agent-browser reads a word that looks like one of its own options as that option, even
-        in the text to type (``--json`` is dropped, ``--session x`` changes the session, and
-        ``--headed`` would relaunch the browser), and it has no ``--`` to end the options: it
-        types the ``--`` itself. So text that starts with a dash is typed with a space in front,
-        which no option starts with, and the space is then deleted from the start of the field.
+        agent-browser reads a word that looks like one of its own options as that option, even in
+        the text to type. For example, ``--json`` is dropped, ``--session x`` changes the session,
+        and ``--headed`` would relaunch the browser. It has no ``--`` to end the options: it types
+        the ``--`` itself. So text that starts with a dash is typed with a space in front, which no
+        option starts with, and the space is then deleted from the start of the field.
         """
         target = _check_ref(ref)
         if not text.startswith("-"):
@@ -1207,10 +1207,10 @@ class Session:
     def diagnostics(self, *, clear: bool = False) -> dict[str, list[dict[str, Any]]]:
         """Read what the page has said about itself: errors, console messages and requests.
 
-        ``errors`` are the uncaught exceptions and unhandled rejections since the last clear,
-        ``console`` the messages of level warning and error, and ``requests`` every request
-        agent-browser has logged since the network log was last cleared (a click clears it, to
-        tell what it downloads). They are the page's own words and are not checked here.
+        ``errors`` are the uncaught exceptions and unhandled rejections since the last clear, and
+        ``console`` the messages of level warning and error. ``requests`` is every request
+        agent-browser has logged since the network log was last cleared (a click clears it, to tell
+        what it downloads). They are the page's own words and are not checked here.
 
         With ``clear`` the console and the network log are emptied after reading. agent-browser's
         ``errors --clear`` leaves the errors in place (0.40), so the ones read are counted
@@ -1316,16 +1316,16 @@ class Session:
         """Return what an HTTP or HTTPS address serves, read from the browser's own exchange.
 
         The address is opened in a tab of its own, so the page the person or the agent is on does
-        not move, and it goes through the session's proxy with the session's cookies: a host the
-        site may not reach is refused as it is for navigation. The browser records the exchange,
-        and the body is taken from that record. Nothing runs in the page of the address, so what
-        its server says about scripts, frames or other sites (a strict content security policy,
-        which picture services send, or a cross-origin policy) cannot stop it.
+        not move. It goes through the session's proxy with the session's cookies: a host the site
+        may not reach is refused as it is for navigation. The browser records the exchange,
+        and the body is taken from that record. Nothing runs in the page of the address. So what its
+        server says about scripts, frames or other sites (a strict content security policy, which
+        picture services send, or a cross-origin policy) cannot stop it.
 
         ``None`` means the browser saved the file itself: the address is an attachment, or a PDF,
-        which the browser's viewer shows in place of the bytes, so it is fetched once more from
-        the tab and saved as a download. The tab is closed in the end, whatever happened, and
-        the first one is in front again.
+        which the browser's viewer shows in place of the bytes. So it is fetched once more from the
+        tab and saved as a download. The tab is closed in the end, whatever happened, and the first
+        one is in front again.
 
         Raises:
             AgentBrowserError: when the browser cannot load the address, the server does not

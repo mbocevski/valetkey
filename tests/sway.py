@@ -71,7 +71,7 @@ class Sway:
         """Close a window of ``app_id`` once there is one, as the person does.
 
         A browser's page can load well before the compositor has its window when the machine is
-        busy, and closing a window that is not there closes nothing and says so: nothing then ever
+        busy, and closing a window that is not there closes nothing and says so. Nothing then ever
         closes the window that appears a moment later. So this tries again until a window is closed.
         """
         deadline = time.monotonic() + limit

@@ -157,9 +157,9 @@ def parse_request(head: bytes) -> Request:
     """Parse a request head (everything before the blank line) into a :class:`Request`.
 
     Raises:
-        RequestError: with status 400 for anything malformed or not a proxy request (an
-            origin-form target, a scheme other than HTTP, credentials in the URL, a bad host),
-            and 405 for a method the proxy does not forward.
+        RequestError: with status 400 for anything malformed or not a proxy request (an origin-form
+            target, a scheme other than HTTP, credentials in the URL, a bad host). Also with status
+            405 for a method the proxy does not forward.
 
     """
     try:
@@ -343,11 +343,11 @@ def private_address_allowed(address: str, networks: Iterable[str]) -> bool:
 class ThreadedResolver:
     """Resolve host names with the system resolver on threads of its own.
 
-    A lookup that never returns holds its thread, and nothing can interrupt it. So these threads
-    are not the default pool, which the rest of the process also uses, and there are only
-    ``workers`` of them: a page that makes lookups hang can hold up other lookups through this
-    resolver, and nothing else. Lookups beyond ``workers`` wait their turn, and one
-    cancelled before its turn never runs.
+    A lookup that never returns holds its thread, and nothing can interrupt it. So these threads are
+    not the default pool, which the rest of the process also uses, and there are only ``workers`` of
+    them. A page that makes lookups hang can hold up other lookups through this resolver, and
+    nothing else. Lookups beyond ``workers`` wait their turn, and one cancelled before its turn
+    never runs.
     """
 
     def __init__(self, workers: int = RESOLVE_WORKERS) -> None:

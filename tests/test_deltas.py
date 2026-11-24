@@ -276,7 +276,7 @@ def long_page() -> list[str]:
 
 def two_distant_changes() -> tuple[deltas.View, dict[str, tuple[str, str]], sessions.SnapshotDelta]:
     """A view of the long page, and agent-browser's splice for a click that opens a menu at the top
-    and toggles the button in the foot: one splice from the first changed line to the last."""
+    and toggles the button in the foot. It is one splice from the first changed line to the last."""
     old = long_page()
     new = [
         old[0],

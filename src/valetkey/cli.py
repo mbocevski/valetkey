@@ -219,14 +219,14 @@ def list_sites(
 ) -> int:
     """List the sites valetkey knows.
 
-    Each line shows the site name, the host it starts at, how many hosts are allowed, excluded
-    by a login and denied by you, when the hosts were last learned, the private address ranges it
-    may reach (a dash for none), and whether a login profile exists. With --json, each site is an
-    object with the keys site, account (the part after the colon of ``sitex:work``, or null),
-    host, allowed, excluded, denied, learned (a UTC time, or null), ``private_networks`` (a list),
-    microphone (true or false), microphone_source (a name, or null for the default source) and
-    profile (true or false). A site with several accounts has a
-    line for each.
+    Each line shows the site name, the host it starts at, and how many hosts are allowed, excluded
+    by a login and denied by you. It also shows when the hosts were last learned, the private
+    address ranges it may reach (a dash for none), and whether a login profile exists. With --json,
+    each site is an object. Its keys are site, account (the part after the colon of ``sitex:work``,
+    or null), host, allowed, excluded, denied and learned (a UTC time, or null). The others are
+    ``private_networks`` (a list), microphone (true or false), microphone_source (a name, or null
+    for the default source) and profile (true or false). A site with several accounts has a line for
+    each.
 
     With a site, it prints that one site's complete lists instead: the hosts it may reach, the
     hosts its last login left out and the hosts you denied, one to a line. With --json, that is
@@ -401,9 +401,9 @@ def add(
     ``--force``, which replaces the policy and keeps the login profile.
 
     A site can have more than one account, each with its own login, policy and downloads. Name
-    one ``sitex:work``. With ``--copy-hosts-from`` the new account starts with the allowed,
-    excluded and denied hosts of another account of the site, and with nothing else of it: not
-    its private ranges, which are a permission of their own, and not what its login learned.
+    one ``sitex:work``. With ``--copy-hosts-from`` the new account starts with the allowed, excluded
+    and denied hosts of another account of the site, and with nothing else of it. Not its private
+    ranges, which are a permission of their own, and not what its login learned.
 
     Parameters
     ----------
@@ -513,9 +513,9 @@ def allow(site: str, host: str | None = None, *, network: PrivateNetwork = None)
     """Allow a host, and its subdomains, for a site.
 
     Any excluded entry that would block the host is removed. Allowing a host that is already
-    listed changes nothing. With ``--private-network`` and a range such as ``10.20.0.0/24``
-    instead of a host, the site's allowed hosts may also resolve to addresses in that range,
-    which they otherwise may not because it is private. Use the narrowest range that holds the
+    listed changes nothing. With ``--private-network`` and a range such as ``10.20.0.0/24`` instead
+    of a host, the site's allowed hosts may also resolve to addresses in that range. They otherwise
+    may not, because it is private. Use the narrowest range that holds the
     address. Only private ranges are accepted, none wider than /8 (IPv6: /48).
 
     Parameters
@@ -623,8 +623,8 @@ def mic(site: str, setting: Literal["on", "off"] | None = None, *, source: MicSo
     """Show, turn on or turn off the microphone for a site.
 
     With the microphone on, the site's browser sessions can record what the microphone hears, and
-    nothing else of the machine's audio: each session gets a private audio graph with the
-    microphone and a silent output in it. It applies to sessions that start afterwards; a running
+    nothing else of the machine's audio. Each session gets a private audio graph with the microphone
+    and a silent output in it. It applies to sessions that start afterwards; a running
     one keeps its setting until it is closed. The setting is off for every site until you turn it
     on, and an agent can only ask you to. Without a setting this prints the current one.
 
@@ -905,8 +905,8 @@ def login_command(
     """Open a login window for a site, wait for it to close, and say what it learned.
 
     TARGET is a site from `valetkey sites`, or a host or URL for a new site, as for the
-    `browser_login` tool. The window opens on your screen, on your laptop through a bridge, or in
-    a web browser (see `valetkey status`), and works the same as one an agent asks for: it is
+    `browser_login` tool. The window opens on your screen, on your laptop through a bridge, or in a
+    web browser (see `valetkey status`). It works the same as one an agent asks for: it is
     contained, the hosts it uses are recorded, and a running session of the site is closed first.
     When you close the window the login is saved, and this prints the site and the hosts it now
     allows, with what was left out. With `--no-wait` it returns once the window is open. Ctrl-C
@@ -950,10 +950,10 @@ def run_mcp(
 
     Point an MCP client at this command. It starts valetkeyd if that is not running yet.
 
-    With `--site`, the server acts only on the sites named, and the daemon refuses every other
-    site for it: `browser_sites` lists only those, every tool that names a site refuses the rest
-    with an error naming the allowed ones, and `browser_login` cannot make a site or account
-    outside the list. A bare site covers all its accounts, including ones added later;
+    With `--site`, the server acts only on the sites named, and the daemon refuses every other site
+    for it. `browser_sites` lists only those. Every tool that names a site refuses the rest with an
+    error naming the allowed ones, and `browser_login` cannot make a site or account outside the
+    list. A bare site covers all its accounts, including ones added later;
     `site:account` covers that one. The list is fixed for as long as the server runs. Without
     `--site` it acts on every site.
     """
@@ -1372,9 +1372,9 @@ def check_agent_browser(system: System) -> Check:
 def check_runtime_dir(system: System) -> Check:
     """Check that the daemon has a runtime directory for its sockets.
 
-    ``XDG_RUNTIME_DIR`` is the one. A client that starts programs with a reduced environment
-    leaves it out, and ``/run/user/UID`` stands in when it is the user's own private directory;
-    that works but is worth knowing, so it is a warning.
+    ``XDG_RUNTIME_DIR`` is the one. A client that starts programs with a reduced environment leaves
+    it out, and ``/run/user/UID`` stands in when it is the user's own private directory. That works
+    but is worth knowing, so it is a warning.
     """
     value = system.environ.get("XDG_RUNTIME_DIR", "")
     if value and Path(value).is_absolute():
@@ -1583,11 +1583,11 @@ def doctor(
     """Check that this machine can run valetkey.
 
     Each check prints one line: ok, FAIL, warn or info. Required checks are bubblewrap and
-    user namespaces, Chromium, agent-browser 0.39 or newer, and XDG_RUNTIME_DIR. A missing
-    Wayland display is a warning, because only logging in needs one, and so is a compositor
-    without security-context support, where the login window is not restricted, and an
-    agent-browser newer than 0.40.0, the version valetkey was tested with, and so is a CPU other
-    than x86_64, where the sandbox has no syscall filter. When a site has the microphone on, the
+    user namespaces, Chromium, agent-browser 0.39 or newer, and XDG_RUNTIME_DIR. A missing Wayland
+    display is a warning, because only logging in needs one. So is a compositor without
+    security-context support, where the login window is not restricted. So is an agent-browser newer
+    than 0.40.0, the version valetkey was tested with. So is a CPU other than x86_64, where the
+    sandbox has no syscall filter. When a site has the microphone on, the
     programs its audio needs must be installed (a failure if not) and the audio server's socket
     must exist (a warning if not). The state of the systemd units is shown for information. A
     `config.json` that others can write to is ignored and
@@ -1668,8 +1668,8 @@ def show_status(
 
     With --json the output is an object with three lists. "sessions" holds objects with the keys
     site, since, contained, host, microphone, source, idle_seconds and closes_at. "source" is the
-    source the microphone copies, or null for the default one. A session with the
-    microphone on also has "capture", where a recorder finds its capture stream: "socket" is the
+    source the microphone copies, or null for the default one. A session with the microphone on also
+    has "capture", where a recorder finds its capture stream. "socket" is the
     session's private PulseAudio socket, "directory" holds its PipeWire socket, and
     "node" is the number of the PipeWire node the browser records with, or null while nothing
     records. "logins" holds objects with the

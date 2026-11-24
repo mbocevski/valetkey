@@ -127,9 +127,9 @@ class Expect:
 class Target:
     """The element to click, as the caller described it.
 
-    ``name`` and ``role`` are the accessible name and role to match. ``ref`` is set when the
-    caller named a reference, and then it is only a shortcut: if it still has that role and
-    name it is used, and if not the role and name are searched for.
+    ``name`` and ``role`` are the accessible name and role to match. ``ref`` is set when the caller
+    named a reference, and then it is only a shortcut. If it still has that role and name it is
+    used, and if not the role and name are searched for.
     """
 
     name: str
@@ -303,9 +303,10 @@ def _holds_words(name: str, target: Target) -> bool:
 def resolve(refs: Mapping[str, sessions.Ref], target: Target) -> tuple[str, sessions.Ref]:
     """Pick the one element of a fresh snapshot that ``target`` means.
 
-    An exact name wins. When none has that name and the text came from the caller (``fold``),
-    the one element whose name holds the text as whole words is taken, as when a site builds names
-    from icon labels (``icon_user Orders icon_arrow``). Several such elements are not guessed at.
+    An exact name wins. When none has that name and the text came from the caller (``fold``), the
+    one element whose name holds the text as whole words is taken. An example is a site that builds
+    names from icon labels (``icon_user Orders icon_arrow``). Several such elements are not guessed
+    at.
 
     Raises:
         ClickError: ``target_not_found`` or ``target_ambiguous``, with the names that came
@@ -468,8 +469,8 @@ def verified_click(  # noqa: PLR0913 - one click, described by its parts
     """Click ``target`` on ``page`` once, or twice if the first click provably did nothing.
 
     The sequence is: make sure the target can be found, check that the expectation is not already
-    true (waiting up to :data:`PRESENCE_SECONDS`), resolve the target in a fresh snapshot, note
-    the URL and the page outline, and click. Without an expectation that is all.
+    true (waiting up to :data:`PRESENCE_SECONDS`), and resolve the target in a fresh snapshot. Then
+    note the URL and the page outline, and click. Without an expectation that is all.
 
     With one, the expectation gets :data:`GRACE_SECONDS`. If it is not met and the URL and
     outline are exactly as before, the click is judged to have done nothing: the target is
@@ -477,8 +478,8 @@ def verified_click(  # noqa: PLR0913 - one click, described by its parts
     and the expectation gets the rest of :data:`SETTLE_SECONDS` without another click.
 
     With ``hover``, the first of those texts that names one element is hovered first (see
-    :func:`hover_over`; ``exact`` is for those texts, as it is for the target's text in
-    :class:`Target`), and everything after is as above, on the page as the hover left it.
+    :func:`hover_over`). ``exact`` is for those texts, as it is for the target's text in
+    :class:`Target`. Everything after is as above, on the page as the hover left it.
 
     Raises:
         ClickError: when the target cannot be found, or matches more than one element, or when

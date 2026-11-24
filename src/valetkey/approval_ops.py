@@ -73,8 +73,8 @@ def _deny_answer(site: str, host: str, found: approvals.Eligibility) -> dict[str
 class Approvals:
     """The allow and deny operations, with the questions they put to the person.
 
-    ``approve_timeout`` is how long the person gets to answer, ``user_environment`` reads the
-    environment a question needs to reach the person's screen, and ``notifier`` (default
+    ``approve_timeout`` is how long the person gets to answer. ``user_environment`` reads the
+    environment a question needs to reach the person's screen. ``notifier`` (default
     :func:`valetkey.notify.ask`) puts a question in a desktop notification.
     """
 
@@ -183,9 +183,9 @@ class Approvals:
         and no notification can ask either, ``broken`` that the command could not be started. A
         command that exits with :data:`approvals.EXIT_COULD_NOT_ASK` could not ask, so the
         notification asks instead, and one that exits with :data:`approvals.EXIT_NOBODY_ANSWERED`
-        is a ``timeout``. With ``deny`` the question is whether to deny a host the site may
-        reach: the request then has ``"action": "deny"`` and ``seen_during_login`` says the host
-        was left out at login, and yes (exit status 0) denies it.
+        is a ``timeout``. With ``deny`` the question is whether to deny a host the site may reach.
+        The request then has ``"action": "deny"``, and ``seen_during_login`` says the host was left
+        out at login. Yes (exit status 0) denies it.
         """
         command = await self._approve_command()
         env = await asyncio.to_thread(

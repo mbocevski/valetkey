@@ -150,12 +150,12 @@ def daemon_environment(
 
     Some desktop clients start a server with only ``HOME``, ``PATH`` and a few more. A daemon
     that inherits that cannot find its runtime directory, the display for a login window or the
-    session bus. So ``XDG_RUNTIME_DIR`` is set to ``/run/user/UID`` when it is missing and that
-    directory is the user's own and private (see :func:`valetkey.sites.fallback_runtime_dir`),
-    each of :data:`DESKTOP_VARIABLES` that is missing is read from the systemd user manager, and
-    ``~/.local/bin`` and the manager's ``PATH`` entries are added to the end of ``PATH``, where
-    agent-browser is often installed. Nothing already set is replaced, the manager is asked only
-    when something is missing, and a manager that cannot be reached changes nothing.
+    session bus. So ``XDG_RUNTIME_DIR`` is set to ``/run/user/UID`` (see
+    :func:`valetkey.sites.fallback_runtime_dir`) when it is missing and that directory is the user's
+    own and private. Each of :data:`DESKTOP_VARIABLES` that is missing is read from the systemd user
+    manager. ``~/.local/bin`` and the manager's ``PATH`` entries are added to the end of ``PATH``,
+    where agent-browser is often installed. Nothing already set is replaced, the manager is asked
+    only when something is missing, and a manager that cannot be reached changes nothing.
     """
     env = dict(os.environ if environ is None else environ)
     runtime = env.get("XDG_RUNTIME_DIR")
@@ -278,8 +278,8 @@ def waypipe_wrapper(
 
     waypipe makes a Wayland display at ``display`` and runs its program with that display, and
     everything drawn on it is sent through the bridge's socket to the laptop's ``waypipe client``.
-    The options come before ``server``, because what follows it is the program, and there is no
-    ``--unlink-socket``: the socket belongs to the bridge, and removing it would leave sshd
+    The options come before ``server``, because what follows it is the program. There is no
+    ``--unlink-socket``, because the socket belongs to the bridge, and removing it would leave sshd
     listening on a name nobody can reach. ``setpriv`` has the kernel end waypipe, and with it the
     sandbox, if valetkeyd dies. The window is not given a security context here: there is no
     compositor on this machine to ask, and the laptop's ``waypipe client`` already runs under
@@ -315,8 +315,8 @@ def chromium_command(
     window is a normal one with an address bar and its own profile, on Wayland. There is no
     ``--headless``, no ``--app``, no kiosk mode and no remote debugging port.
 
-    ``--password-store=basic`` makes the window encrypt the cookies it saves with the key that
-    the browser of a session uses (agent-browser passes the same flag), not with one from a
+    ``--password-store=basic`` makes the window encrypt the cookies it saves with the key that the
+    browser of a session uses (agent-browser passes the same flag). It does not use one from a
     keyring that this window might find and a session would not.
     """
     return [
@@ -332,10 +332,10 @@ def chromium_command(
 def holder_command(browser: list[str], bridge: list[str], profile_dir: Path) -> list[str]:
     """Return the command that runs first inside the sandbox.
 
-    It is a shell script: clear Chromium's stale profile locks (the process numbers of an
-    earlier run mean nothing in a new namespace), start the forwarder in the background, wait
-    until it listens, then replace the shell with the browser. The browser is then the first
-    process of the namespace, so when it exits the namespace ends and takes the forwarder along.
+    It is a shell script: clear Chromium's stale profile locks (the process numbers of an earlier
+    run mean nothing in a new namespace) and start the forwarder in the background. Then wait until
+    it listens and replace the shell with the browser. The browser is then the first process of the
+    namespace, so when it exits the namespace ends and takes the forwarder along.
     """
     wait = [sys.executable, "-I", "-c", _WAIT_FOR_BRIDGE]
     script = "\n".join(
@@ -379,9 +379,9 @@ class LoginResult:
     :meth:`LoginHandle.cancel` ended the login rather than the person closing the window.
     ``private_refused`` are the hosts the proxy refused because of the private address they
     resolve to, each once: the person may want to list a range for them. ``refused`` is every
-    refusal, as ``(host, port, reason)`` and each once in the order first made: the private
-    addresses and the ports other than 443 (80 for plain HTTP), the two things a login window
-    refuses. A page that stalls on one of them leaves no other trace.
+    refusal, as ``(host, port, reason)`` and each once in the order first made. The refusals are the
+    private addresses and the ports other than 443 (80 for plain HTTP), the two things a login
+    window refuses. A page that stalls on one of them leaves no other trace.
     """
 
     seen_hosts: list[SeenHost]
@@ -545,9 +545,9 @@ async def start_login(  # noqa: PLR0913 - the injection points are the tests' wa
     and into nothing else that is private. ``restrict`` makes the window's restricted display
     (default: :func:`restrict_display`); when it returns ``None`` the window gets
     ``wayland_socket``. With ``bridge``, the socket of a connected bridge (see
-    :mod:`valetkey.bridge`), the window opens on the laptop at its other end: the sandbox runs
-    under ``waypipe server`` (``waypipe`` names the program), the display it binds in is
-    waypipe's, and ``wayland_socket`` and ``restrict`` are not used.
+    :mod:`valetkey.bridge`), the window opens on the laptop at its other end. The sandbox runs under
+    ``waypipe server`` (``waypipe`` names the program), the display it binds in is waypipe's, and
+    ``wayland_socket`` and ``restrict`` are not used.
 
     The proxy runs in record mode, which lets every host through, so its policy only has to be
     valid: it allows the start host and lists the ranges. The hosts the browser used are in the

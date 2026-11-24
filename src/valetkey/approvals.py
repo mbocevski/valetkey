@@ -118,9 +118,9 @@ def manual_deny_command(site: str, host: str) -> str:
 def validate_host(value: object) -> str:
     """Return ``value`` as a host name that may be asked about, or raise ``ValueError``.
 
-    Only a plain host name qualifies: no scheme, path, port, credentials or fragment (so nothing
-    can hide a different host in the text), no wildcard, no IP address, no single label like
-    ``com`` and no registrable suffix like ``co.uk``. Upper case and a trailing dot are
+    Only a plain host name qualifies. It has no scheme, path, port, credentials or fragment (so
+    nothing can hide a different host in the text). It has no wildcard, no IP address, no single
+    label like ``com`` and no registrable suffix like ``co.uk``. Upper case and a trailing dot are
     normalized away.
     """
     if not isinstance(value, str) or not value:
@@ -147,10 +147,10 @@ def validate_host(value: object) -> str:
 def sanitize_reason(text: object) -> str:
     """Return the agent's ``text`` as a short, plain, single line that is safe to show.
 
-    The text comes from the agent, which a web page may be steering, so it is shown as a claim
-    and made inert: only printable ASCII is kept, line breaks and other control characters
-    become spaces, anything a chat or form interface could turn into a link, emphasis, code or a
-    heading is replaced by a space, and it is cut to :data:`REASON_LENGTH` characters.
+    The text comes from the agent, which a web page may be steering, so it is shown as a claim and
+    made inert. Only printable ASCII is kept. Line breaks and other control characters become
+    spaces. Anything a chat or form interface could turn into a link, emphasis, code or a heading is
+    replaced by a space. The text is cut to :data:`REASON_LENGTH` characters.
     """
     raw = text if isinstance(text, str) else ""
     ascii_only = "".join(c if c.isascii() and c.isprintable() else " " for c in raw)
@@ -258,10 +258,10 @@ def eligibility(
     ``refused`` are the hosts the site's proxy refused because the policy did not allow them. A
     host qualifies when it is one of them, or when it is itself an entry of ``excluded`` (seen
     during the login and left out) or of ``denied``. Anything else is ``not_eligible``, and nobody
-    is asked. A host the policy already allows is ``already_allowed``, unless it was refused
-    because of the
-    address it resolves to (``address_refused``): that is not the agent's to ask about, only the
-    person can list a private range, so it is ``not_eligible`` and the message says how.
+    is asked. A host the policy already allows is ``already_allowed``, unless it was refused because
+    of the address it resolves to (``address_refused``). That is not the agent's to ask about,
+    because only the person can list a private range. It is ``not_eligible`` and the message says
+    how.
     """
     seen = host in policy.excluded or host in policy.denied
     if sites.allows(policy, host):
@@ -281,8 +281,8 @@ def deny_eligibility(policy: sites.Policy, host: str) -> Eligibility:
     """Decide whether ``host`` may be asked about for denying, for ``policy``'s site.
 
     A host qualifies when the policy allows it now (``eligible``), or when it is an entry of
-    ``excluded``, left out at login (``eligible`` too, with ``seen_during_login`` true: the
-    person's deny keeps it out for good, which an exclusion does not). A host a ``denied`` entry
+    ``excluded``, left out at login (``eligible`` too, with ``seen_during_login`` true). The
+    person's deny keeps it out for good, which an exclusion does not. A host a ``denied`` entry
     already blocks is ``already_denied``. Anything else is ``not_eligible``, because there is
     nothing to deny. A host under a wider allowed entry (``cdn.example.com`` with ``example.com``
     allowed) is allowed, so it qualifies, and the denial applies to it and its subdomains alone.
@@ -315,11 +315,11 @@ class Config:
 
     ``approve_command`` is an argument list, or ``None``. ``notifications`` is on unless the file
     says ``false``: whether a desktop notification with Allow and Deny buttons may ask when
-    nothing else can (see :mod:`valetkey.notify`). The switches under ``remote_logins``
-    are ``waypipe`` and the one for noVNC, both off unless the file says ``true``: whether a login
-    with no screen on this machine may open on a laptop through a connected bridge, or be shown
-    in a web browser. ``session_idle_minutes`` is how long a browser session may go unused before
-    the daemon closes it, from :data:`MIN_IDLE_MINUTES` to :data:`MAX_IDLE_MINUTES`.
+    nothing else can (see :mod:`valetkey.notify`). The switches under ``remote_logins`` are
+    ``waypipe`` and the one for noVNC, both off unless the file says ``true``. They control whether
+    a login with no screen on this machine may open on a laptop through a connected bridge, or be
+    shown in a web browser. ``session_idle_minutes`` is how long a browser session may go unused
+    before the daemon closes it, from :data:`MIN_IDLE_MINUTES` to :data:`MAX_IDLE_MINUTES`.
     """
 
     approve_command: tuple[str, ...] | None = None
@@ -351,11 +351,10 @@ def load_config(roots: Roots) -> Config:
 
     Raises:
         ConfigError: when the file belongs to another user, can be written by its group or by
-            others, is not a regular file, is not a JSON object with only known keys, when
-            ``approve_command`` is not a non-empty list of non-empty strings, or when
-            ``notifications`` is not a boolean, ``session_idle_minutes`` is not a whole number
-            from 1 to 1440, or ``remote_logins`` is not an object holding
-            only the boolean switches.
+            others, or is not a regular file. Also when it is not a JSON object with only known
+            keys. Also when ``approve_command`` is not a non-empty list of non-empty strings. Also
+            when ``notifications`` is not a boolean, ``session_idle_minutes`` is not a whole number
+            from 1 to 1440, or ``remote_logins`` is not an object holding only the boolean switches.
 
     """
     path = roots.config / "valetkey" / CONFIG_NAME
@@ -471,10 +470,10 @@ async def run_command(
     """Run the approval command with ``request`` as JSON on stdin and return its answer.
 
     No shell is involved: ``argv`` is run as given, in a process group of its own, with its
-    output thrown away. ``yes`` is exit status 0, ``timeout`` is status
-    :data:`EXIT_NOBODY_ANSWERED` or not having exited within ``limit`` seconds (the whole process
-    group is then killed), ``unavailable`` is status :data:`EXIT_COULD_NOT_ASK`, and ``no`` is any
-    other status, 1 included, or a death by signal.
+    output thrown away. ``yes`` is exit status 0. ``timeout`` is status :data:`EXIT_NOBODY_ANSWERED`
+    or not having exited within ``limit`` seconds (the whole process group is then killed).
+    ``unavailable`` is status :data:`EXIT_COULD_NOT_ASK`. ``no`` is any other status, 1 included, or
+    a death by signal.
 
     Raises:
         `OSError`: when the program cannot be started.

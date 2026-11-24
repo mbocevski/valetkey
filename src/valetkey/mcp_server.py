@@ -579,8 +579,8 @@ def click_text(result: dict[str, Any]) -> str:
 def _split_output(error: DaemonError) -> tuple[str, str]:
     """Split an error's message into valetkey's own words and text that came from outside.
 
-    The browser driver's error messages and the tails of a browser's or the daemon's log can
-    carry text a web page chose, so they are never printed as the tool's own words.
+    The browser driver's error messages and the tails of a browser's or the daemon's log can carry
+    text a web page chose. So they are never printed as the tool's own words.
     """
     message = error.message
     if error.code == "browser_error":
@@ -773,8 +773,8 @@ class Bridge:
                     # should not be as blind as that.
                     env=login.daemon_environment(),
                 )
-            # The daemon is meant to outlive this bridge, but a bridge that gives up on a slow
-            # start (or is dropped) must not leave a child nobody waits for, which Python reports
+            # The daemon is meant to outlive this bridge, but a bridge that gives up on a slow start
+            # (or is dropped) must not leave a child nobody waits for. Python reports such a child
             # as a running subprocess it lost. A thread holds the child until it ends.
             threading.Thread(target=self.started.wait, daemon=True).start()
         except OSError as error:
@@ -1158,11 +1158,10 @@ def _remote_login_text(site: str, *, shown: bool) -> str:
 async def show_link(ctx: Context, result: dict[str, Any], remote: dict[str, Any]) -> bool:
     """Show the person the link of a login in a browser, through the client; ``True`` if it did.
 
-    The link is a credential that gives control of a window where a password is typed, so it
-    goes to the person through URL-mode elicitation, which does not pass through the model, and
-    never into a tool result. This is the request in the middle of a call that protocols before
-    2026-07-28 have; later ones use :func:`link_request`. ``False`` means the client cannot show
-    it, or failed to.
+    The link is a credential that gives control of a window where a password is typed. So it goes to
+    the person through URL-mode elicitation, which does not pass through the model, and never into a
+    tool result. This is the request in the middle of a call that protocols before 2026-07-28 have;
+    later ones use :func:`link_request`. ``False`` means the client cannot show it, or failed to.
     """
     if not can_elicit_url(ctx) or uses_input_required(ctx):
         return False
@@ -1475,10 +1474,10 @@ class _Tools:
     def _allow_tool(self) -> Callable[..., Awaitable[str]]:
         """Build the ``browser_allow`` function and the resolvers it uses.
 
-        The question to the person is a resolver (see the SDK's ``resolve`` module), not a
-        call of ``ctx.elicit``: from protocol 2026-07-28 on a server cannot ask in the middle of
-        a call, and the SDK turns the question of a resolver into the form the negotiated protocol
-        has, a request in the middle of the call before it and a result that asks for input
+        The question to the person is a resolver (see the SDK's ``resolve`` module). It is not a
+        call of ``ctx.elicit``: from protocol 2026-07-28 on a server cannot ask in the middle of a
+        call. The SDK turns the question of a resolver into the form the negotiated protocol has.
+        That is a request in the middle of the call before it, and a result that asks for input
         after it. The resolvers run again on every round, so they only read.
         """
 

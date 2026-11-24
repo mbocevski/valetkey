@@ -192,9 +192,9 @@ def write_chrome_policy(directory: Path, audio_capture_urls: Sequence[str] = ())
     """Write :data:`CHROME_POLICY` under ``directory`` as ``managed/valetkey.json`` and return it.
 
     Pass the directory as ``Sandbox.policy_dir``. ``audio_capture_urls`` are the origins that may
-    record the microphone without a prompt (``AudioCaptureAllowedUrls``); with none, the policy
-    says nothing about audio capture, and a page that asks is refused, as there is no prompt to
-    answer in a browser nobody sees. Only a session with the microphone on passes them.
+    record the microphone without a prompt (``AudioCaptureAllowedUrls``). With none, the policy says
+    nothing about audio capture, and a page that asks is refused, as there is no prompt to answer in
+    a browser nobody sees. Only a session with the microphone on passes them.
     """
     managed = directory / "managed"
     managed.mkdir(parents=True, exist_ok=True)
@@ -222,10 +222,10 @@ def chrome_flags(major: int, *, hide_automation: bool = True) -> list[str]:
         "--proxy-bypass-list=<-loopback>",
         "--disable-background-networking",
         "--disable-component-update",
-        # With component updates off by policy, Chromium still sends an on-demand update check
-        # for its one registered component (the on-device models manifest) at every start, to
-        # update.googleapis.com, where the proxy had to refuse it. This points the updater at a
-        # file that does not exist, so the check fails inside the browser and no request is made.
+        # With component updates off by policy, Chromium still sends an on-demand update check for
+        # its one registered component (the on-device models manifest) at every start. It is sent to
+        # update.googleapis.com, where the proxy had to refuse it. This points the updater at a file
+        # that does not exist, so the check fails inside the browser and no request is made.
         "--component-updater=url-source=file:///nonexistent",
         "--enable-features=NavigationPredictorPreconnectHoldback",
         "--disable-sync",
@@ -442,9 +442,9 @@ def bwrap_argv(  # noqa: PLR0913  # keywords tests use to build the same line an
     the caller keeps it open and passes it to the child.
 
     The sandbox is a PID namespace: when the first command exits, bubblewrap kills everything
-    else inside. So a session starts one long-lived command (a shell that runs the forwarder,
-    then the browser driver) and the processes it starts, such as the driver's daemon, live
-    exactly as long as it does. ``die_with_parent`` extends that to the starting process:
+    else inside. So a session starts one long-lived command (a shell that runs the forwarder, then
+    the browser driver). The processes it starts, such as the driver's daemon, live exactly as long
+    as it does. ``die_with_parent`` extends that to the starting process:
     if valetkey dies, the browser goes with it instead of lingering logged in. The kernel
     ties this to the thread that called ``Popen``, so start the sandbox from a thread that
     lives as long as the session.
@@ -517,10 +517,10 @@ def isolated_call_argv(  # noqa: PLR0913  # each is a distinct thing the caller 
 
     The call is made from outside the sandbox and talks to the driver's daemon inside it through
     a Unix socket in ``driver_dir``, which crosses network namespaces. Should the daemon be
-    gone, the driver starts one of its own, and a browser. Run like this, those have no
-    network (only a loopback that is down), cannot see the profile, the downloads or the
-    person's files, and are killed when the call ends: the PID namespace goes with its first
-    process, and ``--die-with-parent`` covers valetkey itself.
+    gone, the driver starts one of its own, and a browser. Run like this, those have no network
+    (only a loopback that is down), cannot see the profile, the downloads or the person's files, and
+    are killed when the call ends. The PID namespace goes with its first process, and
+    ``--die-with-parent`` covers valetkey itself.
 
     ``seccomp_fd`` holds the syscall filter, as for :func:`bwrap_argv`.
 

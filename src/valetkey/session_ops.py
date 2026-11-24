@@ -281,9 +281,9 @@ def make_private_dirs(path: Path) -> None:
 class Sessions:
     """The session operations of the daemon, and the upkeep of the sessions they start.
 
-    ``session_factory`` starts a session for a site, ``proxy_options`` are extra keyword
-    arguments for each session's :class:`valetkey.proxy.Proxy`, ``startup_grace`` is
-    :data:`STARTUP_GRACE`, ``announcer`` tells the person that a session started, and
+    ``session_factory`` starts a session for a site, ``proxy_options`` are extra keyword arguments
+    for each session's :class:`valetkey.proxy.Proxy`, and ``startup_grace`` is
+    :data:`STARTUP_GRACE`. ``announcer`` tells the person that a session started, and
     ``poll_interval`` is how often each session's browser is checked. ``idle_limit`` is how many
     seconds a session may go unused, instead of the config file's ``session_idle_minutes``, and
     ``idle_clock`` tells the time for it.
@@ -496,10 +496,10 @@ class Sessions:
             await window.cancel()
         if watcher is not None:
             await asyncio.gather(watcher, return_exceptions=True)
-        # Once the state is cleared the session and proxy are only in the hands of this call, so
-        # a cancellation (the daemon shutting down while a dead session is being ended, or a
-        # client that went away) must not stop it half way and leave the proxy's socket open.
-        # The shield lets it finish; a later ``_end`` waits for it on ``op_lock``.
+        # Once the state is cleared the session and proxy are only in the hands of this call. So a
+        # cancellation (the daemon shutting down while a dead session is being ended, or a client
+        # that went away) must not stop it half way and leave the proxy's socket open. The shield
+        # lets it finish; a later ``_end`` waits for it on ``op_lock``.
         await asyncio.shield(self._release(state, reason))
 
     async def _release(self, state: Site, reason: str | None) -> None:
@@ -624,10 +624,10 @@ class Sessions:
         """Make sure the step about to be taken can be followed, as far as it can be.
 
         What a step changed is told from a baseline of the page (see :mod:`valetkey.deltas`). A
-        snapshot of one part of the page leaves the baseline alone, and an agent may take none
-        at all, so when this client has no view of the page the browser is on, the whole tree is
-        taken now and kept, and not returned. The tree is the kind of the client's last snapshot,
-        or the whole one. A failure here is logged and leaves the step as it was, with no change.
+        snapshot of one part of the page leaves the baseline alone, and an agent may take none at
+        all. So when this client has no view of the page the browser is on, the whole tree is taken
+        now and kept, and not returned. The tree is the kind of the client's last snapshot, or the
+        whole one. A failure here is logged and leaves the step as it was, with no change.
         """
         view = connection.views.get(state.name)
         try:

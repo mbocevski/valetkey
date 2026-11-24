@@ -157,9 +157,9 @@ def _ftyp_type(head: bytes) -> str:
     """Tell what an ISO base media file is from its ``ftyp`` box: a picture or a video.
 
     AVIF and HEIC pictures use the same container as MP4 video. The major brand says which
-    (``avif``, ``avis``, ``heic``, ``heix``); the generic picture brands ``mif1`` and ``msf1`` are
-    major brands of both, so the compatible brands decide between AVIF and HEIC there, and HEIC is
-    the answer when they say nothing more. Any other brand is video, as before.
+    (``avif``, ``avis``, ``heic``, ``heix``). The generic picture brands ``mif1`` and ``msf1`` are
+    major brands of both, so the compatible brands decide between AVIF and HEIC there. HEIC is the
+    answer when they say nothing more. Any other brand is video, as before.
     """
     major = head[8:12]
     if major in _AVIF_BRANDS:
@@ -393,7 +393,7 @@ def put(directory: Path, name: str, data: bytes) -> Path:
     """Write ``data`` into ``directory`` as ``name``, or the first numbered name that is free.
 
     The bytes go to a private file beside ``directory`` (in its parent, which the browser cannot
-    write) and are hard-linked into place, as in :func:`move_in`, so a name is only taken when it
+    write) and are hard-linked into place, as in :func:`move_in`. So a name is only taken when it
     was free, an earlier file is never replaced and nothing is followed.
     """
     claim = directory.parent / f"{CLAIM_PREFIX}{uuid.uuid4().hex}"
@@ -409,9 +409,9 @@ def put(directory: Path, name: str, data: bytes) -> Path:
 def move_in(source: Path, directory: Path) -> Path | None:
     """Move the finished download ``source`` into ``directory`` under a free name.
 
-    Returns the new path, or ``None`` when the file was refused: it is not a regular file (a
-    symlink planted in the incoming folder is removed, never followed), it vanished, or it could
-    not be linked. An existing file is never replaced.
+    Returns the new path, or ``None`` when the file was refused. It is refused when it is not a
+    regular file (a symlink planted in the incoming folder is removed, never followed), when it
+    vanished, or when it could not be linked. An existing file is never replaced.
     """
     claim = source.with_name(f"{CLAIM_PREFIX}{uuid.uuid4().hex}")
     try:

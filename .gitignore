@@ -15,3 +15,6 @@ packaging/arch/*.pkg.tar.*
 # The pinned noVNC release, fetched by tools/fetch_novnc.py
 src/valetkey/novnc/
 src/valetkey/novnc.new/
+
+# The tree-sitter grammar vale sync downloads
+.vale/styles/config/grammars/

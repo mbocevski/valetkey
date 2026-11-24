@@ -38,9 +38,9 @@ def unusable_reason(*programs: str) -> str | None:
 def processes_with(*needles: str) -> list[int]:
     """Return the ids of the processes whose command line holds every one of ``needles``.
 
-    Other people's tests run on the same machine, so the needles must be something only the
-    caller's own processes carry: a path in the test's own temporary directory, or a number the
-    test drew at random. Never a bare program name. The caller's own process is left out.
+    Other people's tests run on the same machine, so the needles must be something only the caller's
+    own processes carry. A path in the test's own temporary directory, or a number the test drew at
+    random. Never a bare program name. The caller's own process is left out.
     """
     found = []
     for entry in Path("/proc").iterdir():

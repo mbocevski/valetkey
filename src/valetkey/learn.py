@@ -130,8 +130,8 @@ _NAVIGATION = (
 )
 
 # A sign-in page is a page the person could use (it ended its chain, ``CHAIN_END``, 0x20000000 =
-# 536870912) and stayed on for at least ``LOGIN_PAGE_MS`` (100000 microseconds), and that was left
-# by a visit that came from it and was not a link: a form submission (core type 7) or a typed
+# 536870912) and stayed on for at least ``LOGIN_PAGE_MS`` (100000 microseconds). It was left by a
+# visit that came from it and was not a link. That is a form submission (core type 7) or a typed
 # visit that has a ``from_visit`` (a form posted to a redirect; a typed address has none).
 _FORM_ORIGINS = (
     "SELECT p.url FROM visits AS v JOIN visits AS f ON f.id = v.from_visit "
@@ -385,10 +385,10 @@ def navigation(history_path: Path, *, since: datetime) -> Navigation:
 def first_submit(history_path: Path, *, since: datetime) -> int | None:
     """Return when the first form was submitted since ``since``, in Chromium's time, or ``None``.
 
-    It is the same leaving of a page by a form that :func:`login_pages` looks for: the time of
-    the first visit that came from a page the person used and was reached by a form. Cookies a
-    site set before that were set to a visitor, not to a person who had signed in. A missing
-    history, or none that shows a form, gives ``None``.
+    It is the same leaving of a page by a form that :func:`login_pages` looks for. It is the time of
+    the first visit that came from a page the person used and was reached by a form. Cookies a site
+    set before that were set to a visitor, not to a person who had signed in. A missing history, or
+    none that shows a form, gives ``None``.
 
     Raises:
         HistoryError: when the file is not a history database, or cannot be trusted or read.
@@ -405,12 +405,11 @@ def login_pages(history_path: Path, start_url: str, *, since: datetime) -> tuple
     """Return the sign-in pages of a login, as ``host/path`` keys.
 
     A sign-in page is a page the person could use and stayed on, that they then left by
-    submitting a form and not by a link. Chromium records that leaving as a form submission
-    (core type 7), or, when the form was posted to a redirect, as a typed visit that has a
-    ``from_visit``: a typed address has none (see the module docstring). Only a page that ended
-    its redirect chain counts, so the hops of a redirect and the callback a provider sends the
-    browser through do not, and it must have been open for :data:`LOGIN_PAGE_MS`, which leaves
-    out a page that submits itself.
+    submitting a form and not by a link. Chromium records that leaving as a form submission (core
+    type 7), or, when the form was posted to a redirect, as a typed visit that has a ``from_visit``.
+    A typed address has none (see the module docstring). Only a page that ended its redirect chain
+    counts, so the hops of a redirect and the callback a provider sends the browser through do not.
+    It must have been open for :data:`LOGIN_PAGE_MS`, which leaves out a page that submits itself.
 
     Two pages are left out. The start page, because a start URL that is not redirected ends on
     itself and must not look like a login page. And the page the login ended on (the last
@@ -440,8 +439,8 @@ MIN_OWNER_LABEL = 3
 def same_owner(host: str, domain: str, suffixes: sites.SuffixList | None = None) -> bool:
     """Tell whether ``host`` belongs to whoever owns the registrable ``domain``.
 
-    That is so when the registrable domain of ``host`` is ``domain``, or when it has the same
-    name label under another suffix (``sitex.com`` and ``sitex.eu`` for ``sitex.se``), and the
+    That is so when the registrable domain of ``host`` is ``domain``. It is also so when it has the
+    same name label under another suffix (``sitex.com`` and ``sitex.eu`` for ``sitex.se``), and the
     label is at least :data:`MIN_OWNER_LABEL` characters. This is a judgement on the name alone:
     nothing here proves who registered the other domain. An IP address is never the same owner.
     """
@@ -469,7 +468,7 @@ def classify(
     (``seen_hosts``), and one the browser navigated to, whether it showed a page (``shown_hosts``)
     or only redirected (``passed_hosts``). The exceptions are the hosts that look like ads or
     tracking (see :mod:`valetkey.trackers`), which are excluded as themselves and counted in
-    ``tracking``, and anything under the site's own domain, which is never excluded. The hosts of
+    ``tracking``. Anything under the site's own domain is never excluded. The hosts of
     ``trackers.CONDITIONAL`` (Facebook's) count as tracking too, unless the login window navigated
     to one of them, so that signing in with Facebook still works. The hosts that
     have the site's owner by name (see :func:`same_owner`) are named in ``owned``, for the
@@ -524,10 +523,10 @@ def merge(  # noqa: PLR0913  # the last two are keyword-only extras with default
     """Fold ``classification`` into ``existing``, keeping everything already approved.
 
     ``allow`` is the union of the old and new lists, except that a host an entry of the old
-    ``denied`` list blocks is not added: what the person denied stays denied, and ``denied`` is
-    kept as it is. ``excluded`` is built again from this login, minus every entry that would block
-    an ``allow`` entry (see :func:`valetkey.sites.excluded_conflicts`); the old one is dropped,
-    so a host left out before can be allowed now. ``start`` becomes ``start_url`` and ``learned``
+    ``denied`` list blocks is not added. What the person denied stays denied, and ``denied`` is kept
+    as it is. ``excluded`` is built again from this login, minus every entry that would block an
+    ``allow`` entry (see :func:`valetkey.sites.excluded_conflicts`), and the old one is dropped. So
+    a host left out before can be allowed now. ``start`` becomes ``start_url`` and ``learned``
     becomes ``now`` in UTC, rounded down to whole seconds (``now`` must carry a time zone). The
     site name is ``existing``'s, else ``site``, else one derived from ``start_url``. ``pages`` are
     the login pages this login recorded (see :func:`login_pages`); they replace the old ones, and

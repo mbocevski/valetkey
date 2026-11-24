@@ -995,8 +995,8 @@ def test_summary_quotes_a_host_that_is_not_a_host_name_and_stops_at_twenty() -> 
 
 # -- logins measured in a real browser ---------------------------------------------------------
 #
-# Each flow is what Chromium 156 wrote to ``History`` for a login in a real window, on fixture
-# sites that answered every host from one local server: ``(visit id, from visit, transition,
+# Each flow is what Chromium 156 wrote to ``History`` for a login in a real window, on fixture sites
+# that answered every host from one local server. Each row is ``(visit id, from visit, transition,
 # milliseconds the page was open, url)``. The person pressed Enter on the form of the flow. The
 # transition numbers are as Chromium wrote them: a core type in the low byte, and CHAIN_START
 # 0x10000000, CHAIN_END 0x20000000, CLIENT_REDIRECT 0x40000000 and SERVER_REDIRECT 0x80000000.

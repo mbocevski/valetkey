@@ -115,13 +115,13 @@ def follow(
 ) -> dict[str, Any]:
     """Apply ``answer`` to ``view`` and ``refs``, and say what it means for the client.
 
-    The result has a ``kind``: ``unchanged``; ``delta`` with the ``removed`` and ``added`` lines
-    that really changed, when they come to ``limit`` characters or fewer; when they come to more,
-    a ``delta`` with the ``added`` lines that carry a reference, as many as fit, and ``more``, the
-    number of changed lines not shown, or ``large`` when none of them carries one;
-    ``full`` when agent-browser sent the whole tree again because the address changed; and
-    ``changed`` when the delta does not apply to what the client saw. ``refs`` is only
-    changed by a delta that applies, and the view is moved on in every case.
+    The result has a ``kind``. It is ``unchanged``, or ``delta`` with the ``removed`` and ``added``
+    lines that really changed, when they come to ``limit`` characters or fewer. When they come to
+    more, it is a ``delta`` with the ``added`` lines that carry a reference, as many as fit, and
+    ``more``, the number of changed lines not shown. It has ``large`` instead of ``more`` when none
+    of them carries one. It is ``full`` when agent-browser sent the whole tree again because the
+    address changed, and ``changed`` when the delta does not apply to what the client saw. ``refs``
+    is only changed by a delta that applies, and the view is moved on in every case.
     """
     previous, view.revision = view.revision, answer.revision
     if answer.kind == "unchanged":
@@ -152,7 +152,7 @@ def _follow_whole(
 
     agent-browser sends the whole tree when the address changed, and also when a change is large
     next to the page, as a menu with hundreds of entries is. At the same address (the part after a
-    ``#`` ignored) it is the same page: what changed is what differs between the tree the client
+    ``#`` ignored) it is the same page. What changed is what differs between the tree the client
     read and this one, told as a delta would, and the references of the new tree are added to the
     table. At another address, or with no tree to compare, it is a new page.
     """

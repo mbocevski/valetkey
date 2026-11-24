@@ -305,20 +305,20 @@ def peer_uid(connection: socket.socket) -> int:
 class Daemon:
     """The daemon's state and operations. :func:`run` serves one over a socket.
 
-    The keyword arguments replace the parts that need a real browser or a real display, for
-    tests: ``session_factory`` starts a session for a site,
-    ``login_starter`` is :func:`valetkey.login.start_login`, ``proxy_options`` are extra
-    keyword arguments for each session's :class:`valetkey.proxy.Proxy`, ``startup_grace`` is
-    :data:`STARTUP_GRACE`, and ``peer_uid`` reads a connection's user id. ``download_settle`` is
-    how long to look for a download that a click has only just started, and ``download_wait`` is
-    the longest to wait for downloads that are running. ``announcer`` (default
-    :func:`announce_session`) tells the person that a session started, and ``poll_interval`` is
-    how often each session's browser is checked. ``display_starter`` makes the private display of
-    a login shown in a web browser (:func:`valetkey.display.start_display`). ``idle_limit`` is
-    how many seconds a session may go unused, instead of the config file's
-    ``session_idle_minutes``, and ``idle_clock`` tells the time for it. ``screen_finder`` looks
-    for the person's screen (:func:`valetkey.login.find_wayland_socket`), to know whether a login
-    window could open before a running session is closed for it.
+    The keyword arguments replace the parts that need a real browser or a real display, for tests.
+    ``session_factory`` starts a session for a site. ``login_starter`` is
+    :func:`valetkey.login.start_login`, ``proxy_options`` are extra keyword arguments for each
+    session's :class:`valetkey.proxy.Proxy`, and ``startup_grace`` is :data:`STARTUP_GRACE`.
+    ``peer_uid`` reads a connection's user id. ``download_settle`` is how long to look for a
+    download that a click has only just started, and ``download_wait`` is the longest to wait for
+    downloads that are running. ``announcer`` (default :func:`announce_session`) tells the person
+    that a session started, and ``poll_interval`` is how often each session's browser is checked.
+    ``display_starter`` makes the private display of a login shown in a web browser
+    (:func:`valetkey.display.start_display`). ``idle_limit`` is how many seconds a session may go
+    unused, instead of the config file's ``session_idle_minutes``. ``idle_clock`` tells the time for
+    it. ``screen_finder`` looks for the person's screen
+    (:func:`valetkey.login.find_wayland_socket`), to know whether a login window could open before a
+    running session is closed for it.
     """
 
     def __init__(  # noqa: PLR0913 - each is a seam the tests replace
@@ -796,8 +796,8 @@ class Daemon:
 
     # -- operations: asking the person to widen a site's key --
     #
-    # These are the only operations that add a host to a policy (a finished login, run by the
-    # person at a window, is the other way). See the module `approvals` for the trust boundary.
+    # These are the only operations that add a host to a policy. A finished login, run by the person
+    # at a window, is the other way. See the module `approvals` for the trust boundary.
 
     # -- operations: bridges --
 

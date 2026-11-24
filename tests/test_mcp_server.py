@@ -1992,8 +1992,8 @@ def test_two_clients_starting_at_once_end_up_on_one_daemon(
     xdg: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Neither client may start its daemon before both have found that none is listening, or the
-    # second would find the first's and start nothing, and the race this test is about would
-    # depend on how fast a daemon starts.
+    # second would find the first's and start nothing. The race this test is about would then depend
+    # on how fast a daemon starts.
     both_probed = threading.Barrier(2, timeout=30)
     spawn = Bridge._spawn  # noqa: SLF001
 

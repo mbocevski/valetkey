@@ -26,9 +26,9 @@ _MAX_SHOWN = 60
 class Scope:
     """A list of sites, each a whole site (every account) or one account of a site.
 
-    ``entries`` holds ``(site, account)``. An account of ``None`` covers every account of the
-    site, including ones made later; ``"main"`` is the account-less name ``sitex``, written
-    ``sitex:main`` once a site has other accounts; any other account covers just that one.
+    ``entries`` holds ``(site, account)``. An account of ``None`` covers every account of the site,
+    including ones made later. ``"main"`` is the account-less name ``sitex``, written ``sitex:main``
+    once a site has other accounts. Any other account covers just that one.
     """
 
     entries: tuple[tuple[str, str | None], ...]

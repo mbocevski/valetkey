@@ -41,8 +41,8 @@ def browser_running(profile: Path, lines: list[list[str]]) -> bool:
     """Tell whether ``lines`` hold a Chromium main process that uses ``profile``.
 
     The helper processes of a browser (renderers, the GPU process, the zygote) carry the same
-    profile argument and a ``--type=`` flag; only the main process has none, and it is the one
-    whose death ends the session.
+    profile argument and a ``--type=`` flag. Only the main process has none, and it is the one whose
+    death ends the session.
     """
     for arguments in lines:
         if any(a.startswith("--type=") for a in arguments):

@@ -146,13 +146,14 @@ class Registry:
     notes that a client used a site (:meth:`touch`), which keeps its session open.
 
     **Refusal cursors.** The proxy numbers the hosts it refuses, and keeps them. Each client
-    connection holds, per site, a cursor into those numbers (:attr:`Connection.cursors`): the
-    session generation it belongs to, how far it has been told of refused hosts, and how far of
-    refused background hosts. :meth:`envelope` reports what is past the cursors and moves them, so
-    each client is told about each refusal once, and one client asking uses up nothing that
-    another has yet to see. A connection with no cursor, or one for an earlier session, starts at
-    the end: it hears of what is refused from then on. :meth:`skip_refusals_so_far` moves the
-    cursors to the end without reporting, for an answer that should name only what comes next.
+    connection holds, per site, a cursor into those numbers (:attr:`Connection.cursors`), which
+    records the session generation it belongs to. It also records how far it has been told of
+    refused hosts, and how far of refused background hosts. :meth:`envelope` reports what is past
+    the cursors and moves them, so each client is told about each refusal once, and one client
+    asking uses up nothing that another has yet to see. A connection with no cursor, or one for an
+    earlier session, starts at the end: it hears of what is refused from then on.
+    :meth:`skip_refusals_so_far` moves the cursors to the end without reporting, for an answer that
+    should name only what comes next.
     """
 
     def __init__(

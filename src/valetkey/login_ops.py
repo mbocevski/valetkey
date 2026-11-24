@@ -110,10 +110,10 @@ class Logins:
     """The ``login`` and ``bridge_register`` operations, and the login windows they open.
 
     ``login_starter`` is :func:`valetkey.login.start_login`, ``display_starter`` makes the private
-    display of a login shown in a web browser (:func:`valetkey.display.start_display`),
-    ``proxy_options`` are extra keyword arguments for the login's proxy, and ``screen_finder``
-    looks for the person's screen, to know whether a login window could open before a running
-    session is closed for it.
+    display of a login shown in a web browser (:func:`valetkey.display.start_display`).
+    ``proxy_options`` are extra keyword arguments for the login's proxy. ``screen_finder`` looks for
+    the person's screen, to know whether a login window could open before a running session is
+    closed for it.
     """
 
     def __init__(  # noqa: PLR0913 - each is a seam the tests replace
@@ -250,10 +250,10 @@ class Logins:
         """Open the login window on the person's screen, or else somewhere they can reach.
 
         The order is this machine's own screen, then the laptop at the other end of a connected
-        bridge (the ``remote_logins.waypipe`` switch in the config), then a private display that
-        a web browser can view (the noVNC switch, see :mod:`valetkey.display`). With none of
-        them the login's own refusal is raised. A display is returned with the window, and it
-        ends with it; ``state.route`` says which of the three was used.
+        bridge (the ``remote_logins.waypipe`` switch in the config). Third is a private display that
+        a web browser can view (the noVNC switch, see :mod:`valetkey.display`). With none of them
+        the login's own refusal is raised. A display is returned with the window, and it ends with
+        it; ``state.route`` says which of the three was used.
         """
         options: dict[str, Any] = {
             "proxy_options": self._proxy_options,

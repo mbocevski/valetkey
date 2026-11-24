@@ -4151,7 +4151,7 @@ def test_a_shutdown_while_a_dead_session_is_being_ended_still_closes_its_proxy(
     """The poller ends a dead session; shutting down cancels it between the browser and the proxy.
 
     Without a shield the cancellation arrives while the browser is closing, the proxy is already
-    forgotten by the site and nothing closes it: its listening socket stays open until it is
+    forgotten by the site and nothing closes it. Its listening socket stays open until it is
     collected, and the ResourceWarning lands on whichever test runs then.
     """
     add_site(roots)
@@ -6311,8 +6311,8 @@ def test_a_notification_asks_about_denying_when_there_is_no_approval_command(
     assert ("seen.test" in sites.load_policy(roots, "sitex").denied) is (outcome == "yes")
 
 
-# What each kind of question is, to try the statuses of an approval command on all of them: the
-# operation, the arguments that name the host, the results of a yes and of a no, and the command
+# What each kind of question is, to try the statuses of an approval command on all of them. It is
+# the operation, the arguments that name the host, the results of a yes and of a no, and the command
 # that the person is told to run when nobody could be asked.
 KINDS = {
     "allow": ("allow_ask", {"host": "seen.test"}, ("allowed", "denied"), "valetkey allow sitex"),
