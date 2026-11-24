@@ -272,13 +272,13 @@ def test_volume_and_mute_of_the_microphone_reach_only_the_graphs_own_stream(
         wait_until(lambda: len(_blocks(server)) == 2)
         others = _other_blocks(server)
         with connect(started) as client:
-            volume = Tags().u32(0xFFFFFFFF).string("vk_mic").cvolume(2, 0)
-            assert client.command(pc.SET_SOURCE_VOLUME, volume).ok
-            mute = Tags().u32(0xFFFFFFFF).string("vk_mic").boolean(value=True)
-            assert client.command(pc.SET_SOURCE_MUTE, mute).ok
-        wait_until(lambda: "Mute: yes" in graph_stream(server))
-        # The graph's own stream on the person's server is muted and silent, as it is told ...
-        assert "Volume: front-left: 0 /" in graph_stream(server)
+            allowed = silence_microphone(client)
+        if allowed:
+            wait_until(lambda: "Mute: yes" in graph_stream(server))
+            # The graph's own stream on the person's server is muted and silent, as it is told ...
+            assert "Volume: front-left: 0 /" in graph_stream(server)
+        else:
+            assert "Mute: no" in graph_stream(server)
         # ... and nothing else of the person's audio is touched: not the microphone, not the
         # speakers, not another program's recording of the same microphone.
         assert persons_audio(server) == before
@@ -296,16 +296,14 @@ def test_a_page_that_silences_its_stream_does_not_silence_the_next_graph(
     server, started = graph
     saved = server.base / "state" / "wireplumber" / "stream-properties"
     with connect(started) as client:
-        volume = Tags().u32(0xFFFFFFFF).string("vk_mic").cvolume(2, 0)
-        assert client.command(pc.SET_SOURCE_VOLUME, volume).ok
-        mute = Tags().u32(0xFFFFFFFF).string("vk_mic").boolean(value=True)
-        assert client.command(pc.SET_SOURCE_MUTE, mute).ok
-    # The person's WirePlumber saves what a stream was set to, and restores it for the next stream
-    # that has the same application id, which is every graph's tunnel.
-    wait_until(
-        lambda: saved.exists() and '"channelVolumes":[0.000000, 0.000000]' in saved.read_text()
-    )
-    assert '"mute":true' in saved.read_text()
+        allowed = silence_microphone(client)
+    if allowed:
+        # The person's WirePlumber saves what a stream was set to, and restores it for the next
+        # stream that has the same application id, which is every graph's tunnel.
+        wait_until(
+            lambda: saved.exists() and '"channelVolumes":[0.000000, 0.000000]' in saved.read_text()
+        )
+        assert '"mute":true' in saved.read_text()
     started.close()
     second = audio.AudioGraph.start(server.base / "g", server.socket, "second")
     try:
@@ -317,6 +315,25 @@ def test_a_page_that_silences_its_stream_does_not_silence_the_next_graph(
         assert tone(record(second.socket, seconds=1.5))[0] > 0.05
     finally:
         second.close()
+
+
+def silence_microphone(client: pc.PulseClient) -> bool:
+    """Set ``vk_mic`` to silent and muted as a page could, and tell whether the server allowed it.
+
+    PipeWire 1.6.11 refuses both to the graph's restricted socket with ``ACCESS``; older ones
+    allow them. Either answer is safe, and the callers check what follows from each. Anything
+    else, or an answer that differs between the two, fails the test.
+    """
+    volume = Tags().u32(0xFFFFFFFF).string("vk_mic").cvolume(2, 0)
+    mute = Tags().u32(0xFFFFFFFF).string("vk_mic").boolean(value=True)
+    answers = [
+        client.command(pc.SET_SOURCE_VOLUME, volume),
+        client.command(pc.SET_SOURCE_MUTE, mute),
+    ]
+    if all(a.ok for a in answers):
+        return True
+    assert [a.error for a in answers] == ["ACCESS", "ACCESS"], answers
+    return False
 
 
 def graph_stream_for(server: throwaway_audio.ThrowawayAudio, tag: str) -> str:

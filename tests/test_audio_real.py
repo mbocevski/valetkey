@@ -219,10 +219,13 @@ def test_a_volume_and_mute_a_client_left_on_the_microphone_do_not_reach_the_next
 ) -> None:
     directory = server.base / "g"
     first = audio.AudioGraph.start(directory, server.socket, "first")
-    # What a page can do through the graph's socket; the tunnel passes it to the stream on the
-    # person's server, where WirePlumber saves it under the tunnel's application id.
-    assert pactl(first.socket, "set-source-volume", "vk_mic", "0%").returncode == 0
-    assert pactl(first.socket, "set-source-mute", "vk_mic", "1").returncode == 0
+    # What a page can try through the graph's socket. Where it is allowed, the tunnel passes it
+    # to the stream on the person's server, and WirePlumber saves it under the tunnel's
+    # application id. PipeWire 1.6.11 refuses both to the restricted socket, which is as safe;
+    # either way the next graph must start with no mute and at full volume.
+    for args in (("set-source-volume", "vk_mic", "0%"), ("set-source-mute", "vk_mic", "1")):
+        done = pactl(first.socket, *args)
+        assert done.returncode == 0 or "Access denied" in done.stderr, done
     first.close()
     second = audio.AudioGraph.start(directory, server.socket, "second")
     try:
